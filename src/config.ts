@@ -71,6 +71,33 @@ const schema = z
     USD_MINT: optionalPubkey,
     BTC_MINT: optionalPubkey,
 
+    /**
+     * Open question 1 (CLAUDE.md): is TileStake.stake raw USD or
+     * streak-multiplied effective stake? Strategy math must stay correct
+     * under either answer — this flag picks the interpretation. Devnet
+     * findings so far point to raw net USD; revisit after experiments.
+     */
+    STAKE_SEMANTICS: z.preprocess(
+      emptyToUndef,
+      z.enum(["raw", "effective"]).default("raw"),
+    ),
+    STRATEGY: z.preprocess(
+      emptyToUndef,
+      z.enum(["water_filling", "k_emptiest"]).default("water_filling"),
+    ),
+    /** Stake sizing multiplier applied when the strike pool is above the
+     * threshold. 1.0 = off until trigger mechanics are understood. */
+    STRIKE_SIZE_BOOST: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(1),
+    ),
+    STRIKE_BOOST_THRESHOLD_USD: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(100),
+    ),
+    /** Kill switch: if this file exists, all sending stops immediately. */
+    KILL_SWITCH_FILE: z.preprocess(emptyToUndef, z.string().default("./KILL")),
+
     FIRE_OFFSET_SLOTS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(0).default(4),
@@ -170,6 +197,11 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     dailyLossCapUsd: cfg.DAILY_LOSS_CAP_USD,
     maxUnclaimedUsdValue: cfg.MAX_UNCLAIMED_USD_VALUE,
     stalenessMs: cfg.STALENESS_MS,
+    stakeSemantics: cfg.STAKE_SEMANTICS,
+    strategy: cfg.STRATEGY,
+    strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,
+    strikeBoostThresholdUsd: cfg.STRIKE_BOOST_THRESHOLD_USD,
+    killSwitchFile: cfg.KILL_SWITCH_FILE,
     telegramToken: setOrUnset(cfg.TELEGRAM_TOKEN),
     telegramChatId: setOrUnset(cfg.TELEGRAM_CHAT_ID),
     dbPath: cfg.DB_PATH,

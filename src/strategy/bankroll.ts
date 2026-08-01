@@ -1,0 +1,148 @@
+/**
+ * Bankroll discipline — the load-bearing risk limits (CLAUDE.md ground
+ * rules). Everything here is enforced in the execution path via
+ * authorize(): ladder quantization, MAX_PER_ROUND, DAILY_LOSS_CAP (from
+ * state/pnl, injected), a one-deployment-per-round idempotency latch, and
+ * the kill switch (in-memory trip OR presence of KILL_SWITCH_FILE),
+ * re-checked immediately before any send. Block reasons are explicit for
+ * logging/alerting.
+ */
+import { existsSync } from "node:fs";
+
+export type BlockReason =
+  | "kill_switch_engaged"
+  | "already_deployed_this_round"
+  | "amount_not_positive"
+  | "below_min_deploy"
+  | "daily_loss_cap_reached";
+
+export type Authorization =
+  | { ok: true; amountGross: bigint }
+  | { ok: false; reason: BlockReason; detail?: string | undefined };
+
+export interface BankrollConfig {
+  /** Stake ladder (base units). The smallest entry is the quantization unit. */
+  ladder: bigint[];
+  maxPerRound: bigint;
+  dailyLossCap: bigint;
+  /** On-chain SatrushConfig.min_deploy_usd_amount (base units). */
+  minDeploy: bigint;
+  /** Kill switch file path; existence halts sending. */
+  killSwitchFile?: string | undefined;
+}
+
+export interface BankrollDeps {
+  /** Realized loss so far today (base units, ≥ 0) — wired to state/pnl. */
+  realizedLossToday: () => bigint;
+}
+
+export class Bankroll {
+  private readonly quantum: bigint;
+  private readonly deployedRounds = new Set<number>();
+  private tripped: string | null = null;
+
+  constructor(
+    private readonly cfg: BankrollConfig,
+    private readonly deps: BankrollDeps,
+  ) {
+    if (cfg.ladder.length === 0 || cfg.ladder.some((l) => l <= 0n)) {
+      throw new RangeError("ladder must be non-empty positive amounts");
+    }
+    if (cfg.maxPerRound <= 0n) throw new RangeError("maxPerRound must be positive");
+    if (cfg.dailyLossCap <= 0n) throw new RangeError("dailyLossCap must be positive");
+    this.quantum = cfg.ladder.reduce((a, b) => (b < a ? b : a));
+  }
+
+  /** Floor to a ladder-quantum multiple, clamped to MAX_PER_ROUND. */
+  quantize(amountGross: bigint): bigint {
+    if (amountGross <= 0n) return 0n;
+    const clamped = amountGross > this.cfg.maxPerRound ? this.cfg.maxPerRound : amountGross;
+    return (clamped / this.quantum) * this.quantum;
+  }
+
+  /** Trip the kill switch programmatically (e.g. on HaltError). One-way. */
+  tripKillSwitch(reason: string): void {
+    this.tripped = reason;
+  }
+
+  /** True if tripped in-memory or the kill file exists. Check before EVERY send. */
+  killSwitchEngaged(): boolean {
+    if (this.tripped !== null) return true;
+    const file = this.cfg.killSwitchFile;
+    return file !== undefined && file !== "" && existsSync(file);
+  }
+
+  killSwitchReason(): string | null {
+    if (this.tripped) return this.tripped;
+    if (this.killSwitchEngaged()) return `kill file present: ${this.cfg.killSwitchFile}`;
+    return null;
+  }
+
+  /**
+   * Gate a prospective deployment. Returns the quantized amount or an
+   * explicit block reason. Does NOT latch — call commit(roundId) at send
+   * time so a pre-send failure can retry.
+   */
+  authorize(roundId: number, amountGross: bigint): Authorization {
+    if (this.killSwitchEngaged()) {
+      return {
+        ok: false,
+        reason: "kill_switch_engaged",
+        detail: this.killSwitchReason() ?? undefined,
+      };
+    }
+    if (this.deployedRounds.has(roundId)) {
+      return { ok: false, reason: "already_deployed_this_round" };
+    }
+    const amount = this.quantize(amountGross);
+    if (amount <= 0n) {
+      return { ok: false, reason: "amount_not_positive", detail: `raw=${amountGross}` };
+    }
+    if (amount < this.cfg.minDeploy) {
+      return {
+        ok: false,
+        reason: "below_min_deploy",
+        detail: `${amount} < ${this.cfg.minDeploy}`,
+      };
+    }
+    const lossToday = this.deps.realizedLossToday();
+    // Conservative: treat the full stake as potential loss.
+    if (lossToday + amount > this.cfg.dailyLossCap) {
+      return {
+        ok: false,
+        reason: "daily_loss_cap_reached",
+        detail: `loss=${lossToday} + stake=${amount} > cap=${this.cfg.dailyLossCap}`,
+      };
+    }
+    return { ok: true, amountGross: amount };
+  }
+
+  /** Latch the round IMMEDIATELY before sending (idempotency). */
+  commit(roundId: number): void {
+    this.deployedRounds.add(roundId);
+  }
+
+  /** Release a latch when the tx verifiably never reached the chain. */
+  release(roundId: number): void {
+    this.deployedRounds.delete(roundId);
+  }
+
+  hasDeployed(roundId: number): boolean {
+    return this.deployedRounds.has(roundId);
+  }
+}
+
+/**
+ * Strike conditioning hook: scale stake when the strike pool exceeds the
+ * threshold. boost=1.0 disables (default until trigger mechanics are
+ * understood — see CLAUDE.md open questions).
+ */
+export function strikeSizeMultiplier(
+  strikePoolUsd: bigint,
+  opts: { thresholdBaseUnits: bigint; boost: number },
+): number {
+  if (!Number.isFinite(opts.boost) || opts.boost <= 0) {
+    throw new RangeError(`invalid strike boost: ${opts.boost}`);
+  }
+  return strikePoolUsd > opts.thresholdBaseUnits ? opts.boost : 1;
+}
