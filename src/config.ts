@@ -94,6 +94,11 @@ const schema = z
       z.coerce.number().finite().positive().default(50),
     ),
 
+    STALENESS_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(1500),
+    ),
+
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,
     DB_PATH: z.preprocess(emptyToUndef, z.string().default("./data/satrush.db")),
@@ -164,6 +169,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     maxPerRoundUsd: cfg.MAX_PER_ROUND_USD,
     dailyLossCapUsd: cfg.DAILY_LOSS_CAP_USD,
     maxUnclaimedUsdValue: cfg.MAX_UNCLAIMED_USD_VALUE,
+    stalenessMs: cfg.STALENESS_MS,
     telegramToken: setOrUnset(cfg.TELEGRAM_TOKEN),
     telegramChatId: setOrUnset(cfg.TELEGRAM_CHAT_ID),
     dbPath: cfg.DB_PATH,

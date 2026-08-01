@@ -1,0 +1,214 @@
+/**
+ * In-memory GameState assembled from the streams. Occupancy is modeled as
+ * partial-observable from day one (CLAUDE.md roadmap): visibleStakes come
+ * from the round account, hiddenPoolEstimate stays 0 in the public-only era.
+ */
+import type { Connection } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
+import type {
+  Board,
+  Miner,
+  Round,
+  SatrushConfig,
+  SatsVault,
+} from "../adapter/idl.js";
+import { PROGRAM_ID } from "../adapter/idl.js";
+import {
+  boardPda,
+  minerPda,
+  roundPda,
+  satrushConfigPda,
+  satsVaultPda,
+} from "../adapter/pdas.js";
+import {
+  HaltError,
+  RoundMonotonicityGuard,
+  TILES_COUNT,
+  classifyAccount,
+  decodeAccountOrHalt,
+  decodeRoundStrict,
+} from "./decode.js";
+
+const toBig = (bn: { toString(): string }) => BigInt(bn.toString());
+
+export type AppliedKind =
+  | "Board"
+  | "Round"
+  | "Miner"
+  | "SatsVault"
+  | "SatrushConfig";
+
+export interface AppliedAccount {
+  kind: AppliedKind;
+  roundId?: number;
+}
+
+export class GameState {
+  board: Board | null = null;
+  satrushConfig: SatrushConfig | null = null;
+  satsVault: SatsVault | null = null;
+  miner: Miner | null = null;
+  currentSlot = 0;
+  /** 0 for now — becomes a live estimate in the private-deployment era. */
+  hiddenPoolEstimate = 0n;
+
+  private readonly rounds = new Map<number, Round>();
+  private readonly guard = new RoundMonotonicityGuard();
+
+  constructor(
+    /** Only this wallet's Miner PDA may populate `miner`. */
+    private readonly minerAddress: PublicKey | null = null,
+  ) {}
+
+  applySlot(slot: number): void {
+    if (slot > this.currentSlot) this.currentSlot = slot;
+  }
+
+  /**
+   * Route a raw account update by discriminator, decode strictly, store.
+   * Returns what was applied, or null for account types we don't track.
+   * Throws HaltError on any integrity violation.
+   */
+  applyAccount(pubkey: PublicKey, data: Buffer): AppliedAccount | null {
+    switch (classifyAccount(data)) {
+      case "Board":
+        this.board = decodeAccountOrHalt<Board>("Board", data);
+        return { kind: "Board" };
+      case "Round": {
+        const round = decodeRoundStrict(data);
+        this.guard.check(round);
+        this.rounds.set(round.id, round);
+        this.pruneRounds();
+        return { kind: "Round", roundId: round.id };
+      }
+      case "Miner": {
+        if (this.minerAddress && !pubkey.equals(this.minerAddress)) return null;
+        this.miner = decodeAccountOrHalt<Miner>("Miner", data);
+        return { kind: "Miner" };
+      }
+      case "SatsVault":
+        this.satsVault = decodeAccountOrHalt<SatsVault>("SatsVault", data);
+        return { kind: "SatsVault" };
+      case "SatrushConfig":
+        this.satrushConfig = decodeAccountOrHalt<SatrushConfig>("SatrushConfig", data);
+        return { kind: "SatrushConfig" };
+      default:
+        return null;
+    }
+  }
+
+  /** The round the board points at (rotation-safe: keyed by board.round_id). */
+  currentRound(): Round | null {
+    if (!this.board) return null;
+    return this.rounds.get(this.board.round_id) ?? null;
+  }
+
+  round(id: number): Round | null {
+    return this.rounds.get(id) ?? null;
+  }
+
+  /** Per-tile visible stakes (base units) for the current round; zeros if unknown. */
+  visibleStakes(): bigint[] {
+    const round = this.currentRound();
+    if (!round) return new Array<bigint>(TILES_COUNT).fill(0n);
+    return round.public_tile_stakes.map((t) => toBig(t.stake));
+  }
+
+  /**
+   * Slots until the deploy cutoff (board.end_slot); negative once past it.
+   * Null when unknown OR when the round clock is disarmed: on devnet an idle
+   * round carries start/end_slot = u64::MAX until the first deploy arms it.
+   */
+  slotsToCutoff(): number | null {
+    if (!this.board || this.currentSlot === 0) return null;
+    const end = BigInt(this.board.end_slot.toString());
+    if (end === 0xffff_ffff_ffff_ffffn) return null;
+    return Number(end) - this.currentSlot;
+  }
+
+  /**
+   * The k emptiest tiles of the current round, by (stake, deploy_count, index)
+   * ascending — ties resolve to the lowest tile index.
+   */
+  emptiestTiles(k = 3): number[] {
+    const round = this.currentRound();
+    const stakes = this.visibleStakes();
+    const counts = round
+      ? round.public_tile_stakes.map((t) => t.deploy_count)
+      : new Array<number>(TILES_COUNT).fill(0);
+    return [...Array(TILES_COUNT).keys()]
+      .sort((a, b) => {
+        const sa = stakes[a] ?? 0n;
+        const sb = stakes[b] ?? 0n;
+        if (sa !== sb) return sa < sb ? -1 : 1;
+        const ca = counts[a] ?? 0;
+        const cb = counts[b] ?? 0;
+        if (ca !== cb) return ca - cb;
+        return a - b;
+      })
+      .slice(0, Math.max(0, Math.min(k, TILES_COUNT)));
+  }
+
+  /** Strike jackpot USD side: swapped + pending amounts (base units). */
+  strikePoolUsd(): bigint {
+    if (!this.board) return 0n;
+    return toBig(this.board.strike_usd_amount) + toBig(this.board.strike_pending_usd_amount);
+  }
+
+  private pruneRounds(): void {
+    const currentId = this.board?.round_id ?? Math.max(...this.rounds.keys());
+    for (const id of this.rounds.keys()) {
+      if (id < currentId - 4) this.rounds.delete(id);
+    }
+  }
+}
+
+export interface BootstrapOptions {
+  minerAuthority?: PublicKey | undefined;
+  programId?: PublicKey | undefined;
+}
+
+/**
+ * One-time HTTP RPC bootstrap: satrush config, board, current round, sats
+ * vault, and (if an authority is known) this wallet's miner. Everything is
+ * kept fresh by the streams afterwards.
+ */
+export async function bootstrapGameState(
+  connection: Connection,
+  opts: BootstrapOptions = {},
+): Promise<GameState> {
+  const programId = opts.programId ?? PROGRAM_ID;
+  const minerAddress = opts.minerAuthority
+    ? minerPda(opts.minerAuthority, programId)
+    : null;
+  const state = new GameState(minerAddress);
+
+  const staticKeys = [
+    satrushConfigPda(programId),
+    boardPda(programId),
+    satsVaultPda(programId),
+    ...(minerAddress ? [minerAddress] : []),
+  ];
+  const infos = await connection.getMultipleAccountsInfo(staticKeys, "processed");
+
+  const configInfo = infos[0];
+  const boardInfo = infos[1];
+  if (!configInfo) throw new HaltError("satrush_config account not found on chain");
+  if (!boardInfo) throw new HaltError("board account not found on chain");
+  state.applyAccount(staticKeys[0] as PublicKey, configInfo.data);
+  state.applyAccount(staticKeys[1] as PublicKey, boardInfo.data);
+  const vaultInfo = infos[2];
+  if (vaultInfo) state.applyAccount(staticKeys[2] as PublicKey, vaultInfo.data);
+  const minerInfo = infos[3];
+  if (minerAddress && minerInfo) state.applyAccount(minerAddress, minerInfo.data);
+
+  state.applySlot(await connection.getSlot("processed"));
+
+  const roundId = state.board?.round_id;
+  if (roundId !== undefined) {
+    const roundAddress = roundPda(roundId, programId);
+    const roundInfo = await connection.getAccountInfo(roundAddress, "processed");
+    if (roundInfo) state.applyAccount(roundAddress, roundInfo.data);
+  }
+  return state;
+}

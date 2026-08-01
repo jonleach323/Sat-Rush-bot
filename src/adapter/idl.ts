@@ -6,15 +6,18 @@
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import {
-  BN,
-  BorshAccountsCoder,
-  BorshCoder,
-  BorshEventCoder,
-  BorshInstructionCoder,
-  type Idl,
-} from "@coral-xyz/anchor";
+import * as anchorNs from "@coral-xyz/anchor";
+import type { BN as BNType, Idl } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
+
+// Anchor is a CJS package whose named exports Node's ESM lexer only partially
+// detects (BN in particular is missed). Import the namespace and normalize
+// the interop shape once; consumers import anchor values from THIS module.
+const anchor = ((anchorNs as { default?: unknown }).default ??
+  anchorNs) as typeof anchorNs;
+
+export const BN = anchor.BN;
+export type BN = BNType;
 
 // ── raw IDL structural types (only the parts we read directly) ──────────────
 
@@ -58,10 +61,10 @@ export const PROGRAM_ID = new PublicKey(raw.address);
 
 // ── coders ───────────────────────────────────────────────────────────────────
 
-export const coder = new BorshCoder(SATRUSH_IDL);
-export const accountsCoder = new BorshAccountsCoder(SATRUSH_IDL);
-export const instructionCoder = new BorshInstructionCoder(SATRUSH_IDL);
-export const eventCoder = new BorshEventCoder(SATRUSH_IDL);
+export const coder = new anchor.BorshCoder(SATRUSH_IDL);
+export const accountsCoder = new anchor.BorshAccountsCoder(SATRUSH_IDL);
+export const instructionCoder = new anchor.BorshInstructionCoder(SATRUSH_IDL);
+export const eventCoder = new anchor.BorshEventCoder(SATRUSH_IDL);
 
 // ── discriminators (read from the IDL, keyed by IDL name) ───────────────────
 
@@ -73,6 +76,13 @@ function discriminatorMap(entries: { name: string; discriminator: number[] }[]) 
 
 export const ACCOUNT_DISCRIMINATORS = discriminatorMap(raw.accounts);
 export const EVENT_DISCRIMINATORS = discriminatorMap(raw.events);
+
+/** Discriminator for a named account; throws if the IDL doesn't define it. */
+export function accountDiscriminator(name: string): Uint8Array {
+  const disc = ACCOUNT_DISCRIMINATORS[name];
+  if (!disc) throw new Error(`no discriminator for account "${name}" in IDL`);
+  return disc;
+}
 
 /** Decode an account buffer (discriminator-checked) into its typed shape. */
 export function decodeAccount<T>(accountName: string, data: Buffer): T {
@@ -105,20 +115,21 @@ function* walkAccounts(
 }
 
 // ── decoded account shapes ───────────────────────────────────────────────────
-// Field names match the IDL verbatim (snake_case): the coders above are built
-// from the raw IDL, so decoded objects carry these exact keys. u64 → BN,
-// u32/u16/u8 → number, pubkey → PublicKey, option<T> → T | null.
+// Field and enum-variant names match the IDL verbatim (snake_case fields,
+// PascalCase variants): the coders above are built from the raw IDL, so
+// decoded objects carry these exact keys (verified by round-trip test).
+// u64 → BN, u32/u16/u8 → number, pubkey → PublicKey, option<T> → T | null.
 
 export type RoundState =
-  | { active: Record<string, never> }
-  | { revealed: Record<string, never> }
-  | { settled: Record<string, never> }
-  | { finished: Record<string, never> };
+  | { Active: Record<string, never> }
+  | { Revealed: Record<string, never> }
+  | { Settled: Record<string, never> }
+  | { Finished: Record<string, never> };
 
 export type AutomationStrategy =
-  | { static: Record<string, never> }
-  | { random: Record<string, never> }
-  | { discretionary: Record<string, never> };
+  | { Static: Record<string, never> }
+  | { Random: Record<string, never> }
+  | { Discretionary: Record<string, never> };
 
 export interface TileStake {
   stake: BN;
