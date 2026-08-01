@@ -1,0 +1,20 @@
+# secrets & keys
+.env
+.env.*
+!.env.example
+keypairs/
+
+# databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# node
+node_modules/
+dist/
+
+# misc
+*.log
+.DS_Store
