@@ -18,13 +18,32 @@ export interface WsRpcIngestOptions {
   stalenessMs: number;
 }
 
+const SIGNATURE_POLL_MS = 2500;
+const MAX_SEEN_SIGNATURES = 512;
+
 export class WsRpcIngest extends IngestSource {
   private connection: Connection | null = null;
   private subscriptionIds: { kind: "slot" | "program" | "account" | "logs"; id: number }[] =
     [];
+  private pollTimer: NodeJS.Timeout | null = null;
+  private newestPolledSig: string | null = null;
+  private readonly seenSigs = new Set<string>();
+  private readonly seenSigOrder: string[] = [];
 
   constructor(private readonly opts: WsRpcIngestOptions) {
     super(opts.stalenessMs);
+  }
+
+  /** True the first time a signature is seen (dedupe across logs + polling). */
+  private firstSighting(signature: string): boolean {
+    if (this.seenSigs.has(signature)) return false;
+    this.seenSigs.add(signature);
+    this.seenSigOrder.push(signature);
+    while (this.seenSigOrder.length > MAX_SEEN_SIGNATURES) {
+      const evicted = this.seenSigOrder.shift();
+      if (evicted) this.seenSigs.delete(evicted);
+    }
+    return true;
   }
 
   async start(): Promise<void> {
@@ -92,6 +111,7 @@ export class WsRpcIngest extends IngestSource {
       id: conn.onLogs(
         this.opts.programId,
         (logs, ctx) => {
+          if (!this.firstSighting(logs.signature)) return;
           this.markSeen("transactions");
           void this.emitWithInnerIx(conn, {
             signature: logs.signature,
@@ -104,7 +124,39 @@ export class WsRpcIngest extends IngestSource {
       ),
     });
 
+    // logsSubscribe is unreliable on public RPC endpoints (observed never
+    // firing on api.devnet.solana.com) — poll signatures as the workhorse
+    // path; the subscription above is a low-latency bonus when it works.
+    // The first poll only seeds the cursor so history isn't replayed.
+    this.pollTimer = setInterval(() => void this.pollSignatures(conn), SIGNATURE_POLL_MS);
+
     this.emit("status", { connected: true, detail: "ws-rpc fallback" });
+  }
+
+  private async pollSignatures(conn: Connection): Promise<void> {
+    try {
+      const seeding = this.newestPolledSig === null;
+      const sigs = await conn.getSignaturesForAddress(
+        this.opts.programId,
+        { limit: 25, ...(this.newestPolledSig ? { until: this.newestPolledSig } : {}) },
+        "confirmed",
+      );
+      if (sigs.length === 0) return;
+      this.newestPolledSig = sigs[0]!.signature;
+      if (seeding) return;
+      for (const info of [...sigs].reverse()) {
+        if (!this.firstSighting(info.signature)) continue;
+        this.markSeen("transactions");
+        await this.emitWithInnerIx(conn, {
+          signature: info.signature,
+          slot: info.slot,
+          logs: [],
+          failed: info.err !== null,
+        });
+      }
+    } catch {
+      /* transient RPC failure — next tick retries */
+    }
   }
 
   /**
@@ -118,6 +170,7 @@ export class WsRpcIngest extends IngestSource {
     update: { signature: string; slot: number; logs: string[]; failed: boolean },
   ): Promise<void> {
     let innerIxDatas: Uint8Array[] | undefined;
+    let logs = update.logs;
     for (let attempt = 0; attempt < 6 && !innerIxDatas; attempt++) {
       await new Promise((r) => setTimeout(r, attempt === 0 ? 400 : 700));
       try {
@@ -129,15 +182,20 @@ export class WsRpcIngest extends IngestSource {
           innerIxDatas = (tx.meta.innerInstructions ?? []).flatMap((group) =>
             group.instructions.map((ix) => Uint8Array.from(bs58.decode(ix.data))),
           );
+          if (logs.length === 0) logs = tx.meta.logMessages ?? [];
         }
       } catch {
         /* transient RPC failure — retry */
       }
     }
-    this.emit("txLogs", { ...update, innerIxDatas });
+    this.emit("txLogs", { ...update, logs, innerIxDatas });
   }
 
   async stop(): Promise<void> {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     const conn = this.connection;
     if (!conn) return;
     await Promise.allSettled(
