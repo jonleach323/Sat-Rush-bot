@@ -33,6 +33,15 @@ export interface OccupancyPrediction {
 
 export type OccupancyPredictor = (inputs: PredictInputs) => OccupancyPrediction;
 
+/**
+ * Extrapolation guards. A fill rate inferred from 1-2 slots is noise (a
+ * single early deploy once implied a 50× pot), and with the per-round cap
+ * set equal to the daily cap, phantom predicted EV is the main oversizing
+ * risk — the EV stop is only as good as these stakes.
+ */
+export const MIN_ELAPSED_FOR_EXTRAPOLATION = 5;
+export const MAX_EXTRAPOLATION_RATIO = 5;
+
 export const predictFinalOccupancy: OccupancyPredictor = (inputs) => {
   const { visibleStakes, hiddenPoolEstimate } = inputs;
   if (visibleStakes.length !== TILES_COUNT) {
@@ -46,12 +55,15 @@ export const predictFinalOccupancy: OccupancyPredictor = (inputs) => {
   }
   const hiddenPerTile = hiddenPoolEstimate / BigInt(TILES_COUNT);
 
+  const ratio =
+    elapsed >= MIN_ELAPSED_FOR_EXTRAPOLATION && remaining > 0
+      ? Math.min(remaining / elapsed, MAX_EXTRAPOLATION_RATIO)
+      : 0;
   const stakes = visibleStakes.map((visible, i) => {
-    // Linear fill-rate extrapolation; no rate is observable at elapsed 0.
+    // Linear fill-rate extrapolation, guarded: no rate from a too-short
+    // observation window, and never more than MAX_EXTRAPOLATION_RATIO×.
     const extrapolated =
-      elapsed > 0 && remaining > 0
-        ? (visible * BigInt(Math.round((remaining / elapsed) * 1e6))) / 1_000_000n
-        : 0n;
+      ratio > 0 ? (visible * BigInt(Math.round(ratio * 1e6))) / 1_000_000n : 0n;
     return visible + extrapolated + hiddenPerTile + (inflow?.[i] ?? 0n);
   });
   return { stakes };

@@ -36,7 +36,7 @@ this honest:
 
 | knob | launch value | rationale |
 |---|---|---|
-| MAX_PER_ROUND_USD | $500 (10% of float) | high enough that the EV stop binds first on any realistic early-mainnet board; a per-round ruin bound, not a strategy limit |
+| MAX_PER_ROUND_USD | $1,000 (= DAILY_LOSS_CAP) | NO independent per-round throttle: the bot sizes purely by marginal EV. bankroll.authorize() already bounds every fire by the day's remaining loss budget, so this knob is set equal to the daily cap and only that cap binds. Sizing accuracy is protected by the predictor's extrapolation guards (min 5 slots observed, ratio ≤ 5×) — the EV stop is only as good as the predicted stakes. |
 | DAILY_LOSS_CAP_USD | $1,000 (20% of float) | ruin protection ONLY — a broken model needs 5 consecutive worst-case days to zero the float, leaving time to react. Ruin ends extraction; this cap protects the extracting. |
 | STAKE_LADDER_USD | 1 | $1 quantum keeps allocation granular |
 | STRATEGY | water_filling | — (k_emptiest fallback never runs unattended: it deploys regardless of EV) |

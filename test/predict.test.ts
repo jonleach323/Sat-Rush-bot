@@ -31,6 +31,32 @@ describe("predictFinalOccupancy v1", () => {
     }
   });
 
+  it("guards against phantom pots: no rate from a too-short window", () => {
+    // The documented overshoot case: $0.92 observed at elapsed 1 once
+    // implied a ~50× pot. Below MIN_ELAPSED_FOR_EXTRAPOLATION → no rate.
+    const visible = zeroStakes();
+    visible[3] = usdToBase(0.92);
+    const { stakes } = predictFinalOccupancy({
+      visibleStakes: visible,
+      hiddenPoolEstimate: 0n,
+      elapsedSlots: 1,
+      remainingSlots: 49,
+    });
+    expect(stakes[3]).toBe(usdToBase(0.92));
+  });
+
+  it("clamps the extrapolation ratio", () => {
+    const visible = zeroStakes();
+    visible[3] = usdToBase(1);
+    const { stakes } = predictFinalOccupancy({
+      visibleStakes: visible,
+      hiddenPoolEstimate: 0n,
+      elapsedSlots: 5,
+      remainingSlots: 45, // raw ratio 9 → clamped to 5 → 1 + 5 = $6
+    });
+    expect(stakes[3]).toBe(usdToBase(6));
+  });
+
   it("spreads the hidden pool estimate uniformly", () => {
     const { stakes } = predictFinalOccupancy({
       visibleStakes: zeroStakes(),
