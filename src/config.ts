@@ -30,6 +30,15 @@ const optionalString = z.preprocess(emptyToUndef, z.string().optional());
 const optionalUrl = z.preprocess(emptyToUndef, z.string().url().optional());
 const optionalPubkey = z.preprocess(emptyToUndef, pubkeyString.optional());
 
+const boolFromEnv = (defaultValue: boolean) =>
+  z.preprocess((v) => {
+    const s = emptyToUndef(v);
+    if (s === undefined) return undefined;
+    if (s === "true" || s === "1" || s === "yes") return true;
+    if (s === "false" || s === "0" || s === "no") return false;
+    return s;
+  }, z.boolean().default(defaultValue));
+
 const commaListOfUrls = z.preprocess(
   (v) =>
     typeof v === "string"
@@ -144,6 +153,21 @@ const schema = z
       z.coerce.number().int().positive().default(1500),
     ),
 
+    /** Self-settle our deployments after reveal (rent refund to the cranker). */
+    SELF_SETTLE: boolFromEnv(true),
+    /** Sweep gate — off until claim-fee vs hashrate tradeoffs are measured. */
+    SWEEP_ENABLED: boolFromEnv(false),
+    /** Fraction of unclaimed shares claimed per sweep. */
+    CLAIM_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(1).default(0.5),
+    ),
+    /** BTC/USD estimate for valuing unclaimed shares (until a price feed). */
+    BTC_USD_ESTIMATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(100_000),
+    ),
+
     /** Alert when the wallet drops below this many SOL. */
     SOL_FLOOR_SOL: z.preprocess(
       emptyToUndef,
@@ -237,6 +261,9 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,
     strikeBoostThresholdUsd: cfg.STRIKE_BOOST_THRESHOLD_USD,
     killSwitchFile: cfg.KILL_SWITCH_FILE,
+    selfSettle: cfg.SELF_SETTLE,
+    sweepEnabled: cfg.SWEEP_ENABLED,
+    claimFraction: cfg.CLAIM_FRACTION,
     solFloorSol: cfg.SOL_FLOOR_SOL,
     telegramToken: setOrUnset(cfg.TELEGRAM_TOKEN),
     telegramChatId: setOrUnset(cfg.TELEGRAM_CHAT_ID),

@@ -78,6 +78,11 @@ export class YellowstoneIngest extends IngestSource {
     await this.runLoop?.catch(() => undefined);
   }
 
+  /** Chaos hook: destroy the stream; the reconnect loop takes over. */
+  simulateDisconnect(): void {
+    this.stream?.destroy(new Error("chaos: forced disconnect"));
+  }
+
   private buildRequest(): SubscribeRequest {
     const program = this.opts.programId.toBase58();
     return {
