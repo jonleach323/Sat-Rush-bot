@@ -53,6 +53,29 @@ Standing rules:
   doesn't clear it, more capital multiplies losses — drain per §3 instead.
 - Weekly: claim + sweep everything above $5,000 (wallet + unclaimed) to cold.
 
+## 0b. Canary — the first 50 mainnet rounds (MANDATORY before scaling)
+
+The first 50 live rounds run as a canary at the tightest settings, to catch
+any surviving model/parse bug on small money before it can compound (see
+AUDIT.md R1/R2):
+
+- `MAX_PER_ROUND_USD=1`, `STAKE_LADDER_USD=1`, `DAILY_LOSS_CAP_USD=10`
+  (minimum ladder — NOT the $1,000 max-extraction values; raise only after
+  the canary passes).
+- `RECONCILE_TOLERANCE=0.10` (tightest that doesn't false-trip on the coarse
+  USD/BTC magnitude check; the exact direction checks are always on).
+- `WALLET_DRIFT_TOLERANCE_USD=2`.
+- Watch every settlement: `/status`, `/me`, and the reconcile line in the
+  logs. The reconcile tripwire and the pre-send invariant BOTH write the KILL
+  file on any violation — a halted canary means "do not scale, investigate."
+- Pass criteria before raising caps: 50 rounds settled, zero tripwire halts,
+  and `ev_expected` vs realized (SQL: `SELECT round_id, ev_expected FROM
+  my_deploys; SELECT round_id, won_usd FROM settlements`) directionally
+  consistent. Only then move to the §0 max-extraction values, one step at a time.
+
+If the KILL file appears during the canary: read the alert/log reason, fix or
+explain it, `rm KILL`, and restart the canary from round 1 of a fresh 50.
+
 ## 1. Launch morning sequence
 
 1. **Flip endpoints.** `.env`: `RPC_HTTP_URL` + `SECONDARY_RPC_URLS` to the

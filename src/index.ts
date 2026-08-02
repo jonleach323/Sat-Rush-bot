@@ -27,7 +27,10 @@ import { CandidateSet } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
+import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
+import { reconcileRoundOutcome, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
 import { bootstrapGameState, type GameState } from "./ingest/snapshot.js";
@@ -67,6 +70,8 @@ export class Orchestrator {
   private wasStale = false;
   private settleFired = new Set<number>();
   private sweepInFlight = false;
+  private usdcBaselineBase: bigint | null = null;
+  private walletDriftTimer: NodeJS.Timeout | null = null;
   private readonly roundWindows = new Map<number, { start: number; end: number }>();
 
   private readonly log = logger;
@@ -170,6 +175,16 @@ export class Orchestrator {
       { realizedLossToday: () => pnl.realizedLossToday() },
     );
 
+    // Restart recovery: re-arm the one-deploy latch for every round already
+    // recorded, so a mid-round restart cannot attempt a duplicate deploy
+    // (deploy_public is one-shot per round; a re-fire would waste a fee and
+    // corrupt accounting). The in-memory latch is otherwise empty on boot.
+    for (const r of db.query<{ round_id: number }>(
+      "SELECT DISTINCT round_id FROM my_deploys WHERE status IN ('fired','landed')",
+    )) {
+      bankroll.commit(r.round_id);
+    }
+
     const feeEstimator = new FeeEstimator({
       minMicroLamports: cfg.PRIORITY_FEE_MIN_MICROLAMPORTS,
       maxMicroLamports: cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
@@ -237,6 +252,41 @@ export class Orchestrator {
   alert(message: string): void {
     this.log.warn({ alert: true }, message);
     void this.telegram?.alert(message);
+  }
+
+  /**
+   * Engage the kill switch for an INTEGRITY violation (invariant, reconcile
+   * tripwire, HaltError, unhandled error). Trips the in-memory switch AND
+   * writes the KILL file so the halt SURVIVES a systemd restart — an
+   * in-memory trip alone would be cleared by Restart=always and the bot
+   * would resume into a known-bad state. Requires a human to clear.
+   */
+  engageKillSwitch(reason: string): void {
+    this.bankroll.tripKillSwitch(reason);
+    try {
+      writeFileSync(this.cfg.KILL_SWITCH_FILE, `halted: ${reason}\n`, { flag: "a" });
+    } catch (err) {
+      this.log.error({ err: String(err) }, "failed to persist KILL file");
+    }
+    this.alert(`⛔ HALTED — ${reason} (KILL file written; clear it to resume)`);
+  }
+
+  /** Last-resort error boundary target: halt safe on any unhandled failure. */
+  haltFromError(err: unknown, origin: string): void {
+    const msg = err instanceof HaltError ? err.message : String(err);
+    this.log.fatal({ origin, err: msg }, "unhandled failure — halting");
+    this.engageKillSwitch(`${origin}: ${msg}`);
+  }
+
+  /** Effective per-round cap (strike-boost aware) — the SAME value fed to the
+   * selector, so the pre-send invariant can never disagree with what was
+   * selected (closes the strike-boost cap divergence, AUDIT F1). */
+  private effectiveMaxPerRoundBase(): bigint {
+    const boost = strikeSizeMultiplier(this.state.strikePoolUsd(), {
+      thresholdBaseUnits: usdToBase(this.cfg.STRIKE_BOOST_THRESHOLD_USD),
+      boost: this.cfg.STRIKE_SIZE_BOOST,
+    });
+    return (usdToBase(this.cfg.MAX_PER_ROUND_USD) * BigInt(Math.round(boost * 100))) / 100n;
   }
 
   private attachTelegram(): void {
@@ -415,12 +465,7 @@ export class Orchestrator {
   }
 
   private selectorConfig(): SelectorConfig {
-    const boost = strikeSizeMultiplier(this.state.strikePoolUsd(), {
-      thresholdBaseUnits: usdToBase(this.cfg.STRIKE_BOOST_THRESHOLD_USD),
-      boost: this.cfg.STRIKE_SIZE_BOOST,
-    });
-    const maxPerRound =
-      (usdToBase(this.cfg.MAX_PER_ROUND_USD) * BigInt(Math.round(boost * 100))) / 100n;
+    const maxPerRound = this.effectiveMaxPerRoundBase();
     return {
       strategy: this.cfg.STRATEGY,
       ladder: this.cfg.STAKE_LADDER_USD.map(usdToBase),
@@ -479,7 +524,11 @@ export class Orchestrator {
       this.skipOnce("no_candidate", { note: "selector found no deployable allocation" });
       return;
     }
-    const auth = this.bankroll.authorize(this.roundId, candidate.selection.totalGross);
+    const auth = this.bankroll.authorize(
+      this.roundId,
+      candidate.selection.totalGross,
+      this.effectiveMaxPerRoundBase(),
+    );
     if (!auth.ok) {
       this.skipOnce(auth.reason, { detail: auth.detail });
       if (auth.reason === "daily_loss_cap_reached") {
@@ -489,8 +538,52 @@ export class Orchestrator {
     }
 
     this.fireInFlight = true;
-    this.bankroll.commit(this.roundId); // latch BEFORE send
+    // Atomic check-and-set latch — first caller in the round only (defends
+    // double-fire independent of the synchronous prefix).
+    if (!this.bankroll.tryCommit(this.roundId)) {
+      this.skipOnce("already_latched", {});
+      return;
+    }
     const { selection } = candidate;
+
+    // ── PRE-SEND INVARIANT CHOKEPOINT — last line before the wire ─────────────
+    // Re-verifies the ACTUAL amount/mask/fee/tip about to be signed against
+    // the SAME limits, on the actual value (not a separately-clamped copy).
+    // Any violation throws HaltError → we HALT and do NOT send. This is what
+    // catches the strike-boost cap divergence (auth.amountGross != sent amount).
+    try {
+      assertDeployInvariants({
+        roundId: this.roundId,
+        amountBaseUnits: selection.totalGross,
+        mask: selection.mask,
+        quantumBase: this.bankroll.quantumBase,
+        minDeployBase: this.bankroll.minDeployBase,
+        maxPerRoundBase: this.effectiveMaxPerRoundBase(),
+        dailyLossCapBase: this.bankroll.dailyLossCapBase,
+        realizedLossTodayBase: this.bankroll.realizedLossToday(),
+        priorityFeeMicroLamports: candidate.feeMicroLamports,
+        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+        tipLamports:
+          this.cfg.JITO_BLOCK_ENGINE_URL && this.cfg.JITO_TIP_ACCOUNT
+            ? this.cfg.JITO_TIP_LAMPORTS
+            : 0,
+        maxTipLamports: this.cfg.JITO_TIP_LAMPORTS,
+        latchHeld: this.bankroll.hasDeployed(this.roundId),
+        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+      });
+      // The amount we send MUST equal what the bankroll authorized — the
+      // definitive catch for any selector/bankroll cap divergence.
+      if (selection.totalGross !== auth.amountGross) {
+        throw new HaltError("sent amount != authorized amount", {
+          sent: selection.totalGross.toString(),
+          authorized: auth.amountGross.toString(),
+        });
+      }
+    } catch (err) {
+      this.haltFromError(err, "pre-send invariant");
+      this.transition("LOGGED", { haltedBeforeSend: true });
+      return; // DO NOT SEND
+    }
 
     // MAX EXTRACTION telemetry: the cap bound before the model did —
     // capital, not EV, limited this round's take.
@@ -576,6 +669,13 @@ export class Orchestrator {
     if (!deployed) return;
     this.settleFired.add(roundId);
     try {
+      const fee = this.feeEstimator.currentMicroLamportsPerCu();
+      assertFeeBearingInvariants({
+        kind: "settle",
+        priorityFeeMicroLamports: fee,
+        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+      });
       const ix = buildSettleDeployPublic(this.ixCtx, {
         authority: this.payer.publicKey,
         deploymentAuthority: this.payer.publicKey,
@@ -585,7 +685,7 @@ export class Orchestrator {
         payer: this.payer,
         instructions: [ix],
         computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
-        priorityFeeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu(),
+        priorityFeeMicroLamports: fee,
       });
       const result = await this.sender.fire(
         {
@@ -600,6 +700,62 @@ export class Orchestrator {
     } catch (err) {
       this.log.warn({ roundId, err: String(err) }, "self-settle failed (crank will cover)");
     }
+  }
+
+  /**
+   * Reconciliation tripwire: compare the settled outcome against our modeled
+   * payout for the actual winning tile + our actual stake. Mismatch beyond
+   * tolerance (or an impossible direction, e.g. paid without covering) engages
+   * the kill switch — converting a surviving model/parse bug into a halt.
+   */
+  private reconcileSettlement(data: PublicDeploySettled): void {
+    const round = this.state.round(data.round_id);
+    if (!round) return; // can't reconcile without the round account
+    const res = reconcileRoundOutcome({
+      ourStakeOnWinnerBase: BigInt(data.winning_stake.toString()),
+      totalStakeOnWinnerBase: BigInt(round.deployed_usd_on_winning_tile_amount.toString()),
+      potBase: BigInt(round.deployed_usd_amount.toString()),
+      realizedWonUsdBase: BigInt(data.won_usd_amount.toString()),
+      realizedWonShares: BigInt(data.won_shares_amount.toString()),
+      toleranceFrac: this.cfg.RECONCILE_TOLERANCE,
+      floorBase: usdToBase(0.5),
+    });
+    if (!res.ok) {
+      this.engageKillSwitch(
+        `reconcile tripwire round ${data.round_id}: ${res.reason} ` +
+          `(modeled $${(Number(res.modeledUsdBase) / 1e6).toFixed(2)} vs realized $${(Number(data.won_usd_amount.toString()) / 1e6).toFixed(2)})`,
+      );
+    }
+  }
+
+  /**
+   * Coarse wallet-drift tripwire: halts if on-chain USDC has left the wallet
+   * by MORE than everything we have deployed since the baseline (plus a
+   * tolerance) — i.e. an unexplained drain, not fee/BTC-leg noise. Baseline
+   * captured on first successful read.
+   */
+  private async checkWalletDrift(): Promise<void> {
+    if (this.cfg.EXECUTION_MODE === "dry") return;
+    let actual: bigint;
+    try {
+      const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+      const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
+      const bal = await this.connection.getTokenAccountBalance(ata, "processed");
+      actual = BigInt(bal.value.amount);
+    } catch {
+      return; // transient — try next tick
+    }
+    if (this.usdcBaselineBase === null) {
+      this.usdcBaselineBase = actual;
+      return;
+    }
+    // Worst legitimate case: we lose everything deployed since baseline.
+    const res = reconcileWalletDrift({
+      expectedDeltaBase: -this.pnl.deployedToday(),
+      actualDeltaBase: actual - this.usdcBaselineBase,
+      toleranceBase: usdToBase(this.cfg.WALLET_DRIFT_TOLERANCE_USD),
+    });
+    if (!res.ok) this.engageKillSwitch(`wallet drift: ${res.reason}`);
   }
 
   private async maybeSweep(): Promise<void> {
@@ -623,12 +779,19 @@ export class Orchestrator {
     if (shares <= 0n) return;
     this.sweepInFlight = true;
     try {
+      const fee = this.feeEstimator.currentMicroLamportsPerCu();
+      assertFeeBearingInvariants({
+        kind: "claim",
+        priorityFeeMicroLamports: fee,
+        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+      });
       const ix = buildClaimSats(this.ixCtx, { authority: this.payer.publicKey, shares });
       const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
         payer: this.payer,
         instructions: [ix],
         computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
-        priorityFeeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu(),
+        priorityFeeMicroLamports: fee,
       });
       const result = await this.sender.fire(
         {
@@ -736,12 +899,12 @@ export class Orchestrator {
         }
       } catch (err) {
         if (err instanceof HaltError) {
-          this.bankroll.tripKillSwitch(`HaltError: ${err.message}`);
-          this.alert(`HALT: ${err.message} ${JSON.stringify(err.context)}`);
+          // Persist the halt (KILL file) so a restart can't resume on bad data.
+          this.engageKillSwitch(`HaltError: ${err.message} ${JSON.stringify(err.context)}`);
           this.transition("LOGGED", { halted: true });
           return; // stay alive, observing — kill switch blocks all sends
         }
-        throw err;
+        this.haltFromError(err, "account handler");
       }
     });
 
@@ -770,15 +933,19 @@ export class Orchestrator {
         } else if (event.name === "PublicDeploySettled") {
           const data = event.data as PublicDeploySettled;
           if (data.authority.equals(this.payer.publicKey)) {
-            this.db.recordSettlement({
-              roundId: data.round_id,
-              winningStake: BigInt(data.winning_stake.toString()),
-              wonUsd: BigInt(data.won_usd_amount.toString()),
-              wonShares: BigInt(data.won_shares_amount.toString()),
-              hashrateEarned: BigInt(data.hashrate_earned.toString()),
-              sig: event.signature,
+            // Atomic per-round settlement write.
+            this.db.transaction(() => {
+              this.db.recordSettlement({
+                roundId: data.round_id,
+                winningStake: BigInt(data.winning_stake.toString()),
+                wonUsd: BigInt(data.won_usd_amount.toString()),
+                wonShares: BigInt(data.won_shares_amount.toString()),
+                hashrateEarned: BigInt(data.hashrate_earned.toString()),
+                sig: event.signature,
+              });
+              this.pnl.refreshDaily();
             });
-            this.pnl.refreshDaily();
+            this.reconcileSettlement(data);
             void this.maybeSweep();
           }
         }
@@ -791,6 +958,9 @@ export class Orchestrator {
     });
 
     this.health.start(10_000);
+    // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode).
+    this.walletDriftTimer = setInterval(() => void this.checkWalletDrift(), 30_000);
+    this.walletDriftTimer.unref?.();
     void this.source.start();
     this.log.info(
       {
@@ -816,6 +986,7 @@ export class Orchestrator {
     this.log.info({ reason }, "shutting down");
     this.candidates.clear();
     this.health.stop();
+    if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
     await this.api?.stop().catch(() => undefined);
@@ -842,6 +1013,18 @@ if (cfg.EXECUTION_MODE === "mainnet") {
 
 const orchestrator = await Orchestrator.boot(cfg);
 orchestrator.start();
+
+// Last-resort error boundaries: any unhandled rejection or exception halts
+// safe (kill switch + persisted KILL file) rather than crashing mid-send or
+// silently swallowing. uncaughtException additionally exits so systemd
+// restarts into a fresh (KILL-file-halted) process.
+process.on("unhandledRejection", (reason) => {
+  orchestrator.haltFromError(reason, "unhandledRejection");
+});
+process.on("uncaughtException", (err) => {
+  orchestrator.haltFromError(err, "uncaughtException");
+  setTimeout(() => process.exit(1), 500).unref();
+});
 
 // Acceptance chaos hook: CHAOS_DISCONNECT_AT_S=<seconds> forces an ingest
 // disconnect mid-run to prove staleness detection + recovery.

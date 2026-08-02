@@ -133,6 +133,45 @@ describe("StateDb", () => {
     db.close();
   });
 
+  it("transaction() is atomic: a throw mid-sequence rolls back all writes", () => {
+    const db = freshDb();
+    expect(() =>
+      db.transaction(() => {
+        db.recordMyDeploy({
+          roundId: 1,
+          mask: 1,
+          amount: usdToBase(1),
+          evExpected: 0,
+          firedSlot: 1,
+          sig: "txn-sig",
+          status: "fired",
+        });
+        throw new Error("boom mid-round");
+      }),
+    ).toThrow("boom");
+    // the deploy write must have rolled back
+    expect(db.tableCounts()["my_deploys"]).toBe(0);
+    db.close();
+  });
+
+  it("transaction() commits all writes on success", () => {
+    const db = freshDb();
+    db.transaction(() => {
+      db.recordSettlement({
+        roundId: 9,
+        winningStake: 0n,
+        wonUsd: 0n,
+        wonShares: 0n,
+        hashrateEarned: 5n,
+        sig: "s",
+      });
+      db.upsertPnlDaily("2026-08-02", { deployed: usdToBase(1), returned: 0n, net: -usdToBase(1), feesPaid: 0n });
+    });
+    expect(db.tableCounts()["settlements"]).toBe(1);
+    expect(db.tableCounts()["pnl_daily"]).toBe(1);
+    db.close();
+  });
+
   it("records write errors for the health monitor", () => {
     const db = freshDb();
     expect(db.lastWriteError()).toBeNull();

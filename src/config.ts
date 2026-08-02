@@ -168,6 +168,17 @@ const schema = z
       z.coerce.number().finite().positive().default(100_000),
     ),
 
+    /** Reconciliation tripwire: modeled-vs-realized payout tolerance (fraction). */
+    RECONCILE_TOLERANCE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(5).default(0.25),
+    ),
+    /** Wallet-drift tripwire: unexplained USDC outflow (whole USD) that halts. */
+    WALLET_DRIFT_TOLERANCE_USD: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(5),
+    ),
+
     /** Alert when the wallet drops below this many SOL. */
     SOL_FLOOR_SOL: z.preprocess(
       emptyToUndef,

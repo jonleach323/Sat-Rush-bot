@@ -55,6 +55,23 @@ describe("caps and latches", () => {
     expect(auth).toMatchObject({ ok: true, amountGross: usdToBase(5) });
   });
 
+  it("tryCommit is atomic: true for the first caller, false thereafter (double-fire guard)", () => {
+    const b = bankroll();
+    expect(b.tryCommit(42)).toBe(true);
+    expect(b.tryCommit(42)).toBe(false); // second racing fire is refused
+    expect(b.tryCommit(42)).toBe(false);
+    expect(b.hasDeployed(42)).toBe(true);
+    expect(b.tryCommit(43)).toBe(true); // different round is independent
+  });
+
+  it("exposes limits for the pre-send guard (single source of truth)", () => {
+    const b = bankroll({ maxPerRound: usdToBase(7), dailyLossCap: usdToBase(20), minDeploy: usdToBase(2) });
+    expect(b.maxPerRoundBase).toBe(usdToBase(7));
+    expect(b.dailyLossCapBase).toBe(usdToBase(20));
+    expect(b.minDeployBase).toBe(usdToBase(2));
+    expect(b.quantumBase).toBe(usdToBase(1));
+  });
+
   it("one-deployment-per-round latch", () => {
     const b = bankroll();
     expect(b.authorize(7, usdToBase(2)).ok).toBe(true);

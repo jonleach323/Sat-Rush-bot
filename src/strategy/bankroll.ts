@@ -53,6 +53,24 @@ export class Bankroll {
     this.quantum = cfg.ladder.reduce((a, b) => (b < a ? b : a));
   }
 
+  // Accessors so the pre-send invariant guard can re-verify against the SAME
+  // limits the bankroll enforces (never a separately-configured copy).
+  get maxPerRoundBase(): bigint {
+    return this.cfg.maxPerRound;
+  }
+  get dailyLossCapBase(): bigint {
+    return this.cfg.dailyLossCap;
+  }
+  get minDeployBase(): bigint {
+    return this.cfg.minDeploy;
+  }
+  get quantumBase(): bigint {
+    return this.quantum;
+  }
+  realizedLossToday(): bigint {
+    return this.deps.realizedLossToday();
+  }
+
   /** Floor to a ladder-quantum multiple, clamped to MAX_PER_ROUND. */
   quantize(amountGross: bigint): bigint {
     if (amountGross <= 0n) return 0n;
@@ -83,7 +101,11 @@ export class Bankroll {
    * explicit block reason. Does NOT latch — call commit(roundId) at send
    * time so a pre-send failure can retry.
    */
-  authorize(roundId: number, amountGross: bigint): Authorization {
+  authorize(
+    roundId: number,
+    amountGross: bigint,
+    maxPerRoundOverride?: bigint,
+  ): Authorization {
     if (this.killSwitchEngaged()) {
       return {
         ok: false,
@@ -94,7 +116,12 @@ export class Bankroll {
     if (this.deployedRounds.has(roundId)) {
       return { ok: false, reason: "already_deployed_this_round" };
     }
-    const amount = this.quantize(amountGross);
+    // The cap the caller actually deployed against (strike-boost aware). The
+    // daily-loss check below uses this same amount, so authorize can never
+    // approve a smaller figure than what gets sent (closes AUDIT F1).
+    const cap = maxPerRoundOverride ?? this.cfg.maxPerRound;
+    const clamped = amountGross > cap ? cap : amountGross;
+    const amount = amountGross <= 0n ? 0n : (clamped / this.quantum) * this.quantum;
     if (amount <= 0n) {
       return { ok: false, reason: "amount_not_positive", detail: `raw=${amountGross}` };
     }
@@ -120,6 +147,19 @@ export class Bankroll {
   /** Latch the round IMMEDIATELY before sending (idempotency). */
   commit(roundId: number): void {
     this.deployedRounds.add(roundId);
+  }
+
+  /**
+   * Atomic check-and-set of the one-deploy latch: returns true only for the
+   * FIRST caller in a round, false thereafter. Single synchronous op, so
+   * correctness does not depend on the absence of awaits between an
+   * authorize() check and commit() (defends double-fire even if the fire
+   * path is later refactored to be async before the latch).
+   */
+  tryCommit(roundId: number): boolean {
+    if (this.deployedRounds.has(roundId)) return false;
+    this.deployedRounds.add(roundId);
+    return true;
   }
 
   /** Release a latch when the tx verifiably never reached the chain. */

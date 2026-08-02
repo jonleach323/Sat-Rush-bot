@@ -333,6 +333,16 @@ export class StateDb {
     );
   }
 
+  /**
+   * Run `fn` inside a single SQLite transaction (all-or-nothing). Used to
+   * make each round's multi-row writes (deploy record, settlement,
+   * pnl_daily) atomic — a crash mid-sequence leaves no partial round.
+   * Write failures are recorded for the health monitor and rethrown.
+   */
+  transaction<T>(fn: () => T): T {
+    return this.write(() => this.db.transaction(fn)());
+  }
+
   close(): void {
     this.db.close();
   }
