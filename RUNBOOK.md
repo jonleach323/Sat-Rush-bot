@@ -20,31 +20,38 @@ Sweep discipline: weekly, move anything above the phase float from hot →
 cold. Claim USD freely; claim BTC shares RARELY and in large chunks (the
 1000 bps claim fee punishes frequent claims).
 
-Scaling ladder — gates are DATA conditions, never win streaks; move one
-phase at a time:
+**Posture: MAX EXTRACTION within the $5k.** The $95k firewall is the risk
+management; inside the float, the EV engine takes every positive-EV dollar
+from day one. Water-filling self-limits (marginal EV → 0 stops allocation
+before over-deployment dilutes returns), so the caps below are BACKSTOPS
+sized to bind only on model failure — not throttles. Two instruments keep
+this honest:
 
-| phase | entry condition | MAX_PER_ROUND | DAILY_LOSS_CAP | float ceiling |
-|---|---|---|---|---|
-| 0 | mainnet launch | $5 | $50 | $2,000 deployed of the $5k |
-| 1 | 200+ rounds, settlements reconcile clean, realized ≈ model EV | $20 | $200 | $5,000 |
-| 2 | 1,000+ rounds, positive net AFTER fees | ¼-Kelly on measured edge, capped vs observed rival volume | $500 (well under 2% of bankroll) | $5,000 + review |
+- **cap-bound alert** (Telegram): fires when MAX_PER_ROUND bound while the
+  next quantum's marginal EV was still positive — i.e., capital, not the
+  model, limited the round. Repeated cap-bound alerts = the signal to
+  consider a deliberate float top-up from cold.
+- **usdc_low health alert**: wallet USDC below one full-size fire — the
+  bot is silently under-extracting; top up the float.
 
-Standing rules:
-- **Never scale on a win streak** — only when a phase gate's data condition is met.
-- **Never raise DAILY_LOSS_CAP mid-day.**
-- Total at-risk (float + unclaimed) stays ≤ $5,000 until 30 days live; any
-  increase beyond that is a deliberate cold-wallet decision, not a config edit.
-- The 20% rake is the bar: if realized edge after 1,000 rounds doesn't
-  clear it, scaling up multiplies losses — drain per §3 instead.
-
-| knob | launch value | scale-up rule |
+| knob | launch value | rationale |
 |---|---|---|
-| MAX_PER_ROUND_USD | $5 (phase 0) | per the ladder above |
-| DAILY_LOSS_CAP_USD | $50 (phase 0) | per the ladder above |
-| STAKE_LADDER_USD | 1 | revisit with MAX_PER_ROUND |
+| MAX_PER_ROUND_USD | $500 (10% of float) | high enough that the EV stop binds first on any realistic early-mainnet board; a per-round ruin bound, not a strategy limit |
+| DAILY_LOSS_CAP_USD | $1,000 (20% of float) | ruin protection ONLY — a broken model needs 5 consecutive worst-case days to zero the float, leaving time to react. Ruin ends extraction; this cap protects the extracting. |
+| STAKE_LADDER_USD | 1 | $1 quantum keeps allocation granular |
 | STRATEGY | water_filling | — (k_emptiest fallback never runs unattended: it deploys regardless of EV) |
 | SWEEP_ENABLED | false | enable only after claim-fee math is verified on mainnet |
 | SELF_SETTLE | true | load-bearing (FINDINGS.md interlude) — never disable |
+
+Standing rules:
+- **Never raise DAILY_LOSS_CAP mid-day.** Raising the per-round cap in
+  response to cap-bound alerts is fine (that IS max extraction); raising
+  the daily stop while losing is tilt.
+- Float top-ups beyond $5,000 are a deliberate cold-wallet decision made
+  on a green day, not a config edit during a drawdown.
+- The 20% rake is the viability bar: if realized edge after ~1,000 rounds
+  doesn't clear it, more capital multiplies losses — drain per §3 instead.
+- Weekly: claim + sweep everything above $5,000 (wallet + unclaimed) to cold.
 
 ## 1. Launch morning sequence
 

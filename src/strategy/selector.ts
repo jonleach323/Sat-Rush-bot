@@ -45,6 +45,14 @@ export type Selection =
       /** Model EV (base units, float) of this allocation. */
       ev: number;
       strategy: StrategyName;
+      /**
+       * True when allocation stopped at MAX_PER_ROUND while the best
+       * marginal EV was still positive — capital was the binding
+       * constraint, not the model ("leaving money on the table").
+       */
+      capBound: boolean;
+      /** Marginal EV (base units) of the next quantum at the stop point. */
+      marginalEvAtStop: number;
     }
   | { kind: "skip"; reason: string; strategy: StrategyName };
 
@@ -82,6 +90,7 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
   let total = 0n;
 
+  let lastBestMarginal = Number.NEGATIVE_INFINITY;
   const bestTileFor = (predicate: (ev: number) => boolean): number | null => {
     let bestEv = Number.NEGATIVE_INFINITY;
     const candidates: number[] = [];
@@ -95,6 +104,7 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
         candidates.push(tile);
       }
     }
+    lastBestMarginal = bestEv;
     if (candidates.length === 0 || !predicate(bestEv)) return null;
     return pickRandom(candidates, rng);
   };
@@ -127,6 +137,16 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
     return { kind: "skip", reason: "min_deploy_padding_made_ev_negative", strategy: "water_filling" };
   }
 
+  // Cap-bound detection: the loop ended because the next quantum would
+  // exceed MAX_PER_ROUND — was the model still asking for more?
+  let capBound = false;
+  let marginalEvAtStop = lastBestMarginal;
+  if (total + quantum > cfg.maxPerRound) {
+    bestTileFor(() => true); // refresh lastBestMarginal at the stop point
+    marginalEvAtStop = lastBestMarginal;
+    capBound = lastBestMarginal > 0;
+  }
+
   const tiles = allocation.flatMap((a, i) => (a > 0n ? [i] : []));
   return {
     kind: "deploy",
@@ -136,6 +156,8 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
     totalGross: total,
     ev,
     strategy: "water_filling",
+    capBound,
+    marginalEvAtStop,
   };
 }
 
@@ -172,5 +194,7 @@ function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
     totalGross: amount,
     ev: evOfAllocation(ctx, allocation),
     strategy: "k_emptiest",
+    capBound: false, // fixed-size strategy — the cap is the size by design
+    marginalEvAtStop: 0,
   };
 }

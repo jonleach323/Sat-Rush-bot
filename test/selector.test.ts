@@ -107,6 +107,31 @@ describe("water-filling (acceptance)", () => {
   });
 });
 
+describe("cap-bound detection (MAX EXTRACTION telemetry)", () => {
+  it("flags capBound when MAX_PER_ROUND binds before marginal EV does", () => {
+    // Huge rival pot: every quantum stays +EV far past a tiny $2 cap.
+    const stakes = zeroStakes();
+    for (let i = 2; i < TILES_COUNT; i++) stakes[i] = usdToBase(500);
+    const selection = selectAllocation(
+      ctx(stakes),
+      cfg({ maxPerRound: usdToBase(2) }),
+    );
+    expect(selection.kind).toBe("deploy");
+    if (selection.kind !== "deploy") return;
+    expect(selection.totalGross).toBe(usdToBase(2));
+    expect(selection.capBound).toBe(true);
+    expect(selection.marginalEvAtStop).toBeGreaterThan(0);
+  });
+
+  it("does not flag capBound when the EV stop binds first", () => {
+    const selection = selectAllocation(ctx(chaseBoard()), cfg({ maxPerRound: usdToBase(50) }));
+    expect(selection.kind).toBe("deploy");
+    if (selection.kind !== "deploy") return;
+    expect(selection.totalGross).toBeLessThan(usdToBase(50));
+    expect(selection.capBound).toBe(false);
+  });
+});
+
 describe("k_emptiest fallback", () => {
   it("puts the full ladder amount on one of the K emptiest tiles", () => {
     const stakes = chaseBoard(); // tiles 0,1 empty

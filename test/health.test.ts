@@ -57,6 +57,26 @@ describe("HealthMonitor", () => {
     expect(alerts).toHaveLength(2);
   });
 
+  it("flags low USDC against the funding floor when wired", async () => {
+    const { deps, alerts } = makeDeps({
+      usdcBalanceBaseUnits: async () => 3_000_000n, // $3
+    });
+    const monitor = new HealthMonitor(deps, {
+      solFloorLamports: 0,
+      usdcFloorBaseUnits: 5_000_000n, // $5 = MAX_PER_ROUND
+    });
+    const issues = await monitor.check();
+    expect(issues.map((i) => i.key)).toEqual(["usdc_low"]);
+    expect(alerts[0]).toContain("top up the float");
+    // not wired → no check
+    const { deps: bare } = makeDeps();
+    const bareMonitor = new HealthMonitor(bare, {
+      solFloorLamports: 0,
+      usdcFloorBaseUnits: 5_000_000n,
+    });
+    expect(await bareMonitor.check()).toEqual([]);
+  });
+
   it("debounces repeat alerts per key, re-alerts after the window", async () => {
     let t = 0;
     const { deps, alerts } = makeDeps({ ingestStale: () => true });

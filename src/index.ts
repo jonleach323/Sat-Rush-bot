@@ -94,10 +94,22 @@ export class Orchestrator {
         rpcSlot: () => this.connection.getSlot("processed"),
         solBalanceLamports: () =>
           this.connection.getBalance(this.payer.publicKey, "processed"),
+        usdcBalanceBaseUnits: async () => {
+          const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+          const ata = getAssociatedTokenAddressSync(
+            this.ixCtx.usdMint,
+            this.payer.publicKey,
+          );
+          const balance = await this.connection.getTokenAccountBalance(ata, "processed");
+          return BigInt(balance.value.amount);
+        },
         dbLastWriteError: () => this.db.lastWriteError(),
         alert: (m) => this.alert(m),
       },
-      { solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9) },
+      {
+        solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
+        usdcFloorBaseUnits: usdToBase(cfg.MAX_PER_ROUND_USD),
+      },
     );
   }
 
@@ -406,6 +418,18 @@ export class Orchestrator {
     this.fireInFlight = true;
     this.bankroll.commit(this.roundId); // latch BEFORE send
     const { selection } = candidate;
+
+    // MAX EXTRACTION telemetry: the cap bound before the model did —
+    // capital, not EV, limited this round's take.
+    if (selection.capBound) {
+      const key = `${this.roundId}:cap_bound`;
+      if (!this.skipLogged.has(key)) {
+        this.skipLogged.add(key);
+        this.alert(
+          `cap-bound round ${this.roundId}: fired $${(Number(selection.totalGross) / 1e6).toFixed(2)} at MAX_PER_ROUND with next-quantum marginal EV still +$${(selection.marginalEvAtStop / 1e6).toFixed(3)} — raising the cap/float would extract more`,
+        );
+      }
+    }
     this.db.recordMyDeploy({
       roundId: this.roundId,
       mask: selection.mask,

@@ -5,7 +5,12 @@
  * alerts once per window, not once per check.
  */
 
-export type HealthIssueKey = "ingest_stale" | "slot_lag" | "sol_low" | "db_write_error";
+export type HealthIssueKey =
+  | "ingest_stale"
+  | "slot_lag"
+  | "sol_low"
+  | "usdc_low"
+  | "db_write_error";
 
 export interface HealthIssue {
   key: HealthIssueKey;
@@ -18,12 +23,17 @@ export interface HealthDeps {
   snapshotSlot(): number;
   rpcSlot(): Promise<number>;
   solBalanceLamports(): Promise<number>;
+  /** Optional: wallet USDC balance (base units) for the funding floor. */
+  usdcBalanceBaseUnits?: (() => Promise<bigint>) | undefined;
   dbLastWriteError(): string | null;
   alert(message: string): void | Promise<void>;
 }
 
 export interface HealthMonitorOptions {
   solFloorLamports: number;
+  /** Alert when wallet USDC drops below this (base units) — the bot can no
+   * longer fund a full-size fire; under-extraction, silently. */
+  usdcFloorBaseUnits?: bigint | undefined;
   /** Alert when the snapshot slot trails the RPC slot by more than this. */
   slotLagThreshold?: number | undefined;
   /** Re-alert window per issue key (default 5 min). */
@@ -75,6 +85,20 @@ export class HealthMonitor {
       }
     } catch {
       /* transient */
+    }
+
+    if (this.deps.usdcBalanceBaseUnits && this.opts.usdcFloorBaseUnits !== undefined) {
+      try {
+        const usdc = await this.deps.usdcBalanceBaseUnits();
+        if (usdc < this.opts.usdcFloorBaseUnits) {
+          issues.push({
+            key: "usdc_low",
+            message: `wallet USDC ${(Number(usdc) / 1e6).toFixed(2)} below funding floor ${(Number(this.opts.usdcFloorBaseUnits) / 1e6).toFixed(2)} — fires will size down or skip (top up the float)`,
+          });
+        }
+      } catch {
+        /* transient */
+      }
     }
 
     const dbError = this.deps.dbLastWriteError();
