@@ -729,6 +729,18 @@ export class Orchestrator {
 // ── entrypoint ────────────────────────────────────────────────────────────────
 
 const cfg = loadConfig();
+
+// Mainnet refuses to start unless every fatal preflight gate passes.
+if (cfg.EXECUTION_MODE === "mainnet") {
+  const { formatPreflight, runPreflight } = await import("./ops/preflight.js");
+  const report = await runPreflight({ cfg });
+  console.log(formatPreflight(report));
+  if (!report.passed) {
+    logger.fatal("preflight failed — refusing to launch in mainnet mode");
+    process.exit(1);
+  }
+}
+
 const orchestrator = await Orchestrator.boot(cfg);
 orchestrator.start();
 

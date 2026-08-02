@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "sim": "tsx test/sim.ts"
+    "sim": "tsx test/sim.ts",
+    "preflight": "tsx scripts/preflight.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
