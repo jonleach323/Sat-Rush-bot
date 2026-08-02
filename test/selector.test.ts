@@ -109,9 +109,12 @@ describe("water-filling (acceptance)", () => {
 
 describe("cap-bound detection (MAX EXTRACTION telemetry)", () => {
   it("flags capBound when MAX_PER_ROUND binds before marginal EV does", () => {
-    // Huge rival pot: every quantum stays +EV far past a tiny $2 cap.
+    // Whale tiles build a fat pot; many cheap $1 tiles keep the marginal
+    // quantum +EV far past a tiny $2 cap (share ≈ 0.48 on a $1 tile,
+    // pot ≈ $1,050 → next quantum worth ~$24 gross).
     const stakes = zeroStakes();
-    for (let i = 2; i < TILES_COUNT; i++) stakes[i] = usdToBase(500);
+    for (let i = 2; i < 15; i++) stakes[i] = usdToBase(1);
+    for (let i = 15; i < TILES_COUNT; i++) stakes[i] = usdToBase(200);
     const selection = selectAllocation(
       ctx(stakes),
       cfg({ maxPerRound: usdToBase(2) }),
