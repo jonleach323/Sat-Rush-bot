@@ -61,19 +61,43 @@ src/state/ (SQLite, pnl) · src/ops/ (telegram, health) · scripts/experiments/ 
   SatsClaimed.
 - Relevant errors: 6005 RoundNotActive, 6007 InvalidSelectionMask.
 
-## Open questions (devnet experiments will answer — do not assume)
-1. Does deploy amount split across masked tiles, or apply per tile? Is TileStake.stake
-   raw USD or streak-multiplied effective stake?
-2. Can a wallet deploy twice in one round (accumulate), or is it one-shot?
-3. Does the owner's crank execute Discretionary automations unprompted (preempting the
-   round's one deployment slot with a stored/default mask), or does it wait for the
-   authority? Can the authority self-execute with Some(mask)? Can a stranger?
-4. Exact slot boundary where RoundNotActive fires relative to end_slot.
-5. Streak multiplier growth curve and cap — and does the streak update at deploy time
-   or settle time?
-6. Actual SatrushConfig values on devnet.
-7. When in the round does the owner's crank fire automation deploys? (Measurable from
-   is_automation + slot on PublicDeployCreated events.)
+## Open questions — ANSWERED (devnet experiments 2026-08-02; evidence with tx sigs in FINDINGS.md)
+1. **Split-evenly, raw net USD.** The gross deploy loses the 800 bps deploy legs, then
+   the net divides evenly across masked tiles (floor); TileStake.stake records raw net
+   USD — the streak multiplier is NOT applied to tile stakes. Σ tile deltas ==
+   total_stake_usd_amount. `PublicDeployment.streak_multiplier` is simply the raw
+   streak count snapshot. → STAKE_SEMANTICS=raw (config default, confirmed).
+2. **One-shot per round.** A second deploy_public fails at the system level
+   (deployment PDA "already in use"). Deploy size and mask are final at fire time.
+3. **The owner's crank preempts Discretionary automations every round — and arms idle
+   boards itself.** It executed a fresh Discretionary automation within ~60s on an
+   idle board, choosing its own 19-of-21-tile mask, and took every following round
+   before the authority could. Strangers get 6000 Unauthorized. Authority Some(mask)
+   override is untestable in practice — the crank wins the race each round.
+   reload=true confirmed: winnings compound into the automation escrow ATA.
+   Consequence: any live automation keeps rounds rotating continuously, and
+   Discretionary means surrendering mask choice to the owner's backend — direct
+   deploys (this client) are the only way to keep information timing.
+4. **Deploys must execute in a slot ≤ end_slot.** Probes sent at cutoff 8/6/4/3
+   landed (send→land 1–2 slots on public RPC); sent at 2/1/0 all failed 6005.
+   Empirical FIRE_OFFSET_SLOTS floor ≈ 3 remote; default 4 keeps one slot of cushion;
+   revisit ~2 when colocated.
+5. **Streak: linear counter, updates at DEPLOY time, resets on a missed round.**
+   current_streak_count increments each consecutively-played round (observed to 28,
+   no cap seen) and snapshots into the deployment; missing one round resets it to 1
+   (observed 28 → 1). Losses still earn hashrate; 35% (unclaimed_hashrate_bps) defers
+   to claim time.
+6. **Devnet SatrushConfig:** strike 264 / epoch 262 / one_btc 132 / sats_vault_round
+   1200 / sats_vault_claim 1000 / protocol 142 bps; unclaimed_hashrate 3500 bps; min
+   deploy $1; 50-slot rounds; epoch iteration 1000 slots; settle grace 0. BTC mint is
+   8-decimals (cbBTC-style). Full dump incl. mints in FINDINGS.md (E6).
+7. **Immediately, every round.** With any automation registered the crank executes at
+   round open (it opened rounds itself on an idle board). The "disarmed until first
+   deploy" board state only occurs when no automation exists.
+
+Operational lesson (see FINDINGS.md interlude): the owner's settle crank can be
+offline for long stretches — SELF_SETTLE=true is load-bearing, not an optimization:
+it is how deployment rent and winnings come back.
 
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned

@@ -81,10 +81,10 @@ const schema = z
     BTC_MINT: optionalPubkey,
 
     /**
-     * Open question 1 (CLAUDE.md): is TileStake.stake raw USD or
-     * streak-multiplied effective stake? Strategy math must stay correct
-     * under either answer — this flag picks the interpretation. Devnet
-     * findings so far point to raw net USD; revisit after experiments.
+     * ANSWERED (FINDINGS.md E1): TileStake.stake is raw net USD — the
+     * streak multiplier is not applied to tile stakes. "raw" is the
+     * measured reality; "effective" remains only as a modeling escape
+     * hatch should mainnet differ.
      */
     STAKE_SEMANTICS: z.preprocess(
       emptyToUndef,
