@@ -5,14 +5,44 @@ in SIMULATION.md. The bot enforces its own gates: **mainnet mode will not
 start unless every fatal preflight gate passes** (`src/ops/preflight.ts`,
 also runnable standalone via `pnpm preflight`).
 
-## 0. Pre-committed limits (decide these the night before, not launch morning)
+## 0. Capital structure + pre-committed limits (decided 2026-08-02, before launch)
+
+**Bankroll: $100,000 total. Split: $95,000 cold storage / $5,000 operator
+float.** The cold wallet is a hardware wallet whose key never touches the
+VPS, this repo, or any machine the bot runs on. The bot can only ever lose
+what is in the operator wallet — a physical cap no config or code path can
+exceed. Cold→hot top-ups are manual, deliberate, and phase-gated below.
+"Float" counts wallet balance PLUS unclaimed in-protocol value (the
+`unclaimed` line in `/status`) — winnings sitting in the program's vault
+are still at risk.
+
+Sweep discipline: weekly, move anything above the phase float from hot →
+cold. Claim USD freely; claim BTC shares RARELY and in large chunks (the
+1000 bps claim fee punishes frequent claims).
+
+Scaling ladder — gates are DATA conditions, never win streaks; move one
+phase at a time:
+
+| phase | entry condition | MAX_PER_ROUND | DAILY_LOSS_CAP | float ceiling |
+|---|---|---|---|---|
+| 0 | mainnet launch | $5 | $50 | $2,000 deployed of the $5k |
+| 1 | 200+ rounds, settlements reconcile clean, realized ≈ model EV | $20 | $200 | $5,000 |
+| 2 | 1,000+ rounds, positive net AFTER fees | ¼-Kelly on measured edge, capped vs observed rival volume | $500 (well under 2% of bankroll) | $5,000 + review |
+
+Standing rules:
+- **Never scale on a win streak** — only when a phase gate's data condition is met.
+- **Never raise DAILY_LOSS_CAP mid-day.**
+- Total at-risk (float + unclaimed) stays ≤ $5,000 until 30 days live; any
+  increase beyond that is a deliberate cold-wallet decision, not a config edit.
+- The 20% rake is the bar: if realized edge after 1,000 rounds doesn't
+  clear it, scaling up multiplies losses — drain per §3 instead.
 
 | knob | launch value | scale-up rule |
 |---|---|---|
-| MAX_PER_ROUND_USD | minimum viable (= on-chain min deploy, likely $1) | ×2 only after each 50-round review |
-| DAILY_LOSS_CAP_USD | 10 × MAX_PER_ROUND | never raise mid-day |
+| MAX_PER_ROUND_USD | $5 (phase 0) | per the ladder above |
+| DAILY_LOSS_CAP_USD | $50 (phase 0) | per the ladder above |
 | STAKE_LADDER_USD | 1 | revisit with MAX_PER_ROUND |
-| STRATEGY | water_filling | — |
+| STRATEGY | water_filling | — (k_emptiest fallback never runs unattended: it deploys regardless of EV) |
 | SWEEP_ENABLED | false | enable only after claim-fee math is verified on mainnet |
 | SELF_SETTLE | true | load-bearing (FINDINGS.md interlude) — never disable |
 
