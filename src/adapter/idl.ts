@@ -220,7 +220,7 @@ export interface SatrushConfig {
   bump: number;
   owner_authority: PublicKey;
   admin_authority: PublicKey;
-  round_authority: PublicKey;
+  game_authority: PublicKey;
   fee_recipient: PublicKey;
   usd_mint: PublicKey;
   btc_mint: PublicKey;
@@ -234,6 +234,7 @@ export interface SatrushConfig {
   min_deploy_usd_amount: BN;
   epoch_vault_iteration_duration: BN;
   deployment_settle_grace_duration: BN;
+  strike_trigger_modulus: number;
   reserved: number[];
 }
 

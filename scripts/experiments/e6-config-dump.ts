@@ -46,7 +46,8 @@ const md = `## E6 — on-chain config dump (${nowIso()})
 | min_deploy_usd_amount | ${fmtUsd(c.min_deploy_usd_amount)} |
 | epoch_vault_iteration_duration | ${c.epoch_vault_iteration_duration.toString()} slots |
 | deployment_settle_grace_duration | ${c.deployment_settle_grace_duration.toString()} slots |
-| round_authority | \`${c.round_authority.toBase58()}\` |
+| strike_trigger_modulus | ${c.strike_trigger_modulus} |
+| game_authority | \`${c.game_authority.toBase58()}\` |
 | board.round_id | ${board.round_id} (duration ${board.round_duration} slots) |
 | board clock | ${endSlot === U64_MAX ? "DISARMED (u64::MAX until first deploy)" : `start ${board.start_slot} end ${board.end_slot}`} |
 | strike pool | ${fmtUsd(board.strike_usd_amount)} swapped + ${fmtUsd(board.strike_pending_usd_amount)} pending, ${board.strike_btc_amount.toString()} BTC units |
