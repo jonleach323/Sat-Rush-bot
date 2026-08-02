@@ -1,0 +1,43 @@
+# Sat Rush strategy client — systemd unit.
+# Install: sudo install -m 644 deploy/satrush.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now satrush
+# Logs:    journalctl -u satrush -f
+#
+# Secrets live in /etc/satrush/.env (root:satrush 640), placed by hand once —
+# deploy.sh never syncs them. KEYPAIR_PATH inside that env file must point at
+# /opt/satrush/keypairs/operator.json (also placed by hand, chmod 600).
+
+[Unit]
+Description=Sat Rush strategy client
+Documentation=file:/opt/satrush/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=satrush
+Group=satrush
+WorkingDirectory=/opt/satrush
+EnvironmentFile=/etc/satrush/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=3
+# graceful shutdown path (farewell alert, DB close) before SIGKILL
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# journald logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=satrush
+
+# light hardening — the bot only needs its own tree writable
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/satrush
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

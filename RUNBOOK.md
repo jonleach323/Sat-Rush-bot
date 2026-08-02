@@ -114,3 +114,67 @@ was upgraded and OUR IDL IS STALE.
 - The strike pool can grow very large ($1,957 on devnet, untriggered for
   ~1,850 rounds); `STRIKE_SIZE_BOOST` stays 1.0 until trigger mechanics
   are understood.
+
+## 6. VPS provisioning + server checklist
+
+Deploy flow: `./deploy/deploy.sh user@vps` — builds + verifies locally,
+rsyncs the repo (**never** `.env`, `keypairs/`, `data/`), installs the
+systemd unit, restarts, tails `journalctl`. Secrets are placed once, by
+hand (unit reads `/etc/satrush/.env`; keypair at
+`/opt/satrush/keypairs/operator.json`, chmod 600).
+
+One-time provisioning:
+
+```bash
+sudo useradd -r -m -d /opt/satrush satrush
+sudo mkdir -p /etc/satrush /opt/satrush/{keypairs,data}
+sudo chown -R satrush:satrush /opt/satrush
+# place /etc/satrush/.env (root:satrush 640) with at minimum:
+#   EXECUTION_MODE=dry            # first boot is ALWAYS dry
+#   KEYPAIR_PATH=/opt/satrush/keypairs/operator.json
+#   DB_PATH=/opt/satrush/data/satrush.db
+#   RPC/GRPC endpoints, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, caps
+```
+
+Checklist before first launch (verify each, in order):
+
+- [ ] **Clock synced:** `chronyc tracking` → `Leap status: Normal`,
+      offset < 10ms. Slot-based firing assumes a sane clock.
+- [ ] **Firewall:** `ufw default deny incoming && ufw allow ssh && ufw enable`;
+      `ufw status verbose` shows deny-inbound, SSH only. The bot makes
+      outbound connections only — nothing listens.
+- [ ] **Node LTS:** `node --version` ≥ 20 (install via nodesource or nvm,
+      then `corepack enable` for pnpm). `pnpm install` on the server
+      compiles better-sqlite3 against the server ABI — never rsync
+      node_modules.
+- [ ] **Swap:** 2G swapfile active (`swapon --show`) — protects the ~150MB
+      node process from OOM on 1GB boxes during pnpm installs.
+- [ ] **DB on persistent disk:** `DB_PATH=/opt/satrush/data/satrush.db`
+      and `/opt/satrush` is NOT tmpfs (`df /opt/satrush`). pnl_daily is
+      the loss-cap memory — losing it resets the daily cap accounting.
+- [ ] **Unit installed + enabled:** `systemctl is-enabled satrush` →
+      `enabled`; logs flowing: `journalctl -u satrush -n 20`.
+- [ ] **Telegram from the phone:** `/status` answers; `/kill` engages the
+      switch (verify a `deploy blocked … kill_switch_engaged` line or
+      `/status` showing ⛔), then RESTART the service to clear it
+      (`sudo systemctl restart satrush`) — the in-memory trip is
+      intentionally not persisted, the KILL file variant is.
+- [ ] **Reboot-survival test (in dry mode):** `sudo systemctl reboot`.
+      After the box returns: `journalctl -b -u satrush | head -40` shows
+      the unit auto-started, preflight-free dry boot, `orchestrator
+      started` + `STATE BOOT → SYNCED → ROUND_OPEN` with **no manual
+      steps**. Only after this passes does EXECUTION_MODE ever change
+      from `dry`.
+- [ ] **Crash-loop guard sanity:** `systemctl show satrush -p Restart,RestartUSec`
+      → `always / 3s`. Kill the process (`sudo pkill -f dist/index.js`)
+      and confirm journald shows it back within ~5s.
+
+Operational notes:
+
+- `Restart=always` + the in-memory kill switch: a service restart CLEARS a
+  Telegram `/kill`. For a stop that survives restarts and reboots, use the
+  KILL file (`touch /opt/satrush/KILL`) or `systemctl disable --now satrush`.
+- Upgrades are just `./deploy/deploy.sh user@vps` again — rsync + restart;
+  the unit's 15s stop timeout covers the graceful shutdown path.
+- The dry-mode ground rule holds on the server exactly as locally: dry
+  refuses to send; mainnet refuses to start without every preflight gate.
