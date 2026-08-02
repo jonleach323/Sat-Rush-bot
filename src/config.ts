@@ -144,6 +144,12 @@ const schema = z
       z.coerce.number().int().positive().default(1500),
     ),
 
+    /** Alert when the wallet drops below this many SOL. */
+    SOL_FLOOR_SOL: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(0.02),
+    ),
+
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,
     DB_PATH: z.preprocess(emptyToUndef, z.string().default("./data/satrush.db")),
@@ -231,6 +237,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,
     strikeBoostThresholdUsd: cfg.STRIKE_BOOST_THRESHOLD_USD,
     killSwitchFile: cfg.KILL_SWITCH_FILE,
+    solFloorSol: cfg.SOL_FLOOR_SOL,
     telegramToken: setOrUnset(cfg.TELEGRAM_TOKEN),
     telegramChatId: setOrUnset(cfg.TELEGRAM_CHAT_ID),
     dbPath: cfg.DB_PATH,
