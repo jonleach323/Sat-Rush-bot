@@ -4248,7 +4248,7 @@
           "type": "pubkey"
         },
         {
-          "name": "round_authority",
+          "name": "game_authority",
           "type": "pubkey"
         },
         {
@@ -6941,7 +6941,7 @@
           "docs": [
             "hardcoded `jupiter_program()` (mock under the `mock-swap` feature)."
           ],
-          "address": "FwagBBXsQVcn7iAT3bGV4cHBs8oU2wnazL9Ue9BTVRru"
+          "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
         },
         {
           "name": "token_program",
@@ -7219,7 +7219,7 @@
           "docs": [
             "hardcoded `jupiter_program()` (mock under the `mock-swap` feature)."
           ],
-          "address": "FwagBBXsQVcn7iAT3bGV4cHBs8oU2wnazL9Ue9BTVRru"
+          "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
         },
         {
           "name": "token_program",
@@ -7526,7 +7526,7 @@
           "docs": [
             "hardcoded `SWAP_PROGRAM` (mock under the `devnet` feature)."
           ],
-          "address": "FwagBBXsQVcn7iAT3bGV4cHBs8oU2wnazL9Ue9BTVRru"
+          "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
         },
         {
           "name": "token_program",
@@ -7814,7 +7814,7 @@
           "docs": [
             "hardcoded `jupiter_program()` (mock under the `mock-swap` feature)."
           ],
-          "address": "FwagBBXsQVcn7iAT3bGV4cHBs8oU2wnazL9Ue9BTVRru"
+          "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
         },
         {
           "name": "token_program",
@@ -8579,6 +8579,58 @@
         {
           "name": "new_min_deploy_usd_amount",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "update_strike_trigger_modulus",
+      "discriminator": [
+        241,
+        172,
+        229,
+        62,
+        191,
+        163,
+        60,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "satrush_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  116,
+                  114,
+                  117,
+                  115,
+                  104,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_modulus",
+          "type": "u16"
         }
       ]
     },
@@ -9684,6 +9736,16 @@
       "code": 6049,
       "name": "InvalidUnclaimedHashrateBps",
       "msg": "Unclaimed hashrate bps must not exceed 10_000"
+    },
+    {
+      "code": 6050,
+      "name": "InvalidStrikeTriggerModulus",
+      "msg": "Strike trigger modulus must be greater than zero"
+    },
+    {
+      "code": 6051,
+      "name": "InvalidSwapBps",
+      "msg": "Sats Vault round fee bps plus deploy fee bps must stay below 10_000"
     }
   ],
   "types": [
@@ -10274,6 +10336,20 @@
           },
           {
             "name": "winning_ticket",
+            "type": "u64"
+          },
+          {
+            "name": "won_usd_amount",
+            "docs": [
+              "USD share of the frozen pot for this rank (claimable later)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "won_btc_amount",
+            "docs": [
+              "BTC share of the frozen pot for this rank (claimable later)."
+            ],
             "type": "u64"
           }
         ]
@@ -11281,9 +11357,9 @@
             "type": "pubkey"
           },
           {
-            "name": "round_authority",
+            "name": "game_authority",
             "docs": [
-              "Address of the authority controlling the round flow."
+              "Address of the authority controlling the game flow."
             ],
             "type": "pubkey"
           },
@@ -11332,7 +11408,9 @@
           {
             "name": "sats_vault_round_fee_bps",
             "docs": [
-              "Sats Vault fee in basis points."
+              "Sats Vault fee in basis points of the gross deployed amount. Charged",
+              "at swap time against the pending pile (gross net of the deploy-time",
+              "legs), so `Round::swap_amount` rescales it by `deploy_fees_bps`."
             ],
             "type": "u32"
           },
@@ -11381,6 +11459,14 @@
             "type": "u64"
           },
           {
+            "name": "strike_trigger_modulus",
+            "docs": [
+              "Sat Strike odds: the jackpot fires when `rng % strike_trigger_modulus == 0`",
+              "(seeded at 1_440 for ~1/1440 odds; 1 = every round triggers)."
+            ],
+            "type": "u16"
+          },
+          {
             "name": "reserved",
             "docs": [
               "Reserved"
@@ -11388,7 +11474,7 @@
             "type": {
               "array": [
                 "u8",
-                32
+                30
               ]
             }
           }
