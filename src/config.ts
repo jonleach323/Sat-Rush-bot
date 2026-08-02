@@ -121,6 +121,24 @@ const schema = z
       z.coerce.number().finite().positive().default(50),
     ),
 
+    PRIORITY_FEE_MIN_MICROLAMPORTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).default(1_000),
+    ),
+    PRIORITY_FEE_MAX_MICROLAMPORTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(1_000_000),
+    ),
+    DEPLOY_CU_LIMIT: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(400_000),
+    ),
+    JITO_TIP_ACCOUNT: optionalPubkey,
+    JITO_TIP_LAMPORTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(10_000),
+    ),
+
     STALENESS_MS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().positive().default(1500),
@@ -136,6 +154,13 @@ const schema = z
         code: z.ZodIssueCode.custom,
         path: ["MAINNET_CONFIRM"],
         message: "EXECUTION_MODE=mainnet requires MAINNET_CONFIRM=yes",
+      });
+    }
+    if (cfg.PRIORITY_FEE_MIN_MICROLAMPORTS > cfg.PRIORITY_FEE_MAX_MICROLAMPORTS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["PRIORITY_FEE_MIN_MICROLAMPORTS"],
+        message: "PRIORITY_FEE_MIN must not exceed PRIORITY_FEE_MAX",
       });
     }
     if (cfg.MAX_PER_ROUND_USD > cfg.DAILY_LOSS_CAP_USD) {
@@ -197,6 +222,10 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     dailyLossCapUsd: cfg.DAILY_LOSS_CAP_USD,
     maxUnclaimedUsdValue: cfg.MAX_UNCLAIMED_USD_VALUE,
     stalenessMs: cfg.STALENESS_MS,
+    priorityFeeMicroLamports: `${cfg.PRIORITY_FEE_MIN_MICROLAMPORTS}..${cfg.PRIORITY_FEE_MAX_MICROLAMPORTS}`,
+    deployCuLimit: cfg.DEPLOY_CU_LIMIT,
+    jitoTipAccount: cfg.JITO_TIP_ACCOUNT ?? "<unset>",
+    jitoTipLamports: cfg.JITO_TIP_LAMPORTS,
     stakeSemantics: cfg.STAKE_SEMANTICS,
     strategy: cfg.STRATEGY,
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,

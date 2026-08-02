@@ -1,0 +1,193 @@
+/**
+ * Rolling pre-built candidate set. On every occupancy update while a round
+ * is Active, the caller invokes refresh(): the current best allocation plus
+ * up to 2 fallback allocations (next-best masks) are computed, built into
+ * transactions, signed, and kept hot with a current blockhash and fee.
+ * Blockhashes refresh every 15s. Firing writes pre-signed bytes to the
+ * wire — nothing is built at decision time.
+ */
+import {
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  type Connection,
+  type TransactionInstruction,
+} from "@solana/web3.js";
+import bs58 from "bs58";
+import {
+  buildDeployPublic,
+  type InstructionContext,
+} from "../adapter/instructions.js";
+import { TILES_COUNT, type EvContext } from "../strategy/ev.js";
+import {
+  selectAllocation,
+  type Selection,
+  type SelectorConfig,
+} from "../strategy/selector.js";
+import { assembleTx } from "./tx.js";
+import type { FeeEstimator } from "./fees.js";
+
+export type DeploySelection = Extract<Selection, { kind: "deploy" }>;
+
+export interface BuiltCandidate {
+  rank: number;
+  selection: DeploySelection;
+  signature: string;
+  /** Pre-signed wire bytes — what fire() writes. */
+  serialized: Buffer;
+  blockhash: string;
+  lastValidBlockHeight: number;
+  feeMicroLamports: number;
+  roundId: number;
+  builtAtMs: number;
+}
+
+export interface CandidateSetOptions {
+  connection: Connection;
+  payer: Keypair;
+  ixCtx: InstructionContext;
+  feeEstimator: FeeEstimator;
+  computeUnitLimit: number;
+  /** Embed a Jito tip transfer in every candidate (bundle path). */
+  jitoTip?: { account: PublicKey; lamports: number } | undefined;
+  blockhashMaxAgeMs?: number | undefined;
+  now?: (() => number) | undefined;
+}
+
+const BLOCKHASH_MAX_AGE_MS = 15_000;
+/** Sentinel stake that makes a tile strictly unattractive to the selector. */
+const EXCLUDE_STAKE = 10n ** 15n; // $1B in base units
+
+/**
+ * Best allocation + up to 2 next-best mask variants. Fallbacks re-run the
+ * selector with the strongest tile(s) of the previous pick made
+ * unattractive, yielding genuinely different masks (deduped).
+ */
+export function computeCandidateSelections(
+  ctx: EvContext,
+  cfg: SelectorConfig,
+): DeploySelection[] {
+  const out: DeploySelection[] = [];
+  const seenMasks = new Set<number>();
+  let stakes = ctx.predictedStakes;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const selection = selectAllocation({ ...ctx, predictedStakes: stakes }, cfg);
+    if (selection.kind !== "deploy") break;
+    if (!seenMasks.has(selection.mask)) {
+      seenMasks.add(selection.mask);
+      out.push(selection);
+    }
+    // Next variant: exclude the heaviest tile of the last pick.
+    let heaviest = selection.tiles[0] ?? 0;
+    for (const tile of selection.tiles) {
+      if ((selection.allocation[tile] ?? 0n) > (selection.allocation[heaviest] ?? 0n)) {
+        heaviest = tile;
+      }
+    }
+    const next = [...stakes];
+    next[heaviest] = EXCLUDE_STAKE;
+    stakes = next;
+  }
+  return out;
+}
+
+export class CandidateSet {
+  private candidates: BuiltCandidate[] = [];
+  private roundId: number | null = null;
+  private cachedBlockhash: {
+    blockhash: string;
+    lastValidBlockHeight: number;
+    fetchedAtMs: number;
+  } | null = null;
+
+  constructor(private readonly opts: CandidateSetOptions) {}
+
+  /** The current hot set (empty if none built or round rotated). */
+  current(roundId?: number): BuiltCandidate[] {
+    if (roundId !== undefined && roundId !== this.roundId) return [];
+    return this.candidates;
+  }
+
+  best(roundId: number): BuiltCandidate | null {
+    return this.current(roundId)[0] ?? null;
+  }
+
+  /** Drop everything (round rotated or halted). */
+  clear(): void {
+    this.candidates = [];
+    this.roundId = null;
+  }
+
+  /**
+   * Recompute selections and rebuild signed transactions. Reuses the cached
+   * blockhash until it ages past 15s (a fresh fetch re-signs everything).
+   */
+  async refresh(
+    roundId: number,
+    ctx: EvContext,
+    selectorCfg: SelectorConfig,
+  ): Promise<BuiltCandidate[]> {
+    const now = this.opts.now ?? Date.now;
+    if (roundId !== this.roundId) this.clear();
+
+    const selections = computeCandidateSelections(ctx, selectorCfg);
+    if (selections.length === 0) {
+      this.candidates = [];
+      this.roundId = roundId;
+      return [];
+    }
+
+    const maxAge = this.opts.blockhashMaxAgeMs ?? BLOCKHASH_MAX_AGE_MS;
+    if (!this.cachedBlockhash || now() - this.cachedBlockhash.fetchedAtMs > maxAge) {
+      const fresh = await this.opts.connection.getLatestBlockhash("confirmed");
+      this.cachedBlockhash = { ...fresh, fetchedAtMs: now() };
+    }
+    const { blockhash, lastValidBlockHeight } = this.cachedBlockhash;
+    const fee = this.opts.feeEstimator.currentMicroLamportsPerCu();
+
+    const built: BuiltCandidate[] = [];
+    for (const [rank, selection] of selections.entries()) {
+      const instructions: TransactionInstruction[] = [
+        buildDeployPublic(this.opts.ixCtx, {
+          authority: this.opts.payer.publicKey,
+          roundId,
+          selectionMask: selection.mask,
+          amountBaseUnits: selection.totalGross,
+        }),
+      ];
+      if (this.opts.jitoTip) {
+        instructions.push(
+          SystemProgram.transfer({
+            fromPubkey: this.opts.payer.publicKey,
+            toPubkey: this.opts.jitoTip.account,
+            lamports: this.opts.jitoTip.lamports,
+          }),
+        );
+      }
+      const { tx } = await assembleTx(this.opts.connection, {
+        payer: this.opts.payer,
+        instructions,
+        computeUnitLimit: this.opts.computeUnitLimit,
+        priorityFeeMicroLamports: fee,
+        blockhash: { blockhash, lastValidBlockHeight },
+      });
+      built.push({
+        rank,
+        selection,
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        blockhash,
+        lastValidBlockHeight,
+        feeMicroLamports: fee,
+        roundId,
+        builtAtMs: now(),
+      });
+    }
+    this.candidates = built;
+    this.roundId = roundId;
+    return built;
+  }
+}
+
+export const CANDIDATE_TILES_COUNT = TILES_COUNT;
