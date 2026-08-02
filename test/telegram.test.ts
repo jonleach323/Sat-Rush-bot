@@ -69,6 +69,40 @@ function offlineOps(overrides: Partial<TelegramDeps> = {}) {
     pause: () => (paused = true),
     resume: () => (paused = false),
     kill: (reason) => bankroll.tripKillSwitch(reason),
+    getRounds: () => [
+      {
+        id: 1810,
+        winning_tile: 7,
+        deployed_usd: "4048000",
+        miners_count: 2,
+        strike_triggered: 0,
+      },
+    ],
+    getCompetitors: () => [
+      {
+        round_id: 1810,
+        authority: "AbCdEfGhaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZzZz",
+        amount: "5000000",
+        total_stake: "4600000",
+        is_automation: 1,
+        slot: 123,
+      },
+    ],
+    getBoard: () => ({
+      roundId: 1810,
+      state: "Active",
+      slotsToCutoff: 31,
+      tileStakesUsd: new Array(21).fill(0).map((_, i) => (i === 0 ? 4.6 : 0)),
+      myTiles: [0],
+      strikePoolUsd: 12.5,
+    }),
+    getHealth: () => ({
+      ingestFresh: true,
+      ingestSlotAgeMs: 120,
+      solBalance: 0.5,
+      usdcBalance: 4990,
+      dbError: null,
+    }),
     ...overrides,
   };
   const ops = createTelegramOps({ token: "test:token", chatId: CHAT_ID, deps, botInfo: BOT_INFO });
@@ -123,6 +157,30 @@ describe("telegram ops (offline)", () => {
     await ops.bot.handleUpdate(commandUpdate("/pnl", Number(CHAT_ID), 5));
     expect(sent[0]!.text).toContain("deployed: $35.00");
     expect(sent[0]!.text).toContain("net: $-26.90");
+  });
+
+  it("/board shows the tiles and my positions", async () => {
+    const { ops, sent } = offlineOps();
+    await ops.bot.handleUpdate(commandUpdate("/board", Number(CHAT_ID), 8));
+    expect(sent[0]!.text).toContain("round 1810 Active cutoff=31");
+    expect(sent[0]!.text).toContain("my tiles: 0");
+    expect(sent[0]!.text).toContain("▸0:4.6");
+  });
+
+  it("/rounds and /competitors read history", async () => {
+    const { ops, sent } = offlineOps();
+    await ops.bot.handleUpdate(commandUpdate("/rounds", Number(CHAT_ID), 9));
+    expect(sent[0]!.text).toContain("1810 → tile 7");
+    await ops.bot.handleUpdate(commandUpdate("/competitors", Number(CHAT_ID), 10));
+    expect(sent[1]!.text).toContain("AbCd…ZzZz");
+    expect(sent[1]!.text).toContain("auto");
+  });
+
+  it("/health reports ingest and balances", async () => {
+    const { ops, sent } = offlineOps();
+    await ops.bot.handleUpdate(commandUpdate("/health", Number(CHAT_ID), 11));
+    expect(sent[0]!.text).toContain("ingest: fresh");
+    expect(sent[0]!.text).toContain("USDC: $4990.00");
   });
 
   it("ignores unauthorized chats entirely", async () => {

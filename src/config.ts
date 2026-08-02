@@ -177,6 +177,13 @@ const schema = z
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,
     DB_PATH: z.preprocess(emptyToUndef, z.string().default("./data/satrush.db")),
+
+    // ── read-only monitoring API + dashboard ──────────────────────────────
+    /** Bearer token for the read-only API. API is DISABLED unless this is set. */
+    API_TOKEN: optionalString,
+    /** Bind host — default localhost; expose remotely via a tunnel, not 0.0.0.0. */
+    API_HOST: z.preprocess(emptyToUndef, z.string().default("127.0.0.1")),
+    API_PORT: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(65535).default(8787)),
   })
   .superRefine((cfg, ctx) => {
     // NOTE: mainnet + MAINNET_CONFIRM is NOT enforced here — read-only
@@ -263,6 +270,9 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     sweepEnabled: cfg.SWEEP_ENABLED,
     claimFraction: cfg.CLAIM_FRACTION,
     solFloorSol: cfg.SOL_FLOOR_SOL,
+    apiEnabled: cfg.API_TOKEN !== undefined,
+    apiBind: cfg.API_TOKEN !== undefined ? `${cfg.API_HOST}:${cfg.API_PORT}` : "<disabled>",
+    apiToken: setOrUnset(cfg.API_TOKEN),
     telegramToken: setOrUnset(cfg.TELEGRAM_TOKEN),
     telegramChatId: setOrUnset(cfg.TELEGRAM_CHAT_ID),
     dbPath: cfg.DB_PATH,

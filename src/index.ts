@@ -35,6 +35,8 @@ import type { IngestSource } from "./ingest/types.js";
 import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
 import { HealthMonitor } from "./ops/health.js";
+import { MonitorApi } from "./ops/api.js";
+import { createMonitorData, type MonitorData } from "./ops/monitor.js";
 import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { Pnl, utcDate } from "./state/pnl.js";
@@ -69,7 +71,10 @@ export class Orchestrator {
 
   private readonly log = logger;
   private telegram: TelegramOps | null = null;
+  private api: MonitorApi | null = null;
   private readonly health: HealthMonitor;
+  private readonly monitor: MonitorData;
+  private readonly startedAtMs = Date.now();
 
   private constructor(
     private readonly cfg: Config,
@@ -111,6 +116,29 @@ export class Orchestrator {
         usdcFloorBaseUnits: usdToBase(cfg.MAX_PER_ROUND_USD),
       },
     );
+
+    this.monitor = createMonitorData({
+      db: this.db,
+      pnl: this.pnl,
+      state: this.state,
+      mode: cfg.EXECUTION_MODE,
+      source: this.source,
+      ingestSourceName: cfg.GRPC_URL ? "yellowstone-grpc" : "ws-rpc",
+      isPaused: () => this.paused,
+      killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
+      maxPerRoundBase: usdToBase(cfg.MAX_PER_ROUND_USD),
+      dailyLossCapBase: usdToBase(cfg.DAILY_LOSS_CAP_USD),
+      myAuthority: this.payer.publicKey.toBase58(),
+      solBalanceLamports: () =>
+        this.connection.getBalance(this.payer.publicKey, "processed"),
+      usdcBalanceBaseUnits: async () => {
+        const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+        const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
+        const balance = await this.connection.getTokenAccountBalance(ata, "processed");
+        return BigInt(balance.value.amount);
+      },
+      btcUsdEstimate: cfg.BTC_USD_ESTIMATE,
+    });
   }
 
   static async boot(cfg: Config): Promise<Orchestrator> {
@@ -245,9 +273,47 @@ export class Orchestrator {
           this.paused = false;
         },
         kill: (reason) => this.bankroll.tripKillSwitch(reason),
+        getRounds: (limit) =>
+          this.monitor.recentRounds(limit) as never,
+        getCompetitors: (limit) =>
+          this.monitor.recentCompetitors(limit) as never,
+        getBoard: () => {
+          const s = this.monitor.status();
+          return {
+            roundId: s.round.id,
+            state: s.round.state,
+            slotsToCutoff: s.round.slotsToCutoff,
+            tileStakesUsd: s.board.tileStakesUsd,
+            myTiles: s.me.tiles,
+            strikePoolUsd: s.board.strikePoolUsd,
+          };
+        },
+        getHealth: () => this.monitor.health(),
       },
     });
     this.telegram.start();
+  }
+
+  private async attachApi(): Promise<void> {
+    if (!this.cfg.API_TOKEN) {
+      this.log.info("monitoring API disabled (API_TOKEN unset)");
+      return;
+    }
+    this.api = new MonitorApi({
+      token: this.cfg.API_TOKEN,
+      host: this.cfg.API_HOST,
+      port: this.cfg.API_PORT,
+      data: this.monitor,
+      mode: this.cfg.EXECUTION_MODE,
+      startedAtMs: this.startedAtMs,
+      logger: this.log,
+    });
+    try {
+      await this.api.start();
+    } catch (err) {
+      this.log.error({ err: String(err) }, "monitoring API failed to start");
+      this.api = null;
+    }
   }
 
   private statusReport() {
@@ -630,6 +696,7 @@ export class Orchestrator {
 
   start(): void {
     this.attachTelegram();
+    void this.attachApi();
 
     this.source.on("slot", (u) => {
       this.state.applySlot(u.slot);
@@ -745,6 +812,7 @@ export class Orchestrator {
     this.health.stop();
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
+    await this.api?.stop().catch(() => undefined);
     await this.telegram?.stop().catch(() => undefined);
     this.db.close();
     process.exit(0);

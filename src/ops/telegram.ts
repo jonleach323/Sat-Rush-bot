@@ -32,12 +32,51 @@ export interface PnlSummary {
   feesPaid: bigint;
 }
 
+export interface RoundRow {
+  id: number;
+  winning_tile: number | null;
+  deployed_usd: string;
+  miners_count: number;
+  strike_triggered: number;
+}
+
+export interface CompetitorRow {
+  round_id: number;
+  authority: string;
+  amount: string;
+  total_stake: string;
+  is_automation: number;
+  slot: number;
+}
+
+export interface BoardReport {
+  roundId: number | null;
+  state: string | null;
+  slotsToCutoff: number | null;
+  tileStakesUsd: number[];
+  myTiles: number[];
+  strikePoolUsd: number;
+}
+
+export interface HealthReport {
+  ingestFresh: boolean;
+  ingestSlotAgeMs: number;
+  solBalance: number | null;
+  usdcBalance: number | null;
+  dbError: string | null;
+}
+
 export interface TelegramDeps {
   getStatus(): StatusReport | Promise<StatusReport>;
   getPnl(): PnlSummary | Promise<PnlSummary>;
   pause(): void;
   resume(): void;
   kill(reason: string): void;
+  // read-through commands (optional — degrade gracefully if absent)
+  getRounds?(limit: number): RoundRow[] | Promise<RoundRow[]>;
+  getCompetitors?(limit: number): CompetitorRow[] | Promise<CompetitorRow[]>;
+  getBoard?(): BoardReport | Promise<BoardReport>;
+  getHealth?(): HealthReport | Promise<HealthReport>;
 }
 
 export interface TelegramOpsOptions {
@@ -59,6 +98,8 @@ export interface TelegramOps {
 }
 
 const usd = (v: bigint) => `$${baseToUsd(v).toFixed(2)}`;
+const usdn = (n: number) => `$${n.toFixed(2)}`;
+const short = (s: string) => (s.length > 9 ? `${s.slice(0, 4)}…${s.slice(-4)}` : s);
 
 export function formatStatus(s: StatusReport): string {
   return [
@@ -113,6 +154,80 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     if (!authorized(ctx.chat?.id)) return;
     opts.deps.kill("telegram /kill");
     await ctx.reply("⛔ KILL SWITCH ENGAGED — all sending halted (restart to clear)");
+  });
+
+  bot.command("board", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getBoard) return void ctx.reply("board data unavailable");
+    const b = await opts.deps.getBoard();
+    const mine = new Set(b.myTiles);
+    const grid = b.tileStakesUsd
+      .map((v, i) => `${mine.has(i) ? "▸" : " "}${i}:${v.toFixed(1)}`)
+      .join("  ");
+    await ctx.reply(
+      [
+        `round ${b.roundId ?? "?"} ${b.state ?? ""} cutoff=${b.slotsToCutoff ?? "—"}`,
+        `strike pool: ${usdn(b.strikePoolUsd)}`,
+        `my tiles: ${b.myTiles.length ? b.myTiles.join(",") : "none"}`,
+        "tiles (▸=mine):",
+        grid,
+      ].join("\n"),
+    );
+  });
+
+  bot.command("rounds", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getRounds) return void ctx.reply("round history unavailable");
+    const rows = await opts.deps.getRounds(10);
+    if (rows.length === 0) return void ctx.reply("no rounds recorded yet");
+    await ctx.reply(
+      ["last rounds (round win pot miners):"]
+        .concat(
+          rows.map(
+            (r) =>
+              `${r.id} → tile ${r.winning_tile ?? "—"}  ${usdn(Number(r.deployed_usd) / 1e6)}  ${r.miners_count}p${r.strike_triggered ? " ⚡" : ""}`,
+          ),
+        )
+        .join("\n"),
+    );
+  });
+
+  bot.command("competitors", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getCompetitors) return void ctx.reply("competitor data unavailable");
+    const rows = await opts.deps.getCompetitors(10);
+    if (rows.length === 0) return void ctx.reply("no competitor deploys recorded yet");
+    await ctx.reply(
+      ["recent rivals (round wallet gross auto):"]
+        .concat(
+          rows.map(
+            (c) =>
+              `${c.round_id} ${short(c.authority)} ${usdn(Number(c.amount) / 1e6)}${c.is_automation ? " auto" : ""}`,
+          ),
+        )
+        .join("\n"),
+    );
+  });
+
+  bot.command("health", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getHealth) return void ctx.reply("health data unavailable");
+    const h = await opts.deps.getHealth();
+    await ctx.reply(
+      [
+        `ingest: ${h.ingestFresh ? "fresh" : `STALE ${h.ingestSlotAgeMs}ms`}`,
+        `SOL: ${h.solBalance === null ? "?" : h.solBalance.toFixed(4)}`,
+        `USDC: ${h.usdcBalance === null ? "?" : usdn(h.usdcBalance)}`,
+        `db: ${h.dbError ? `ERROR ${h.dbError}` : "ok"}`,
+      ].join("\n"),
+    );
+  });
+
+  bot.command("help", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    await ctx.reply(
+      "/status /pnl /board /rounds /competitors /health · /pause /resume /kill",
+    );
   });
 
   const alert = async (text: string): Promise<void> => {

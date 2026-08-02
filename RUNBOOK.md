@@ -215,3 +215,32 @@ Operational notes:
   the unit's 15s stop timeout covers the graceful shutdown path.
 - The dry-mode ground rule holds on the server exactly as locally: dry
   refuses to send; mainnet refuses to start without every preflight gate.
+
+## 7. Monitoring: read-only API, dashboard, Telegram
+
+Three views of the same read-only data layer (`src/ops/monitor.ts`). None
+can control the bot — deploy/cap/kill are NOT reachable from any of them.
+
+**Telegram** (from your phone): `/status` `/pnl` `/board` `/rounds`
+`/competitors` `/health` for viewing; `/pause` `/resume` `/kill` for
+control (control is Telegram-only, gated to TELEGRAM_CHAT_ID). Plus the
+unsolicited alerts (HaltError, missed round, daily-cap, cap-bound, low
+SOL/USDC, gRPC stale).
+
+**HTTP API + dashboard** (enabled only when API_TOKEN is set):
+- Binds `127.0.0.1:8787` by default. Dashboard: `http://<host>:8787/?token=<API_TOKEN>`.
+- `GET /health` (no auth, liveness for uptime monitors); `GET /api/status
+  |pnl|health|rounds|deploys|competitors` (bearer or `?token=`).
+- STRICTLY read-only: non-GET → 405, no control endpoints exist. A leaked
+  token is info-disclosure (all on-chain-public anyway), never fund/control risk.
+
+**Remote access — do NOT open a port** (breaks the ufw deny-inbound rule).
+Use an outbound tunnel from the VPS:
+- Cloudflare Tunnel: `cloudflared tunnel --url http://127.0.0.1:8787` →
+  gives an HTTPS URL. Open `<url>/?token=<API_TOKEN>` on any device.
+- or Tailscale: reach `http://<tailnet-ip>:8787` from your devices only.
+
+**Letting Claude check it in a session:** expose via the tunnel above and
+paste the HTTPS URL + token; Claude fetches `<url>/api/status` etc. and
+diagnoses. Use a monitoring-scoped API_TOKEN you can rotate (it's read-only
+and everything it shows is public chain data, but rotate it after sharing).
