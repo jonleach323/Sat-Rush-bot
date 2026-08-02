@@ -168,6 +168,7 @@ export class Orchestrator {
       ],
       jitoUrl: cfg.JITO_BLOCK_ENGINE_URL,
       logger,
+      mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
     });
 
     const watch = [satsVaultPda(programId), minerPda(payer.publicKey, programId)];

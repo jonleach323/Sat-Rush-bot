@@ -110,4 +110,15 @@ describe("race protocol", () => {
   it("refuses construction without connections outside dry mode", () => {
     expect(() => new RaceSender({ mode: "devnet", connections: [] })).toThrow();
   });
+
+  it("refuses a mainnet sender without MAINNET_CONFIRM (ground rule)", () => {
+    const conn = mockConnection({ sends: [] });
+    expect(() => new RaceSender({ mode: "mainnet", connections: [conn] })).toThrow(
+      /MAINNET_CONFIRM/,
+    );
+    expect(
+      () =>
+        new RaceSender({ mode: "mainnet", connections: [conn], mainnetConfirmed: true }),
+    ).not.toThrow();
+  });
 });

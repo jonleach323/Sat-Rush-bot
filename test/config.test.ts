@@ -34,8 +34,12 @@ describe("config defaults", () => {
 });
 
 describe("gates and cross-checks", () => {
-  it("rejects mainnet without MAINNET_CONFIRM=yes", () => {
-    expect(() => loadConfig({ EXECUTION_MODE: "mainnet" })).toThrow(/MAINNET_CONFIRM/);
+  it("loads mainnet without MAINNET_CONFIRM (read-only tooling must work pre-arm)", () => {
+    // Enforcement moved to the send/boot layer: RaceSender refuses to
+    // construct and preflight mode_gate is fatal without the confirm.
+    const cfg = loadConfig({ EXECUTION_MODE: "mainnet" });
+    expect(cfg.EXECUTION_MODE).toBe("mainnet");
+    expect(cfg.MAINNET_CONFIRM).toBeUndefined();
   });
 
   it("accepts mainnet with MAINNET_CONFIRM=yes", () => {

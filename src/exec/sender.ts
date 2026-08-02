@@ -51,6 +51,8 @@ export interface RaceSenderOptions {
   connections: Connection[];
   jitoUrl?: string | undefined;
   logger?: Logger | undefined;
+  /** Required true to construct in mainnet mode (MAINNET_CONFIRM=yes). */
+  mainnetConfirmed?: boolean | undefined;
 }
 
 const RESEND_INTERVAL_MS = 400;
@@ -61,6 +63,11 @@ export class RaceSender {
   constructor(private readonly opts: RaceSenderOptions) {
     if (opts.mode !== "dry" && opts.connections.length === 0) {
       throw new Error("RaceSender needs at least one connection outside dry mode");
+    }
+    if (opts.mode === "mainnet" && opts.mainnetConfirmed !== true) {
+      throw new Error(
+        "EXECUTION_MODE=mainnet requires MAINNET_CONFIRM=yes (ground rule) — refusing to construct a mainnet sender",
+      );
     }
   }
 

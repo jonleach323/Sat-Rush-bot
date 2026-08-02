@@ -179,13 +179,11 @@ const schema = z
     DB_PATH: z.preprocess(emptyToUndef, z.string().default("./data/satrush.db")),
   })
   .superRefine((cfg, ctx) => {
-    if (cfg.EXECUTION_MODE === "mainnet" && cfg.MAINNET_CONFIRM !== "yes") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["MAINNET_CONFIRM"],
-        message: "EXECUTION_MODE=mainnet requires MAINNET_CONFIRM=yes",
-      });
-    }
+    // NOTE: mainnet + MAINNET_CONFIRM is NOT enforced here — read-only
+    // tooling (wait:launch, preflight, config summary) must load a mainnet
+    // env before arming. Enforcement lives at the send/boot layer:
+    // RaceSender refuses to construct and the orchestrator refuses to
+    // start (preflight mode_gate) without MAINNET_CONFIRM=yes.
     if (cfg.PRIORITY_FEE_MIN_MICROLAMPORTS > cfg.PRIORITY_FEE_MAX_MICROLAMPORTS) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
