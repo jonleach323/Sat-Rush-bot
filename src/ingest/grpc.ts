@@ -19,6 +19,7 @@ import type {
 // `default` binding (raw Node). Normalize once; the client class then always
 // sits on the module's `default`.
 interface YellowstoneClient {
+  connect(): Promise<void>;
   subscribe(request?: SubscribeRequest): Promise<ClientDuplexStream>;
 }
 type YellowstoneClientCtor = new (
@@ -53,11 +54,27 @@ export interface YellowstoneIngestOptions {
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 30_000;
 const PING_INTERVAL_MS = 15_000;
+/** connect/subscribe must resolve within this or the attempt is abandoned —
+ * a hung native connect would otherwise freeze the reconnect loop forever. */
+const CONNECT_TIMEOUT_MS = 15_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    // deliberately NOT unref'd: the native connect promise does not hold the
+    // event loop, so this timer must — otherwise the process can exit with
+    // the await forever unsettled.
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 export class YellowstoneIngest extends IngestSource {
   private stream: ClientDuplexStream | null = null;
+  private endStream: (() => void) | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private attempt = 0;
@@ -85,28 +102,30 @@ export class YellowstoneIngest extends IngestSource {
 
   private buildRequest(): SubscribeRequest {
     const program = this.opts.programId.toBase58();
-    return {
-      accounts: {
-        board: {
-          account: [],
-          owner: [program],
-          filters: [
-            { memcmp: { offset: "0", bytes: accountDiscriminator("Board") } },
-          ],
-        },
-        round: {
-          account: [],
-          owner: [program],
-          filters: [
-            { memcmp: { offset: "0", bytes: accountDiscriminator("Round") } },
-          ],
-        },
-        wallet: {
-          account: this.opts.watchAccounts.map((pk) => pk.toBase58()),
-          owner: [],
-          filters: [],
-        },
+    const accounts: SubscribeRequest["accounts"] = {
+      board: {
+        account: [],
+        owner: [program],
+        filters: [{ memcmp: { offset: "0", bytes: accountDiscriminator("Board") } }],
       },
+      round: {
+        account: [],
+        owner: [program],
+        filters: [{ memcmp: { offset: "0", bytes: accountDiscriminator("Round") } }],
+      },
+    };
+    // Only add the wallet group when there is something to watch — an empty
+    // filter group ({account:[],owner:[],filters:[]}) matches EVERY account
+    // on the cluster.
+    if (this.opts.watchAccounts.length > 0) {
+      accounts["wallet"] = {
+        account: this.opts.watchAccounts.map((pk) => pk.toBase58()),
+        owner: [],
+        filters: [],
+      };
+    }
+    return {
+      accounts,
       slots: {
         client: { filterByCommitment: true },
       },
@@ -135,7 +154,13 @@ export class YellowstoneIngest extends IngestSource {
         const client = new Client(this.opts.endpoint, this.opts.xToken, undefined, {
           enabled: false,
         });
-        const stream = await client.subscribe(this.buildRequest());
+        // v5 requires an explicit connect before subscribe
+        await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "grpc connect");
+        const stream = await withTimeout(
+          client.subscribe(this.buildRequest()),
+          CONNECT_TIMEOUT_MS,
+          "grpc subscribe",
+        );
         this.stream = stream;
         stream.on("data", (update: SubscribeUpdate) => {
           this.attempt = 0; // live traffic resets the backoff
@@ -145,6 +170,8 @@ export class YellowstoneIngest extends IngestSource {
         this.emit("status", { connected: true });
 
         await new Promise<void>((resolve, reject) => {
+          this.endStream = resolve; // teardown resolves this explicitly —
+          // removeAllListeners must never leave the loop awaiting forever
           stream.once("error", reject);
           stream.once("end", resolve);
           stream.once("close", resolve);
@@ -192,6 +219,8 @@ export class YellowstoneIngest extends IngestSource {
       this.pingTimer = null;
     }
     if (this.stream) {
+      this.endStream?.(); // settle the connect-loop's ended-promise first
+      this.endStream = null;
       this.stream.removeAllListeners();
       try {
         this.stream.destroy();
