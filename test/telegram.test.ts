@@ -103,6 +103,16 @@ function offlineOps(overrides: Partial<TelegramDeps> = {}) {
       usdcBalance: 4990,
       dbError: null,
     }),
+    getDeploys: () => [
+      {
+        round_id: 1810,
+        mask: 0b101, // tiles 0,2
+        amount: "1000000",
+        status: "landed",
+        fired_slot: 1000,
+        landed_slot: 1001,
+      },
+    ],
     ...overrides,
   };
   const ops = createTelegramOps({ token: "test:token", chatId: CHAT_ID, deps, botInfo: BOT_INFO });
@@ -123,11 +133,11 @@ describe("telegram ops (offline)", () => {
     await ops.bot.handleUpdate(commandUpdate("/status", Number(CHAT_ID), 1));
     expect(sent).toHaveLength(1);
     const text = sent[0]!.text;
-    expect(text).toContain("round: 1810 Active cutoff=31");
-    expect(text).toContain("streak: 9");
+    expect(text).toContain("round 1810 · Active · cutoff 31");
+    expect(text).toContain("streak 9");
     expect(text).toContain("$-3.00 net");
     expect(text).toContain("141384 shares");
-    expect(text).toContain("caps left: $5.00/round, $17.00 daily loss");
+    expect(text).toContain("caps left: $5.00/round · $17.00 daily loss");
   });
 
   it("/kill flips the real bankroll kill switch", async () => {
@@ -181,6 +191,14 @@ describe("telegram ops (offline)", () => {
     await ops.bot.handleUpdate(commandUpdate("/health", Number(CHAT_ID), 11));
     expect(sent[0]!.text).toContain("ingest: fresh");
     expect(sent[0]!.text).toContain("USDC: $4990.00");
+  });
+
+  it("/me shows my deploys with tiles and land latency", async () => {
+    const { ops, sent } = offlineOps();
+    await ops.bot.handleUpdate(commandUpdate("/me", Number(CHAT_ID), 12));
+    expect(sent[0]!.text).toContain("1810 [0,2]");
+    expect(sent[0]!.text).toContain("✅landed");
+    expect(sent[0]!.text).toContain("+1"); // land latency slots
   });
 
   it("ignores unauthorized chats entirely", async () => {

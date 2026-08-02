@@ -89,7 +89,7 @@ describe("MonitorApi — read-only", () => {
     const res = await fetch(`${base}/`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(await res.text()).toContain("SAT RUSH MONITOR");
+    expect(await res.text()).toContain("STRATEGY MONITOR");
   });
 
   it("refuses non-GET methods (no control surface)", async () => {

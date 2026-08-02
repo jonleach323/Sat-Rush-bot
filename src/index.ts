@@ -289,6 +289,7 @@ export class Orchestrator {
           };
         },
         getHealth: () => this.monitor.health(),
+        getDeploys: (limit) => this.monitor.recentDeploys(limit) as never,
       },
     });
     this.telegram.start();
@@ -318,6 +319,7 @@ export class Orchestrator {
 
   private statusReport() {
     const round = this.state.currentRound();
+    const m = this.monitor.status();
     return {
       mode: this.cfg.EXECUTION_MODE,
       roundId: this.state.board?.round_id ?? null,
@@ -332,6 +334,10 @@ export class Orchestrator {
         usdToBase(this.cfg.DAILY_LOSS_CAP_USD) - this.pnl.realizedLossToday(),
       killSwitch: this.bankroll.killSwitchEngaged(),
       paused: this.paused,
+      boardTotalUsd: m.board.totalUsd,
+      strikePoolUsd: m.board.strikePoolUsd,
+      myStakeUsd: m.me.stakeUsd,
+      ingestFresh: m.ingest.fresh,
     };
   }
 

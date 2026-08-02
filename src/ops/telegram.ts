@@ -22,6 +22,20 @@ export interface StatusReport {
   dailyLossCapLeft: bigint;
   killSwitch: boolean;
   paused: boolean;
+  // optional enrichments (shown if present)
+  boardTotalUsd?: number | undefined;
+  strikePoolUsd?: number | undefined;
+  myStakeUsd?: number | undefined;
+  ingestFresh?: boolean | undefined;
+}
+
+export interface DeployRow {
+  round_id: number;
+  mask: number;
+  amount: string;
+  status: string;
+  fired_slot: number | null;
+  landed_slot: number | null;
 }
 
 export interface PnlSummary {
@@ -77,6 +91,7 @@ export interface TelegramDeps {
   getCompetitors?(limit: number): CompetitorRow[] | Promise<CompetitorRow[]>;
   getBoard?(): BoardReport | Promise<BoardReport>;
   getHealth?(): HealthReport | Promise<HealthReport>;
+  getDeploys?(limit: number): DeployRow[] | Promise<DeployRow[]>;
 }
 
 export interface TelegramOpsOptions {
@@ -101,15 +116,31 @@ const usd = (v: bigint) => `$${baseToUsd(v).toFixed(2)}`;
 const usdn = (n: number) => `$${n.toFixed(2)}`;
 const short = (s: string) => (s.length > 9 ? `${s.slice(0, 4)}…${s.slice(-4)}` : s);
 
+const tilesOfMask = (mask: number): number[] => {
+  const t: number[] = [];
+  for (let i = 0; i < 21; i++) if (mask & (1 << i)) t.push(i);
+  return t;
+};
+
 export function formatStatus(s: StatusReport): string {
-  return [
-    `mode: ${s.mode}${s.paused ? " (PAUSED)" : ""}${s.killSwitch ? " ⛔ KILL SWITCH" : ""}`,
-    `round: ${s.roundId ?? "?"} ${s.roundState ?? ""} cutoff=${s.slotsToCutoff ?? "—"}`,
-    `streak: ${s.streak ?? "?"}`,
-    `today: ${usd(s.todayNet)} net`,
+  const flags = `${s.paused ? " ⏸PAUSED" : ""}${s.killSwitch ? " ⛔KILL" : ""}`;
+  const ingest = s.ingestFresh === undefined ? "" : s.ingestFresh ? " · ingest live" : " · ⚠INGEST STALE";
+  const lines = [
+    `⛏ SAT RUSH — ${s.mode.toUpperCase()}${flags}${ingest}`,
+    `round ${s.roundId ?? "?"} · ${s.roundState ?? "—"} · cutoff ${s.slotsToCutoff ?? "—"}`,
+    `today: ${usd(s.todayNet)} net · streak ${s.streak ?? "?"}`,
+  ];
+  if (s.boardTotalUsd !== undefined) {
+    lines.push(
+      `board: ${usdn(s.boardTotalUsd)}${s.myStakeUsd ? ` · my stake ${usdn(s.myStakeUsd)}` : ""}` +
+        (s.strikePoolUsd !== undefined ? ` · strike ${usdn(s.strikePoolUsd)}` : ""),
+    );
+  }
+  lines.push(
     `unclaimed: ${usd(s.unclaimedUsd)} + ${s.unclaimedShares} shares`,
-    `caps left: ${usd(s.perRoundCapLeft)}/round, ${usd(s.dailyLossCapLeft)} daily loss`,
-  ].join("\n");
+    `caps left: ${usd(s.perRoundCapLeft)}/round · ${usd(s.dailyLossCapLeft)} daily loss`,
+  );
+  return lines.join("\n");
 }
 
 export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
@@ -209,6 +240,25 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     );
   });
 
+  bot.command("me", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getDeploys) return void ctx.reply("deploy history unavailable");
+    const rows = await opts.deps.getDeploys(10);
+    if (rows.length === 0) return void ctx.reply("no deploys yet");
+    await ctx.reply(
+      ["my deploys (round tiles amount status land):"]
+        .concat(
+          rows.map((d) => {
+            const land =
+              d.landed_slot && d.fired_slot ? `+${d.landed_slot - d.fired_slot}` : "—";
+            const mark = d.status === "landed" ? "✅" : d.status === "dry" ? "○" : "✗";
+            return `${d.round_id} [${tilesOfMask(d.mask).join(",")}] ${usdn(Number(d.amount) / 1e6)} ${mark}${d.status} ${land}`;
+          }),
+        )
+        .join("\n"),
+    );
+  });
+
   bot.command("health", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     if (!opts.deps.getHealth) return void ctx.reply("health data unavailable");
@@ -226,7 +276,11 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
   bot.command("help", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     await ctx.reply(
-      "/status /pnl /board /rounds /competitors /health · /pause /resume /kill",
+      [
+        "⛏ SAT RUSH commands",
+        "view: /status /board /me /pnl /rounds /competitors /health",
+        "control: /pause /resume /kill",
+      ].join("\n"),
     );
   });
 
