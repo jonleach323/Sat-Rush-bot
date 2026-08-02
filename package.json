@@ -12,7 +12,8 @@
     "config": "tsx src/config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "sim": "tsx test/sim.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
