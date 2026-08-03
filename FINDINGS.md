@@ -184,5 +184,9 @@ Consequence: the vault EV model must convert hashrate points → tickets at this
 price (config `VAULT_HASHRATE_PER_TICKET`, default 100). Also confirmed live:
 the builders, PDAs, and page/entry init all land correctly, and the decoders
 round-trip against real on-chain vault accounts. **Verify the price on mainnet
-before enabling live** — and it is not yet confirmed for the 1-BTC vault (that
-buy takes a fresh ticket-keypair signer; untested).
+before enabling live.**
+
+1-BTC vault confirmed too (iteration 19): `buy_one_btc_tickets` with a fresh
+ticket-keypair signer landed, 2 tickets for 200 hashrate → **also 100
+points/ticket** (uniform across both vaults). Tx:
+[`2ch9Dyta5DjB…`](https://explorer.solana.com/tx/2ch9Dyta5DjBBwagSY9tCz3cKkf5W2Sb5orWbwMWognZYxkAS87sT6aYy3EZPXRFLYFCZ7pr1PxCKdxxxAvrHJd6?cluster=devnet)
