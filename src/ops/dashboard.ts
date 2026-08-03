@@ -132,6 +132,10 @@ export const DASHBOARD_HTML = `<!doctype html>
     </div>
   </div>
 
+  <h2>Vault · <span id="vaultsub" class="mono" style="color:var(--ink-2)"></span></h2>
+  <div class="stat" id="vaultstat"></div>
+  <table id="vaulttbl"><thead><tr><th>kind</th><th class="r">iter</th><th class="r">tickets</th><th>status</th></tr></thead><tbody></tbody></table>
+
   <h2>Recent competitor deploys</h2>
   <table id="comp"><thead><tr><th>round</th><th>wallet</th><th class="r">gross</th><th class="r">net stake</th><th>type</th><th class="r">slot</th></tr></thead><tbody></tbody></table>
 
@@ -150,12 +154,13 @@ async function jget(path){ const r = await fetch(path, H); if(!r.ok) throw new E
 
 async function poll() {
   try {
-    const [s, rounds, deploys, comp, health] = await Promise.all([
+    const [s, rounds, deploys, comp, health, vault] = await Promise.all([
       jget("/api/status"), jget("/api/rounds?limit=12"), jget("/api/deploys?limit=10"),
       jget("/api/competitors?limit=12"), jget("/api/health").catch(()=>null),
+      jget("/api/vault").catch(()=>null),
     ]);
     el("err").style.display="none";
-    render(s, rounds, deploys, comp, health);
+    render(s, rounds, deploys, comp, health, vault);
     el("clock").textContent = new Date().toLocaleTimeString();
   } catch (e) {
     const err = el("err"); err.style.display="block";
@@ -165,7 +170,7 @@ async function poll() {
 
 function pill(id, text, cls){ const e=el(id); e.textContent=text; e.className="pill "+(cls||""); }
 
-function render(s, rounds, deploys, comp, health) {
+function render(s, rounds, deploys, comp, health, vault) {
   pill("mode", s.mode, s.mode==="mainnet"?"bad":s.mode==="devnet"?"warn":"");
   pill("round", "round "+(s.round.id??"?")+" · "+(s.round.state??"—")+" · cutoff "+(s.round.slotsToCutoff??"—"), "accent");
   el("kill").style.display = s.killSwitch?"":"none";
@@ -213,6 +218,24 @@ function render(s, rounds, deploys, comp, health) {
     '<tr><td class="mono">'+c.round_id+'</td><td class="mono">'+short(c.authority)+'</td><td class="r mono">'+usd(base(c.amount))+
     '</td><td class="r mono">'+usd(base(c.total_stake))+'</td><td class="'+(c.is_automation?"auto":"")+'">'+(c.is_automation?"auto":"manual")+
     '</td><td class="r mono">'+c.slot+'</td></tr>').join("") || emptyRow(6);
+
+  renderVault(vault);
+}
+
+function renderVault(v){
+  if(!v){ el("vaultsub").textContent="unavailable"; el("vaultstat").innerHTML=""; return; }
+  el("vaultsub").textContent = v.enabled ? "ON" : "OFF";
+  el("vaultstat").innerHTML = [
+    ["Hashrate", v.hashrate, ""],
+    ["Unclaimed HR", v.unclaimedHashrate, ""],
+    ["Epoch tickets", v.epoch.ticketsBought, ""],
+    ["Epoch claims", v.epoch.iterationsClaimed+"/"+v.epoch.iterationsPlayed, ""],
+    ["1-BTC tickets", v.oneBtc.ticketsBought, ""],
+    ["1-BTC claims", v.oneBtc.iterationsClaimed+"/"+v.oneBtc.iterationsPlayed, ""],
+  ].map(([k,val,c]) => card(k,val,c)).join("");
+  el("vaulttbl").querySelector("tbody").innerHTML = (v.recent||[]).map(r =>
+    '<tr><td>'+r.kind+'</td><td class="r mono">'+r.iteration_id+'</td><td class="r mono">'+r.tickets+
+    '</td><td class="'+(r.claimed?"win":"")+'">'+(r.claimed?"claimed":"open")+'</td></tr>').join("") || emptyRow(4);
 }
 
 function card(k,v,c,sub){ return '<div class="card"><div class="k">'+k+'</div><div class="v '+(c||"")+'">'+v+'</div>'+(sub?'<div class="sub">'+sub+'</div>':'')+'</div>'; }

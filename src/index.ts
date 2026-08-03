@@ -185,6 +185,7 @@ export class Orchestrator {
         return BigInt(balance.value.amount);
       },
       btcUsdEstimate: cfg.BTC_USD_ESTIMATE,
+      vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
     });
   }
 
@@ -382,6 +383,7 @@ export class Orchestrator {
         },
         getHealth: () => this.monitor.health(),
         getDeploys: (limit) => this.monitor.recentDeploys(limit) as never,
+        getVault: () => this.monitor.vault(),
       },
     });
     this.telegram.start();
@@ -1035,7 +1037,10 @@ export class Orchestrator {
         buildClaimEpochReward(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
         { kind: "vault_epoch_claim", iterationId },
       );
-      if (outcome === "landed") this.db.markVaultClaimed("epoch", iterationId);
+      if (outcome === "landed") {
+        this.db.markVaultClaimed("epoch", iterationId);
+        this.alert(`🏆 vault WIN — claimed epoch iteration ${iterationId}`);
+      }
     } else if (action === "done" && live) {
       this.db.markVaultClaimed("epoch", iterationId); // lost or fully resolved
     }
@@ -1094,7 +1099,10 @@ export class Orchestrator {
         }),
         { kind: "vault_one_btc_claim", iterationId },
       );
-      if (outcome === "landed") this.db.markVaultClaimed("one_btc", iterationId);
+      if (outcome === "landed") {
+        this.db.markVaultClaimed("one_btc", iterationId);
+        this.alert(`🏆 vault WIN — claimed 1-BTC iteration ${iterationId}`);
+      }
     } else if (action === "done" && live) {
       this.db.markVaultClaimed("one_btc", iterationId);
     }
@@ -1161,6 +1169,9 @@ export class Orchestrator {
     );
     if (result.outcome === "landed" || result.outcome === "dry") {
       this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, sig: signature });
+    }
+    if (result.outcome === "landed") {
+      this.alert(`⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
     }
     return signature;
   }

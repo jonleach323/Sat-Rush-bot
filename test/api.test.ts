@@ -22,6 +22,14 @@ const fakeData: MonitorData = {
   recentDeploys: (n) => Array.from({ length: Math.min(n, 200) }, (_, i) => ({ round_id: 42 - i })),
   recentCompetitors: (n) =>
     Array.from({ length: Math.min(n, 200) }, (_, i) => ({ round_id: 42 - i })),
+  vault: () => ({
+    enabled: false,
+    hashrate: 1795,
+    unclaimedHashrate: 607,
+    epoch: { ticketsBought: 5, iterationsPlayed: 1, iterationsClaimed: 0 },
+    oneBtc: { ticketsBought: 2, iterationsPlayed: 1, iterationsClaimed: 0 },
+    recent: [{ kind: "epoch", iteration_id: 293, tickets: 5, claimed: 0 }],
+  }),
   health: async () => ({
     ingestFresh: true,
     ingestSlotAgeMs: 100,
@@ -75,6 +83,14 @@ describe("MonitorApi — auth", () => {
   it("accepts a query-param token (for the dashboard/browser)", async () => {
     const res = await fetch(`${base}/api/status?token=${TOKEN}`);
     expect(res.status).toBe(200);
+  });
+
+  it("serves the vault view", async () => {
+    const res = await fetch(`${base}/api/vault`, auth);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { epoch: { ticketsBought: number }; hashrate: number };
+    expect(body.epoch.ticketsBought).toBe(5);
+    expect(body.hashrate).toBe(1795);
   });
 });
 

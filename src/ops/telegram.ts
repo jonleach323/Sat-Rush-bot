@@ -92,6 +92,16 @@ export interface TelegramDeps {
   getBoard?(): BoardReport | Promise<BoardReport>;
   getHealth?(): HealthReport | Promise<HealthReport>;
   getDeploys?(limit: number): DeployRow[] | Promise<DeployRow[]>;
+  getVault?(): VaultReport | Promise<VaultReport>;
+}
+
+export interface VaultReport {
+  enabled: boolean;
+  hashrate: number;
+  unclaimedHashrate: number;
+  epoch: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
+  oneBtc: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
+  recent: Record<string, unknown>[];
 }
 
 export interface TelegramOpsOptions {
@@ -273,12 +283,33 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     );
   });
 
+  bot.command("vault", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getVault) return void ctx.reply("vault data unavailable");
+    const v = await opts.deps.getVault();
+    const lines = [
+      `⛏ vault: ${v.enabled ? "ON" : "OFF"}`,
+      `hashrate: ${v.hashrate} (unclaimed ${v.unclaimedHashrate})`,
+      `epoch: ${v.epoch.ticketsBought} tickets / ${v.epoch.iterationsPlayed} draws / ${v.epoch.iterationsClaimed} claimed`,
+      `1-BTC: ${v.oneBtc.ticketsBought} tickets / ${v.oneBtc.iterationsPlayed} draws / ${v.oneBtc.iterationsClaimed} claimed`,
+    ];
+    if (v.recent.length > 0) {
+      lines.push("recent:");
+      for (const r of v.recent.slice(0, 8)) {
+        lines.push(
+          `  ${r.kind} it${r.iteration_id} ×${r.tickets}${r.claimed ? " ✓" : ""}`,
+        );
+      }
+    }
+    await ctx.reply(lines.join("\n"));
+  });
+
   bot.command("help", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     await ctx.reply(
       [
         "⛏ SAT RUSH commands",
-        "view: /status /board /me /pnl /rounds /competitors /health",
+        "view: /status /board /me /pnl /rounds /competitors /vault /health",
         "control: /pause /resume /kill",
       ].join("\n"),
     );

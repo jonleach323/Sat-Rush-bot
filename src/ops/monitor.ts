@@ -38,12 +38,22 @@ export interface HealthJson {
   dbError: string | null;
 }
 
+export interface VaultJson {
+  enabled: boolean;
+  hashrate: number;
+  unclaimedHashrate: number;
+  epoch: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
+  oneBtc: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
+  recent: Record<string, unknown>[];
+}
+
 export interface MonitorData {
   status(): StatusJson;
   pnlDaily(): Record<string, unknown> | null;
   recentRounds(limit: number): Record<string, unknown>[];
   recentDeploys(limit: number): Record<string, unknown>[];
   recentCompetitors(limit: number): Record<string, unknown>[];
+  vault(): VaultJson;
   health(): Promise<HealthJson>;
 }
 
@@ -62,6 +72,7 @@ export interface MonitorContext {
   solBalanceLamports: () => Promise<number>;
   usdcBalanceBaseUnits: () => Promise<bigint>;
   btcUsdEstimate: number;
+  vaultEnabled: boolean;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -163,6 +174,30 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         "SELECT round_id, authority, mask, amount, total_stake, is_automation, reload, slot, created_at FROM competitor_deploys ORDER BY id DESC LIMIT ?",
         Math.min(Math.max(1, limit), 200),
       );
+    },
+
+    vault(): VaultJson {
+      const agg = (kind: "epoch" | "one_btc") =>
+        ctx.db.queryOne<{ tickets: number; iters: number; claimed: number }>(
+          `SELECT COALESCE(SUM(tickets),0) AS tickets,
+                  COUNT(DISTINCT iteration_id) AS iters,
+                  COUNT(DISTINCT CASE WHEN claimed=1 THEN iteration_id END) AS claimed
+           FROM vault_tickets WHERE kind = ?`,
+          kind,
+        ) ?? { tickets: 0, iters: 0, claimed: 0 };
+      const e = agg("epoch");
+      const o = agg("one_btc");
+      const miner = ctx.state.miner;
+      return {
+        enabled: ctx.vaultEnabled,
+        hashrate: Number(big(miner?.hashrate_amount).toString()),
+        unclaimedHashrate: Number(big(miner?.unclaimed_hashrate).toString()),
+        epoch: { ticketsBought: e.tickets, iterationsPlayed: e.iters, iterationsClaimed: e.claimed },
+        oneBtc: { ticketsBought: o.tickets, iterationsPlayed: o.iters, iterationsClaimed: o.claimed },
+        recent: ctx.db.query(
+          "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
+        ),
+      };
     },
 
     async health(): Promise<HealthJson> {

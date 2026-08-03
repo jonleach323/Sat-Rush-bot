@@ -13,6 +13,7 @@
  * GET /api/rounds?limit  — auth
  * GET /api/deploys?limit — auth
  * GET /api/competitors?limit — auth
+ * GET /api/vault          — auth
  *
  * Auth: `Authorization: Bearer <token>` or `?token=<token>`.
  */
@@ -95,6 +96,8 @@ export class MonitorApi {
                 return send(200, data.recentDeploys(limit));
               case "/api/competitors":
                 return send(200, data.recentCompetitors(limit));
+              case "/api/vault":
+                return send(200, data.vault());
               default:
                 return send(404, { error: "not found" });
             }
