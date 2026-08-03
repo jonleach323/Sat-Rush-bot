@@ -1,0 +1,77 @@
+#  Auto-deploy pipeline.
+#
+#  On every push to the deploy branch: verify (typecheck + tests + build), then
+#  ship the code to the VPS (git reset to the pushed commit, install, build,
+#  restart the service). The verify job is a hard gate — a red build never
+#  deploys.
+#
+#  IMPORTANT — this ships CODE only. It never touches /etc/satrush/.env, so
+#  EXECUTION_MODE and the VAULT_* flags are whatever you set on the box. The
+#  bot does not auto-arm mainnet and does not auto-enable the vault strategy;
+#  those remain deliberate env decisions. Keep the vault disabled on mainnet
+#  until it is devnet-validated and VAULT_HASHRATE_PER_TICKET is re-measured
+#  on mainnet.
+#
+#  Required repo secrets (Settings → Secrets and variables → Actions):
+#    VPS_HOST     — the server's host/IP
+#    VPS_USER     — an SSH user with sudo (e.g. ubuntu)
+#    VPS_SSH_KEY  — that user's private key (PEM)
+#
+#  Recommended: add a required-reviewer rule on the `mainnet` environment
+#  (Settings → Environments → mainnet) to reintroduce a one-click human
+#  approval before each mainnet deploy — the checkpoint that caught real bugs.
+
+name: deploy
+
+on:
+  push:
+    branches: [claude/sat-rush-strategy-client-1elnqw]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-mainnet
+  cancel-in-progress: false
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Gate deploys behind this environment; add a required reviewer to make each
+    # mainnet ship a one-click manual approval.
+    environment: mainnet
+    steps:
+      - name: Ship to the VPS and restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: "10m"
+          script: |
+            set -euo pipefail
+            BRANCH="${{ github.ref_name }}"
+            echo "── fetch + reset /opt/satrush to origin/$BRANCH ──"
+            sudo -u satrush git -C /opt/satrush fetch origin "$BRANCH"
+            sudo -u satrush git -C /opt/satrush reset --hard "origin/$BRANCH"
+            echo "── install + build (gitignored .env / keypairs / data untouched) ──"
+            sudo -u satrush bash -c 'cd /opt/satrush && pnpm install --frozen-lockfile && pnpm build'
+            echo "── restart service ──"
+            sudo systemctl restart satrush
+            sleep 3
+            systemctl --no-pager --lines=0 status satrush
