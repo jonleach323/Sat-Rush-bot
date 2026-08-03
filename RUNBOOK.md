@@ -265,33 +265,3 @@ Use an outbound tunnel from the VPS:
 paste the HTTPS URL + token; Claude fetches `<url>/api/status` etc. and
 diagnoses. Use a monitoring-scoped API_TOKEN you can rotate (it's read-only
 and everything it shows is public chain data, but rotate it after sharing).
-
-## 9. Auto-deploy (CI/CD)
-
-`.github/workflows/deploy.yml` ships code to the VPS on every push to the deploy
-branch: **verify (typecheck + tests + build) → SSH deploy (git reset to the
-pushed commit, install, build, restart)**. A red build never deploys.
-
-One-time setup:
-- Add repo secrets (Settings → Secrets and variables → Actions): `VPS_HOST`,
-  `VPS_USER` (sudo-capable SSH user), `VPS_SSH_KEY` (that user's private key).
-- The VPS must be reachable over SSH from GitHub's runners (ufw already allows
-  SSH). The `satrush` app tree at `/opt/satrush` must already be the git clone
-  (Phase C).
-
-**Safety boundary — this ships CODE only.** It never touches
-`/etc/satrush/.env`, so `EXECUTION_MODE` and every `VAULT_*` flag stay whatever
-you set on the box. The pipeline does **not** auto-arm mainnet and does **not**
-auto-enable the vault strategy. Arming remains a deliberate env edit + restart.
-
-**Keep the human checkpoint.** The bugs this project hit (the 100× ticket
-price, the UTC-midnight false-halt, the Telegram gate) were caught by review and
-devnet testing, not by the test suite. Auto-deploy removes that gate. Strongly
-recommended: add a **required reviewer** on the `mainnet` GitHub Environment
-(Settings → Environments → mainnet) so each mainnet ship needs one click of
-human approval. And never enable `VAULT_STRATEGY_ENABLED` on mainnet until the
-vault is devnet-validated and `VAULT_HASHRATE_PER_TICKET` is re-measured on
-mainnet.
-
-Note: a deploy restarts the service, which interrupts any in-flight round —
-prefer pushing between rounds, or use the environment approval gate to time it.
