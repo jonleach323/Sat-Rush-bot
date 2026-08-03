@@ -7,6 +7,7 @@
 import {
   PublicKey,
   SystemProgram,
+  SYSVAR_SLOT_HASHES_PUBKEY,
   TransactionInstruction,
   type AccountMeta,
 } from "@solana/web3.js";
@@ -21,7 +22,13 @@ import {
   boardBtcAta,
   boardPda,
   boardUsdAta,
+  epochVaultEntryPda,
+  epochVaultIterationPda,
+  epochVaultPagePda,
+  epochVaultPda,
   minerPda,
+  oneBtcVaultIterationPda,
+  oneBtcVaultPda,
   publicAutomationPda,
   publicDeploymentPda,
   roundPda,
@@ -218,5 +225,244 @@ export function buildClaimUsd(
     data: instructionCoder.encode("claim_usd", {
       amount: toBn(params.amount, "amount"),
     }),
+  });
+}
+
+// ── hashrate-funded raffle vaults ───────────────────────────────────────────
+// Tickets are bought with hashrate (1 hashrate point per ticket, per the IDL:
+// no price constant, InsufficientHashrate bounds tickets_to_buy by the miner's
+// balance). Iteration ids are read from the decoded vault account, never
+// assumed. Buying a 1-BTC ticket inits a fresh `ticket` account (a keypair the
+// caller generates and must add as a signer).
+
+export interface BuyOneBtcTicketsParams {
+  authority: PublicKey;
+  /** one_btc_vault.iteration_id (from the decoded vault). */
+  iterationId: number;
+  /** Fresh keypair pubkey for the ticket account; must sign the tx. */
+  ticket: PublicKey;
+  ticketsToBuy: bigint;
+}
+
+export function buildBuyOneBtcTickets(
+  ctx: InstructionContext,
+  params: BuyOneBtcTicketsParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId, ticket } = params;
+
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(minerPda(authority, programId), true),
+      meta(oneBtcVaultPda(programId)),
+      meta(oneBtcVaultIterationPda(iterationId, programId), true),
+      meta(ticket, true, true),
+      meta(SystemProgram.programId),
+      meta(eventAuthorityPda(programId)),
+      meta(programId),
+    ],
+    data: instructionCoder.encode("buy_one_btc_tickets", {
+      tickets_to_buy: toBn(params.ticketsToBuy, "tickets_to_buy"),
+    }),
+  });
+}
+
+export interface BuyEpochTicketsParams {
+  authority: PublicKey;
+  /** epoch_vault.iteration_id (from the decoded vault). */
+  iterationId: number;
+  pageIndex: number;
+  ticketsToBuy: bigint;
+}
+
+export function buildBuyEpochTickets(
+  ctx: InstructionContext,
+  params: BuyEpochTicketsParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId, pageIndex } = params;
+
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(minerPda(authority, programId), true),
+      meta(satrushConfigPda(programId)),
+      meta(epochVaultPda(programId)),
+      meta(epochVaultIterationPda(iterationId, programId), true),
+      meta(epochVaultPagePda(iterationId, pageIndex, programId), true),
+      meta(epochVaultEntryPda(iterationId, authority, programId), true),
+      meta(SystemProgram.programId),
+      meta(eventAuthorityPda(programId)),
+      meta(programId),
+    ],
+    data: instructionCoder.encode("buy_epoch_tickets", {
+      tickets_to_buy: toBn(params.ticketsToBuy, "tickets_to_buy"),
+      page_index: pageIndex,
+    }),
+  });
+}
+
+export interface TriggerOneBtcDrawParams {
+  authority: PublicKey;
+  /** Current one_btc_vault.iteration_id. */
+  iterationId: number;
+}
+
+export function buildTriggerOneBtcDraw(
+  ctx: InstructionContext,
+  params: TriggerOneBtcDrawParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId } = params;
+
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(satrushConfigPda(programId)),
+      meta(oneBtcVaultPda(programId), true),
+      meta(oneBtcVaultIterationPda(iterationId, programId), true),
+      meta(oneBtcVaultIterationPda(iterationId + 1, programId), true),
+      meta(SYSVAR_SLOT_HASHES_PUBKEY),
+      meta(SystemProgram.programId),
+      meta(eventAuthorityPda(programId)),
+      meta(programId),
+    ],
+    data: instructionCoder.encode("trigger_one_btc_draw", {}),
+  });
+}
+
+export interface TriggerEpochDrawParams {
+  authority: PublicKey;
+  /** Current epoch_vault.iteration_id. */
+  iterationId: number;
+}
+
+export function buildTriggerEpochDraw(
+  ctx: InstructionContext,
+  params: TriggerEpochDrawParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId } = params;
+
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(satrushConfigPda(programId)),
+      meta(epochVaultPda(programId), true),
+      meta(epochVaultIterationPda(iterationId, programId), true),
+      meta(epochVaultIterationPda(iterationId + 1, programId), true),
+      meta(SYSVAR_SLOT_HASHES_PUBKEY),
+      meta(SystemProgram.programId),
+      meta(eventAuthorityPda(programId)),
+      meta(programId),
+    ],
+    data: instructionCoder.encode("trigger_epoch_draw", {}),
+  });
+}
+
+export interface SelectEpochWinnerParams {
+  authority: PublicKey;
+  /** Iteration being settled. */
+  iterationId: number;
+  /** Page holding the current winning ticket. */
+  pageIndex: number;
+}
+
+export function buildSelectEpochWinner(
+  ctx: InstructionContext,
+  params: SelectEpochWinnerParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId, pageIndex } = params;
+
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, false, true),
+      meta(satrushConfigPda(programId)),
+      meta(epochVaultPda(programId), true),
+      meta(epochVaultIterationPda(iterationId, programId), true),
+      meta(epochVaultPagePda(iterationId, pageIndex, programId)),
+      meta(eventAuthorityPda(programId)),
+      meta(programId),
+    ],
+    data: instructionCoder.encode("select_epoch_winner", {
+      page_index: pageIndex,
+    }),
+  });
+}
+
+export interface ClaimOneBtcRewardParams {
+  authority: PublicKey;
+  /** Iteration whose prize is being claimed. */
+  iterationId: number;
+  /** The winning ticket account (kept from the buy). */
+  ticket: PublicKey;
+}
+
+export function buildClaimOneBtcReward(
+  ctx: InstructionContext,
+  params: ClaimOneBtcRewardParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId, ticket } = params;
+  const vault = oneBtcVaultPda(programId);
+
+  // claim_one_btc_reward emits no event — no event_authority/program.
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(vault, true),
+      meta(oneBtcVaultIterationPda(iterationId, programId), true),
+      meta(ticket),
+      meta(ctx.btcMint),
+      meta(getAssociatedTokenAddressSync(ctx.btcMint, vault, true), true),
+      meta(getAssociatedTokenAddressSync(ctx.btcMint, authority), true),
+      meta(TOKEN_PROGRAM_ID),
+      meta(ASSOCIATED_TOKEN_PROGRAM_ID),
+      meta(SystemProgram.programId),
+    ],
+    data: instructionCoder.encode("claim_one_btc_reward", {}),
+  });
+}
+
+export interface ClaimEpochRewardParams {
+  authority: PublicKey;
+  /** Iteration whose reward is being claimed. */
+  iterationId: number;
+}
+
+export function buildClaimEpochReward(
+  ctx: InstructionContext,
+  params: ClaimEpochRewardParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, iterationId } = params;
+  const vault = epochVaultPda(programId);
+
+  // claim_epoch_reward emits no event — no event_authority/program.
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(vault, true),
+      meta(epochVaultIterationPda(iterationId, programId), true),
+      meta(ctx.usdMint),
+      meta(ctx.btcMint),
+      meta(getAssociatedTokenAddressSync(ctx.usdMint, vault, true), true),
+      meta(getAssociatedTokenAddressSync(ctx.btcMint, vault, true), true),
+      meta(getAssociatedTokenAddressSync(ctx.usdMint, authority), true),
+      meta(getAssociatedTokenAddressSync(ctx.btcMint, authority), true),
+      meta(TOKEN_PROGRAM_ID),
+      meta(ASSOCIATED_TOKEN_PROGRAM_ID),
+      meta(SystemProgram.programId),
+    ],
+    data: instructionCoder.encode("claim_epoch_reward", {}),
   });
 }

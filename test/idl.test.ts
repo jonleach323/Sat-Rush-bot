@@ -34,6 +34,13 @@ describe("discriminators from the IDL", () => {
       "PublicAutomation",
       "SatrushConfig",
       "SatsVault",
+      "OneBtcVault",
+      "OneBtcVaultIteration",
+      "OneBtcVaultEntry",
+      "EpochVault",
+      "EpochVaultIteration",
+      "EpochVaultEntry",
+      "EpochVaultPage",
     ]) {
       expect(ACCOUNT_DISCRIMINATORS[name], name).toBeInstanceOf(Uint8Array);
       expect(ACCOUNT_DISCRIMINATORS[name], name).toHaveLength(8);
@@ -63,6 +70,10 @@ describe("PDA seed constants from the IDL", () => {
     expect(decode(pdaConstSeed("public_deployment"))).toBe("public_deployment");
     expect(decode(pdaConstSeed("public_automation"))).toBe("public_automation");
     expect(decode(pdaConstSeed("sats_vault"))).toBe("sats_vault");
+    expect(decode(pdaConstSeed("one_btc_vault"))).toBe("one_btc_vault");
+    expect(decode(pdaConstSeed("epoch_vault"))).toBe("epoch_vault");
+    expect(decode(pdaConstSeed("epoch_vault_page"))).toBe("epoch_vault_page");
+    expect(decode(pdaConstSeed("epoch_vault_entry"))).toBe("epoch_vault_entry");
   });
 
   it("throws on unknown account names", () => {

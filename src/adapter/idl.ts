@@ -247,6 +247,121 @@ export interface SatsVault {
   reserved: number[];
 }
 
+// ── hashrate-funded raffle vaults ────────────────────────────────────────────
+
+export type OneBtcState =
+  | { Open: Record<string, never> }
+  | { Settled: Record<string, never> }
+  | { Complete: Record<string, never> };
+
+export type EpochState =
+  | { Open: Record<string, never> }
+  | { Settling: Record<string, never> }
+  | { Settled: Record<string, never> }
+  | { Complete: Record<string, never> };
+
+export interface OneBtcVault {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  pending_usd_amount: BN;
+  btc_amount: BN;
+  reserved_btc_amount: BN;
+  last_trigger_slot: BN;
+  reserved: number[];
+}
+
+export interface OneBtcVaultIteration {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  state: OneBtcState;
+  total_tickets: BN;
+  entropy: number[];
+  winning_ticket: BN;
+  prize_btc: BN;
+  reserved: number[];
+}
+
+export interface OneBtcVaultEntry {
+  version: number;
+  iteration_id: number;
+  authority: PublicKey;
+  start_ticket_id: BN;
+  tickets_count: BN;
+  reserved: number[];
+}
+
+export interface EpochVault {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  last_trigger_slot: BN;
+  pending_usd_amount: BN;
+  pool_usd_amount: BN;
+  pool_btc_amount: BN;
+  reserved_usd_amount: BN;
+  reserved_btc_amount: BN;
+  reserved: number[];
+}
+
+export interface Winner {
+  authority: PublicKey;
+  page_index: number;
+  tickets: BN;
+  claimed: boolean;
+}
+
+export interface EpochVaultIteration {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  state: EpochState;
+  total_tickets: BN;
+  participants_count: number;
+  page_count: number;
+  current_page_index: number;
+  current_page_entry_count: number;
+  entropy: number[];
+  claimable_usd: BN;
+  claimable_btc: BN;
+  total_tickets_remaining: BN;
+  current_winning_ticket: BN;
+  sealed_pages_count: number;
+  winners_selected: number;
+  winners_claimed: number;
+  winners: Winner[];
+  reserved: number[];
+}
+
+export interface EpochVaultEntry {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  authority: PublicKey;
+  page_index: number;
+  tickets: BN;
+  reserved: number[];
+}
+
+export interface PageEntry {
+  authority: PublicKey;
+  tickets: BN;
+}
+
+export interface EpochVaultPage {
+  version: number;
+  bump: number;
+  iteration_id: number;
+  page_index: number;
+  total_tickets: BN;
+  cumulative_base: BN;
+  sealed: boolean;
+  entry_count: number;
+  entries: PageEntry[];
+  reserved: number[];
+}
+
 // ── event shapes ─────────────────────────────────────────────────────────────
 
 export interface PublicDeployCreated {

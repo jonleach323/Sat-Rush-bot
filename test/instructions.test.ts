@@ -4,7 +4,12 @@
  * the IDL's account list position by position.
  */
 import { describe, expect, it } from "vitest";
-import { Keypair, PublicKey, type TransactionInstruction } from "@solana/web3.js";
+import {
+  Keypair,
+  PublicKey,
+  SYSVAR_SLOT_HASHES_PUBKEY,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -13,10 +18,17 @@ import {
 import type { BN } from "../src/adapter/idl.js";
 import { instructionCoder, PROGRAM_ID, SATRUSH_IDL } from "../src/adapter/idl.js";
 import {
+  buildBuyEpochTickets,
+  buildBuyOneBtcTickets,
+  buildClaimEpochReward,
+  buildClaimOneBtcReward,
   buildClaimSats,
   buildClaimUsd,
   buildDeployPublic,
+  buildSelectEpochWinner,
   buildSettleDeployPublic,
+  buildTriggerEpochDraw,
+  buildTriggerOneBtcDraw,
   eventAuthorityPda,
   type InstructionContext,
 } from "../src/adapter/instructions.js";
@@ -25,7 +37,13 @@ import {
   boardBtcAta,
   boardPda,
   boardUsdAta,
+  epochVaultEntryPda,
+  epochVaultIterationPda,
+  epochVaultPagePda,
+  epochVaultPda,
   minerPda,
+  oneBtcVaultIterationPda,
+  oneBtcVaultPda,
   publicAutomationPda,
   publicDeploymentPda,
   roundPda,
@@ -258,5 +276,177 @@ describe("claim_usd", () => {
         }
       }
     }
+  });
+});
+
+// ── hashrate-funded raffle vaults ───────────────────────────────────────────
+
+const ITER = 7;
+const PAGE = 2;
+const ticket = Keypair.generate().publicKey;
+
+describe("buy_one_btc_tickets", () => {
+  const ix = buildBuyOneBtcTickets(ctx, {
+    authority,
+    iterationId: ITER,
+    ticket,
+    ticketsToBuy: 25n,
+  });
+
+  it("decodes back to the same args", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("buy_one_btc_tickets");
+    expect((decoded!.data as { tickets_to_buy: BN }).tickets_to_buy.toString()).toBe("25");
+  });
+
+  it("matches the IDL account list (ticket is a fresh signer)", () => {
+    expectMatchesIdl("buy_one_btc_tickets", ix, {
+      authority,
+      miner: minerPda(authority),
+      one_btc_vault: oneBtcVaultPda(),
+      one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
+      ticket,
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+  });
+
+  it("rejects a non-positive ticket count", () => {
+    expect(() =>
+      buildBuyOneBtcTickets(ctx, { authority, iterationId: ITER, ticket, ticketsToBuy: 0n }),
+    ).toThrow(RangeError);
+  });
+});
+
+describe("buy_epoch_tickets", () => {
+  const ix = buildBuyEpochTickets(ctx, {
+    authority,
+    iterationId: ITER,
+    pageIndex: PAGE,
+    ticketsToBuy: 40n,
+  });
+
+  it("decodes back to the same args", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("buy_epoch_tickets");
+    const data = decoded!.data as { tickets_to_buy: BN; page_index: number };
+    expect(data.tickets_to_buy.toString()).toBe("40");
+    expect(data.page_index).toBe(PAGE);
+  });
+
+  it("matches the IDL account list", () => {
+    expectMatchesIdl("buy_epoch_tickets", ix, {
+      authority,
+      miner: minerPda(authority),
+      satrush_config: satrushConfigPda(),
+      epoch_vault: epochVaultPda(),
+      epoch_vault_iteration: epochVaultIterationPda(ITER),
+      epoch_vault_page: epochVaultPagePda(ITER, PAGE),
+      epoch_vault_entry: epochVaultEntryPda(ITER, authority),
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+  });
+});
+
+describe("trigger_one_btc_draw", () => {
+  const ix = buildTriggerOneBtcDraw(ctx, { authority, iterationId: ITER });
+
+  it("decodes back with no args", () => {
+    expect(instructionCoder.decode(ix.data)?.name).toBe("trigger_one_btc_draw");
+  });
+
+  it("matches the IDL account list, next iteration = current + 1", () => {
+    expectMatchesIdl("trigger_one_btc_draw", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      one_btc_vault: oneBtcVaultPda(),
+      one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
+      next_one_btc_vault_iteration: oneBtcVaultIterationPda(ITER + 1),
+      slot_hashes: SYSVAR_SLOT_HASHES_PUBKEY,
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+  });
+});
+
+describe("trigger_epoch_draw", () => {
+  const ix = buildTriggerEpochDraw(ctx, { authority, iterationId: ITER });
+
+  it("matches the IDL account list, next iteration = current + 1", () => {
+    expectMatchesIdl("trigger_epoch_draw", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      epoch_vault: epochVaultPda(),
+      epoch_vault_iteration: epochVaultIterationPda(ITER),
+      next_epoch_vault_iteration: epochVaultIterationPda(ITER + 1),
+      slot_hashes: SYSVAR_SLOT_HASHES_PUBKEY,
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+  });
+});
+
+describe("select_epoch_winner", () => {
+  const ix = buildSelectEpochWinner(ctx, { authority, iterationId: ITER, pageIndex: PAGE });
+
+  it("decodes back to the same args", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("select_epoch_winner");
+    expect((decoded!.data as { page_index: number }).page_index).toBe(PAGE);
+  });
+
+  it("matches the IDL account list (authority signs but is not writable)", () => {
+    expectMatchesIdl("select_epoch_winner", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      epoch_vault: epochVaultPda(),
+      epoch_vault_iteration: epochVaultIterationPda(ITER),
+      epoch_vault_page: epochVaultPagePda(ITER, PAGE),
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+    expect(ix.keys[0]!.isSigner).toBe(true);
+    expect(ix.keys[0]!.isWritable).toBe(false);
+  });
+});
+
+describe("claim_one_btc_reward", () => {
+  const ix = buildClaimOneBtcReward(ctx, { authority, iterationId: ITER, ticket });
+
+  it("matches the IDL account list and emits no event", () => {
+    expectMatchesIdl("claim_one_btc_reward", ix, {
+      authority,
+      one_btc_vault: oneBtcVaultPda(),
+      one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
+      ticket,
+      btc_mint: btcMint,
+      one_btc_vault_btc_ata: getAssociatedTokenAddressSync(btcMint, oneBtcVaultPda(), true),
+      authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
+    });
+    expect(idlAccounts("claim_one_btc_reward").map((a) => a.name)).not.toContain(
+      "event_authority",
+    );
+  });
+});
+
+describe("claim_epoch_reward", () => {
+  const ix = buildClaimEpochReward(ctx, { authority, iterationId: ITER });
+
+  it("matches the IDL account list (USD + BTC payouts) and emits no event", () => {
+    expectMatchesIdl("claim_epoch_reward", ix, {
+      authority,
+      epoch_vault: epochVaultPda(),
+      epoch_vault_iteration: epochVaultIterationPda(ITER),
+      usd_mint: usdMint,
+      btc_mint: btcMint,
+      epoch_vault_usd_ata: getAssociatedTokenAddressSync(usdMint, epochVaultPda(), true),
+      epoch_vault_btc_ata: getAssociatedTokenAddressSync(btcMint, epochVaultPda(), true),
+      authority_usd_ata: getAssociatedTokenAddressSync(usdMint, authority),
+      authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
+    });
+    expect(idlAccounts("claim_epoch_reward").map((a) => a.name)).not.toContain(
+      "event_authority",
+    );
   });
 });
