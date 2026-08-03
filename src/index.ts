@@ -71,6 +71,7 @@ export class Orchestrator {
   private settleFired = new Set<number>();
   private sweepInFlight = false;
   private usdcBaselineBase: bigint | null = null;
+  private usdcBaselineDate: string | null = null;
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private readonly roundWindows = new Map<number, { start: number; end: number }>();
 
@@ -745,11 +746,18 @@ export class Orchestrator {
     } catch {
       return; // transient — try next tick
     }
-    if (this.usdcBaselineBase === null) {
+    // Re-baseline at UTC-day rollover so the baseline shares the same clock as
+    // deployedToday() (which resets per UTC day). Without this, at midnight the
+    // expected delta resets to ~0 while the lifetime baseline still reflects the
+    // prior day's legitimate deploys — tripping a false "drift" halt.
+    const today = utcDate();
+    if (this.usdcBaselineBase === null || this.usdcBaselineDate !== today) {
       this.usdcBaselineBase = actual;
+      this.usdcBaselineDate = today;
       return;
     }
-    // Worst legitimate case: we lose everything deployed since baseline.
+    // Worst legitimate case: we lose everything deployed today (same UTC day as
+    // the baseline above).
     const res = reconcileWalletDrift({
       expectedDeltaBase: -this.pnl.deployedToday(),
       actualDeltaBase: actual - this.usdcBaselineBase,
