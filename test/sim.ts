@@ -19,9 +19,16 @@ import { usdToBase } from "../src/units.js";
 import { seededRng } from "./helpers.js";
 
 // Devnet-measured fee structure.
-export const SIM_FEES: FeeModel = { deployFeeBps: 800, satsVaultRoundBps: 1200 };
+export const SIM_FEES: FeeModel = {
+  deployFeeBps: 800,
+  satsVaultRoundBps: 1200,
+  satsVaultClaimBps: 1000,
+};
 const NET_BPS = 10_000n - 800n;
-const POT_FACTOR = 1 - 0.12;
+// The sats-vault round leg (12%) is not lost — it returns to the winning tile's
+// stakers as BTC shares, worth (1 − claim fee) of itself. So the effective pot
+// distributed to winners is reduced only by satsVaultRound·satsVaultClaim.
+const POT_FACTOR = 1 - 0.12 * 0.1;
 const MIN_DEPLOY = usdToBase(1);
 export const ROUND_SLOTS = 50;
 

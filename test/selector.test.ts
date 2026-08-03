@@ -4,7 +4,7 @@ import { selectAllocation, type SelectorConfig } from "../src/strategy/selector.
 import { usdToBase } from "../src/units.js";
 import { seededRng } from "./helpers.js";
 
-const FEES = { deployFeeBps: 800, satsVaultRoundBps: 1200 };
+const FEES = { deployFeeBps: 800, satsVaultRoundBps: 1200, satsVaultClaimBps: 1000 };
 const zeroStakes = () => new Array<bigint>(TILES_COUNT).fill(0n);
 
 function ctx(stakes: bigint[], multiplier = 1): EvContext {

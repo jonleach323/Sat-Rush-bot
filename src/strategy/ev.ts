@@ -7,10 +7,20 @@
  *   EV(a) = Σ_i (1/21) · pot' · (aNet_i·m)/(S_i + aNet_i·m)  −  Σ_i a_i
  *
  * where S_i is tile i's predicted-final stake and pot' includes my own
- * contribution. All five fee legs from SatrushConfig are accounted for, in
- * the pipeline measured on devnet (docs/devnet-findings.md): the deploy legs
- * (strike + epoch + one_btc + protocol) come off the gross before stakes hit
- * tiles; the sats_vault_round leg comes off the round pot at the swap.
+ * contribution. Fee legs from SatrushConfig, per the confirmed game economics:
+ * the deploy legs (strike + epoch + one_btc + protocol) come off the gross
+ * before stakes hit tiles. The sats_vault_round leg does NOT leave the pot: it
+ * is swapped to BTC and paid back to the winning tile's stakers pro-rata as
+ * vault shares (the same pro-rata distribution as the USD pot). Its only true
+ * cost is the sats_vault_claim fee paid to convert those shares back to BTC, so
+ * it reduces the effective pot by (satsVaultRound · satsVaultClaim), not by the
+ * full satsVaultRound. Treating it as fully lost (the previous model) under-
+ * valued every win by ~the vault leg and made the selector skip beatable boards.
+ *
+ * Conservative scope: the deploy legs are still modeled as a full cost here.
+ * strike is redistributed only on strike-trigger rounds, and epoch/one_btc are
+ * recaptured only via the hashrate→vault ticket path (a separate strategy);
+ * neither is credited until that value is actually captured.
  *
  * STAKE_SEMANTICS (CLAUDE.md open question 1): under "raw", S_i is other
  * players' raw net USD and we assume their multiplier is 1 (unobservable);
@@ -31,11 +41,13 @@ export type SplitSemantics = "even" | "per_tile";
 export interface FeeModel {
   /** Legs deducted from the gross deploy before stakes hit tiles (bps). */
   deployFeeBps: number;
-  /** Leg deducted from the round pot at the USD→BTC swap (bps). */
+  /** Round leg swapped to BTC and paid back to winners as vault shares (bps). */
   satsVaultRoundBps: number;
+  /** Fee to convert vault shares back to BTC — the real cost of the round leg (bps). */
+  satsVaultClaimBps: number;
 }
 
-/** All five fee legs, read from the on-chain SatrushConfig. */
+/** Fee legs read from the on-chain SatrushConfig. */
 export function feeModelFromConfig(config: SatrushConfig): FeeModel {
   return {
     deployFeeBps:
@@ -44,6 +56,7 @@ export function feeModelFromConfig(config: SatrushConfig): FeeModel {
       config.one_btc_fee_bps +
       config.protocol_fee_bps,
     satsVaultRoundBps: config.sats_vault_round_fee_bps,
+    satsVaultClaimBps: config.sats_vault_claim_fee_bps,
   };
 }
 
@@ -63,10 +76,11 @@ function validateContext(ctx: EvContext): void {
   if (!Number.isFinite(ctx.multiplier) || ctx.multiplier <= 0) {
     throw new RangeError(`invalid multiplier: ${ctx.multiplier}`);
   }
-  const { deployFeeBps, satsVaultRoundBps } = ctx.fees;
+  const { deployFeeBps, satsVaultRoundBps, satsVaultClaimBps } = ctx.fees;
   for (const [name, bps] of [
     ["deployFeeBps", deployFeeBps],
     ["satsVaultRoundBps", satsVaultRoundBps],
+    ["satsVaultClaimBps", satsVaultClaimBps],
   ] as const) {
     if (!Number.isInteger(bps) || bps < 0 || bps >= BPS) {
       throw new RangeError(`invalid ${name}: ${bps}`);
@@ -80,8 +94,12 @@ export function netFactor(fees: FeeModel): number {
 }
 
 /**
- * Round pot after all fees (base units, as a float), including my own
- * contribution: (ΣS + Σa·netFactor) · (1 − satsVaultRound).
+ * Effective round pot distributed to the winning tile's stakers (base units,
+ * as a float), including my own contribution. The USD portion is
+ * (ΣS + Σa·netFactor)·(1 − satsVaultRound); the sats_vault_round leg is paid
+ * back to the same winners as BTC shares, worth (1 − satsVaultClaim) of itself
+ * after the claim fee. Summing the two, the effective pot is
+ *   (ΣS + Σa·netFactor) · (1 − satsVaultRound·satsVaultClaim).
  */
 export function potAfterFees(ctx: EvContext, allocGross: bigint[]): number {
   let stakeSum = 0;
@@ -89,7 +107,9 @@ export function potAfterFees(ctx: EvContext, allocGross: bigint[]): number {
   let grossSum = 0;
   for (const a of allocGross) grossSum += Number(a);
   const myNet = grossSum * netFactor(ctx.fees);
-  return (stakeSum + myNet) * (1 - ctx.fees.satsVaultRoundBps / BPS);
+  const v = ctx.fees.satsVaultRoundBps / BPS;
+  const c = ctx.fees.satsVaultClaimBps / BPS;
+  return (stakeSum + myNet) * (1 - v * c);
 }
 
 /** Expected profit (base units, float; negative = losing bet). */

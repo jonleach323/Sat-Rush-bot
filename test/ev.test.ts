@@ -12,8 +12,9 @@ import {
 import { usdToBase } from "../src/units.js";
 import { seededRng } from "./helpers.js";
 
-// Devnet-measured fee structure (docs/devnet-findings.md).
-const FEES = { deployFeeBps: 800, satsVaultRoundBps: 1200 };
+// Devnet-measured fee structure (docs/devnet-findings.md). The sats-vault round
+// leg is redistributed to winners as BTC shares, so its only cost is the claim fee.
+const FEES = { deployFeeBps: 800, satsVaultRoundBps: 1200, satsVaultClaimBps: 1000 };
 
 const zeroStakes = () => new Array<bigint>(TILES_COUNT).fill(0n);
 
@@ -34,23 +35,26 @@ function allocOn(tiles: number[], perTile: bigint): bigint[] {
 }
 
 describe("fee model", () => {
-  it("derives all five legs from SatrushConfig fields", () => {
+  it("derives the fee legs from SatrushConfig fields", () => {
     const fees = feeModelFromConfig({
       strike_fee_bps: 264,
       epoch_fee_bps: 262,
       one_btc_fee_bps: 132,
       protocol_fee_bps: 142,
       sats_vault_round_fee_bps: 1200,
+      sats_vault_claim_fee_bps: 1000,
     } as never);
     expect(fees.deployFeeBps).toBe(800);
     expect(fees.satsVaultRoundBps).toBe(1200);
+    expect(fees.satsVaultClaimBps).toBe(1000);
     expect(netFactor(fees)).toBeCloseTo(0.92);
   });
 
-  it("reproduces the measured devnet pipeline: $5 gross → $4.60 net → $4.048 pot", () => {
+  it("reproduces the measured pipeline: $5 gross → $4.60 net → $4.545 pot (vault leg returns net of claim fee)", () => {
     const c = ctx();
     const alloc = allocOn([0], usdToBase(5));
-    expect(potAfterFees(c, alloc)).toBeCloseTo(5_000_000 * 0.92 * 0.88, 0);
+    // pot = net · (1 − satsVaultRound·satsVaultClaim) = 5·0.92·(1 − 0.12·0.10)
+    expect(potAfterFees(c, alloc)).toBeCloseTo(5_000_000 * 0.92 * (1 - 0.12 * 0.1), 0);
   });
 });
 
@@ -65,7 +69,7 @@ describe("evOfAllocation", () => {
     const stakes = zeroStakes();
     for (let i = 2; i < TILES_COUNT; i++) stakes[i] = usdToBase(10); // $190 of others
     const ev = evOfAllocation(ctx({ predictedStakes: stakes }), allocOn([0], usdToBase(1)));
-    // pot' ≈ (190 + 0.92)·0.88 ≈ 168; win 1/21 of it with share 1 → ~$8 − $1.
+    // pot' ≈ (190 + 0.92)·(1 − 0.12·0.10) ≈ 189; win 1/21 of it with share 1 → ~$9 − $1.
     expect(ev).toBeGreaterThan(5_000_000); // > $5 expected profit
 
   });

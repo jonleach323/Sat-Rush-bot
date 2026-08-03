@@ -107,10 +107,11 @@ describe("round engine sanity", () => {
         "even",
         4,
       );
-      // pot = (5+5)·0.92·0.88 = 8.096 → win nets 8.096−5, loss −5
+      // pot = (5+5)·0.92·(1−0.12·0.10) = 9.0896 (vault leg returns net of claim
+      // fee) → win nets 9.0896−5, loss −5
       if (outcome.coveredWinner) {
         botWin++;
-        expect(outcome.netUsd).toBeCloseTo(8.096 - 5, 3);
+        expect(outcome.netUsd).toBeCloseTo(10 * 0.92 * (1 - 0.12 * 0.1) - 5, 3);
       } else {
         rivalWin++;
         expect(outcome.netUsd).toBeCloseTo(-5, 6);
