@@ -208,12 +208,16 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
         "telegram_reachable",
         body.ok === true,
         body.ok ? `getMe ok (@${body.result?.username})` : `getMe failed: HTTP ${res.status}`,
+        false, // non-fatal: Telegram is an alert/ops channel, not money-path.
+        // It is intermittently reachable from some hosts; an outage must not
+        // block trading. On-chain reconcile tripwires + the KILL file remain
+        // the load-bearing safety net regardless of Telegram.
       );
     } catch (err) {
-      gate("telegram_reachable", false, `unreachable: ${String(err).slice(0, 80)}`);
+      gate("telegram_reachable", false, `unreachable: ${String(err).slice(0, 80)}`, false);
     }
   } else {
-    gate("telegram_reachable", false, "TELEGRAM_TOKEN/CHAT_ID unset — no ops channel");
+    gate("telegram_reachable", false, "TELEGRAM_TOKEN/CHAT_ID unset — no ops channel", false);
   }
 
   // 9. ingest freshness (gRPC when configured; ws-rpc fallback noted)
