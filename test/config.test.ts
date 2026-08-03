@@ -11,6 +11,11 @@ describe("config defaults", () => {
     expect(cfg.SECONDARY_RPC_URLS).toEqual([]);
     expect(cfg.STAKE_LADDER_USD.length).toBeGreaterThan(0);
     expect(cfg.MAX_PER_ROUND_USD).toBeLessThanOrEqual(cfg.DAILY_LOSS_CAP_USD);
+    // Vault strategy is OFF by default — never buys tickets unless opted in.
+    expect(cfg.VAULT_STRATEGY_ENABLED).toBe(false);
+    expect(cfg.VAULT_MAX_TICKETS).toBeGreaterThan(0);
+    expect(cfg.VAULT_HASHRATE_FRACTION).toBeGreaterThanOrEqual(0);
+    expect(cfg.VAULT_HASHRATE_FRACTION).toBeLessThanOrEqual(1);
   });
 
   it("treats empty strings as unset", () => {

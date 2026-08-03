@@ -61,6 +61,47 @@ export interface VaultDecision {
     | "cap_reached";
 }
 
+/** USD value of a BTC balance expressed in base units. */
+export function btcBaseToUsd(
+  btcBaseUnits: number,
+  btcDecimals: number,
+  btcUsd: number,
+): number {
+  if (!Number.isInteger(btcDecimals) || btcDecimals < 0) {
+    throw new RangeError(`btcDecimals must be a non-negative integer: ${btcDecimals}`);
+  }
+  return (btcBaseUnits / 10 ** btcDecimals) * btcUsd;
+}
+
+export interface VaultContextInput {
+  kind: VaultKind;
+  poolValueUsd: number;
+  /** iteration.total_tickets — everyone's tickets, including ours. */
+  totalTickets: number;
+  /** Our tickets already committed this iteration (0 if we have no entry). */
+  myTickets: number;
+  hashrateAvailable: number;
+  hashrateValueUsd: number;
+  maxTickets: number;
+}
+
+/**
+ * Adapt on-chain totals into the selector's context. The chain reports
+ * total_tickets (including ours); the selector needs others' tickets, so we
+ * subtract our sunk holdings (clamped at 0 for read races).
+ */
+export function buildVaultContext(input: VaultContextInput): VaultTicketContext {
+  return {
+    kind: input.kind,
+    poolValueUsd: input.poolValueUsd,
+    othersTickets: Math.max(0, input.totalTickets - input.myTickets),
+    myTickets: input.myTickets,
+    hashrateAvailable: input.hashrateAvailable,
+    hashrateValueUsd: input.hashrateValueUsd,
+    maxTickets: input.maxTickets,
+  };
+}
+
 /** E[winnings] = ticket fraction · pool (see file header). */
 export function expectedWinningsUsd(
   myTickets: number,

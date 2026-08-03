@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  btcBaseToUsd,
+  buildVaultContext,
   expectedWinningsUsd,
   selectVaultTickets,
   type VaultTicketContext,
@@ -17,6 +19,44 @@ function ctx(over: Partial<VaultTicketContext> = {}): VaultTicketContext {
     ...over,
   };
 }
+
+describe("btcBaseToUsd", () => {
+  it("values cbBTC (8 decimals) at the estimate", () => {
+    // 0.5 BTC at $100k = $50k
+    expect(btcBaseToUsd(50_000_000, 8, 100_000)).toBeCloseTo(50_000);
+  });
+  it("rejects bad decimals", () => {
+    expect(() => btcBaseToUsd(1, -1, 100_000)).toThrow(RangeError);
+  });
+});
+
+describe("buildVaultContext", () => {
+  it("subtracts our sunk tickets from the on-chain total to get others'", () => {
+    const c = buildVaultContext({
+      kind: "epoch",
+      poolValueUsd: 1000,
+      totalTickets: 500,
+      myTickets: 120,
+      hashrateAvailable: 200,
+      hashrateValueUsd: 0.5,
+      maxTickets: 1000,
+    });
+    expect(c.othersTickets).toBe(380);
+    expect(c.myTickets).toBe(120);
+  });
+  it("clamps others at zero on a read race", () => {
+    const c = buildVaultContext({
+      kind: "one_btc",
+      poolValueUsd: 1,
+      totalTickets: 5,
+      myTickets: 9,
+      hashrateAvailable: 0,
+      hashrateValueUsd: 0,
+      maxTickets: 1,
+    });
+    expect(c.othersTickets).toBe(0);
+  });
+});
 
 describe("expectedWinningsUsd", () => {
   it("is ticket-fraction times pool", () => {

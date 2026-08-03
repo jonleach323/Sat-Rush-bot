@@ -185,6 +185,25 @@ const schema = z
       z.coerce.number().finite().positive().default(0.02),
     ),
 
+    // ── hashrate raffle vaults (epoch + 1-BTC) — OFF by default ───────────
+    /** Master switch for the vault ticket strategy. Off = never buys tickets. */
+    VAULT_STRATEGY_ENABLED: boolFromEnv(false),
+    /** USD opportunity value of one hashrate point (the pickiness floor). */
+    HASHRATE_VALUE_USD: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().nonnegative().default(0),
+    ),
+    /** Max tickets to hold in a single vault iteration (risk bound). */
+    VAULT_MAX_TICKETS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(100),
+    ),
+    /** Fraction of the wallet's claimable hashrate the vault strategy may spend. */
+    VAULT_HASHRATE_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.5),
+    ),
+
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,
     DB_PATH: z.preprocess(emptyToUndef, z.string().default("./data/satrush.db")),
