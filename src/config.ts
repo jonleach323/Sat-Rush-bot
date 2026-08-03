@@ -220,6 +220,10 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(0).max(10_000).default(8000),
     ),
+    /** Self-crank draws (trigger + epoch winner selection) when the owner's
+     * crank is absent, so our winnings become claimable. Claiming always runs;
+     * this only controls the permissionless trigger/select cranking. */
+    VAULT_SELF_CRANK: boolFromEnv(false),
 
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,

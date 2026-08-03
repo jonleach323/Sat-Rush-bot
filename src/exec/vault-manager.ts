@@ -63,6 +63,8 @@ export interface VaultManagerOpts {
   oneBtcMinFillBps: number;
   pollMs: number;
   killSwitchEngaged: () => boolean;
+  /** Claim/crank pass, run after entry evaluation each tick (optional). */
+  postTick?: () => Promise<void>;
   log: (obj: Record<string, unknown>) => void;
 }
 
@@ -99,6 +101,15 @@ export class VaultManager {
     }
     if (state.oneBtc && oneBtcEntryReady(state.oneBtc, this.opts.oneBtcMinFillBps)) {
       await this.evaluate("one_btc", state.oneBtc);
+    }
+
+    // Claim/crank pass — collect resolved winnings (and crank draws if enabled).
+    if (this.opts.postTick) {
+      try {
+        await this.opts.postTick();
+      } catch (err) {
+        this.opts.log({ err: String(err).slice(0, 120), msg: "vault claim/crank failed" });
+      }
     }
   }
 

@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS vault_tickets (
   tickets INTEGER NOT NULL,
   ticket_pubkey TEXT,          -- 1-BTC entry account (needed to claim); null for epoch
   sig TEXT NOT NULL UNIQUE,
+  claimed INTEGER NOT NULL DEFAULT 0,  -- 1 once the iteration is resolved for us
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_vault_tickets_iter ON vault_tickets(kind, iteration_id);
@@ -303,6 +304,32 @@ export class StateDb {
       iterationId,
     );
     return row?.total ?? 0;
+  }
+
+  /** Distinct (kind, iteration_id) we hold unresolved tickets in (for claim/crank). */
+  unclaimedVaultIterations(): { kind: "epoch" | "one_btc"; iteration_id: number }[] {
+    return this.query<{ kind: "epoch" | "one_btc"; iteration_id: number }>(
+      `SELECT DISTINCT kind, iteration_id FROM vault_tickets
+       WHERE claimed = 0 ORDER BY iteration_id ASC`,
+    );
+  }
+
+  /** Our 1-BTC ticket account pubkeys for an iteration (to check the win + claim). */
+  oneBtcTicketPubkeys(iterationId: number): string[] {
+    return this.query<{ ticket_pubkey: string }>(
+      `SELECT ticket_pubkey FROM vault_tickets
+       WHERE kind = 'one_btc' AND iteration_id = ? AND ticket_pubkey IS NOT NULL`,
+      iterationId,
+    ).map((r) => r.ticket_pubkey);
+  }
+
+  /** Mark an iteration resolved for us (claimed a win, or confirmed a loss). */
+  markVaultClaimed(kind: "epoch" | "one_btc", iterationId: number): void {
+    this.write(() =>
+      this.db
+        .prepare(`UPDATE vault_tickets SET claimed = 1 WHERE kind = ? AND iteration_id = ?`)
+        .run(kind, iterationId),
+    );
   }
 
   recordCompetitorDeploy(c: CompetitorDeployRecord): void {

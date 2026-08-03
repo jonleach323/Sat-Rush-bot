@@ -9,14 +9,16 @@
  * (slot tick, account update, transaction event). There are no polling
  * loops — the slot stream IS the tick.
  */
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, type TransactionInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import type {
   EpochVault,
   EpochVaultEntry,
   EpochVaultIteration,
+  EpochVaultPage,
   Miner,
   OneBtcVault,
+  OneBtcVaultEntry,
   OneBtcVaultIteration,
   PublicDeployCreated,
   PublicDeploySettled,
@@ -26,13 +28,19 @@ import { decodeAccount } from "./adapter/idl.js";
 import {
   buildBuyEpochTickets,
   buildBuyOneBtcTickets,
+  buildClaimEpochReward,
+  buildClaimOneBtcReward,
   buildClaimSats,
+  buildSelectEpochWinner,
   buildSettleDeployPublic,
+  buildTriggerEpochDraw,
+  buildTriggerOneBtcDraw,
   type InstructionContext,
 } from "./adapter/instructions.js";
 import {
   epochVaultEntryPda,
   epochVaultIterationPda,
+  epochVaultPagePda,
   epochVaultPda,
   minerPda,
   oneBtcVaultIterationPda,
@@ -42,6 +50,14 @@ import {
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, type VaultReadState } from "./exec/vault-manager.js";
 import { btcBaseToUsd, type VaultKind } from "./strategy/vault.js";
+import {
+  epochAction,
+  epochWinIndex,
+  epochWinnerPageIndex,
+  oneBtcAction,
+  type EpochStateName,
+  type OneBtcStateName,
+} from "./strategy/vault-claim.js";
 import { loadConfig, type Config } from "./config.js";
 import { CandidateSet } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
@@ -899,9 +915,189 @@ export class Orchestrator {
       oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,
       pollMs: 5_000,
       killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
+      postTick: () => this.vaultClaimCrankTick(programId, iterationDurationSlots),
       log: (obj) => this.log.info(obj, "vault-manager"),
     });
     this.vaultManager.start();
+  }
+
+  /** Assemble + fire a single vault crank/claim ix; returns the fire outcome. */
+  private async sendVaultIx(
+    ix: TransactionInstruction,
+    meta: Record<string, unknown>,
+  ): Promise<string> {
+    const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+      payer: this.payer,
+      instructions: [ix],
+      computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
+      priorityFeeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu(),
+    });
+    const result = await this.sender.fire(
+      {
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        meta,
+      },
+      { timeoutMs: 15_000 },
+    );
+    this.log.info({ ...meta, outcome: result.outcome }, "vault crank/claim");
+    return result.outcome;
+  }
+
+  /**
+   * Claim resolved winnings (and, if VAULT_SELF_CRANK, crank draws) for every
+   * iteration we hold unresolved tickets in. Claiming always runs; cranking is
+   * opt-in and only matters when the owner's crank is absent. Runs after entry
+   * evaluation each tick. Sends respect EXECUTION_MODE via the RaceSender.
+   */
+  private async vaultClaimCrankTick(
+    programId: PublicKey,
+    iterationDurationSlots: number,
+  ): Promise<void> {
+    const selfCrank = this.cfg.VAULT_SELF_CRANK;
+    const live = this.cfg.EXECUTION_MODE !== "dry";
+    const slot = await this.connection.getSlot("processed");
+    for (const { kind, iteration_id } of this.db.unclaimedVaultIterations()) {
+      try {
+        if (kind === "epoch") {
+          await this.epochClaimCrank(programId, iteration_id, slot, iterationDurationSlots, selfCrank, live);
+        } else {
+          await this.oneBtcClaimCrank(programId, iteration_id, selfCrank, live);
+        }
+      } catch (err) {
+        this.log.warn({ vault: kind, iteration_id, err: String(err) }, "vault claim/crank failed");
+      }
+    }
+  }
+
+  private async epochClaimCrank(
+    programId: PublicKey,
+    iterationId: number,
+    slot: number,
+    durationSlots: number,
+    selfCrank: boolean,
+    live: boolean,
+  ): Promise<void> {
+    const itInfo = await this.connection.getAccountInfo(
+      epochVaultIterationPda(iterationId, programId),
+      "processed",
+    );
+    if (!itInfo) return;
+    const it = decodeAccount<EpochVaultIteration>("EpochVaultIteration", itInfo.data);
+    const stateName = Object.keys(it.state)[0] as EpochStateName;
+    const evInfo = await this.connection.getAccountInfo(epochVaultPda(programId), "processed");
+    const ev = evInfo ? decodeAccount<EpochVault>("EpochVault", evInfo.data) : null;
+    // Window only matters for the still-open current iteration.
+    const windowElapsed =
+      ev !== null &&
+      ev.iteration_id === iterationId &&
+      slot >= Number(ev.last_trigger_slot.toString()) + durationSlots;
+    const weWon = epochWinIndex(it.winners, this.payer.publicKey) >= 0;
+    const action = epochAction({
+      state: stateName,
+      windowElapsed,
+      winnersSelected: it.winners_selected,
+      winnersTarget: Math.min(21, it.participants_count),
+      weWon,
+      selfCrank,
+    });
+
+    if (action === "trigger") {
+      await this.sendVaultIx(
+        buildTriggerEpochDraw(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
+        { kind: "vault_epoch_trigger", iterationId },
+      );
+    } else if (action === "select") {
+      const pages: { pageIndex: number; cumulativeBase: bigint; totalTickets: bigint }[] = [];
+      for (let p = 0; p < it.page_count; p++) {
+        const pInfo = await this.connection.getAccountInfo(
+          epochVaultPagePda(iterationId, p, programId),
+          "processed",
+        );
+        if (!pInfo) continue;
+        const page = decodeAccount<EpochVaultPage>("EpochVaultPage", pInfo.data);
+        pages.push({
+          pageIndex: page.page_index,
+          cumulativeBase: BigInt(page.cumulative_base.toString()),
+          totalTickets: BigInt(page.total_tickets.toString()),
+        });
+      }
+      const pageIndex = epochWinnerPageIndex(pages, BigInt(it.current_winning_ticket.toString()));
+      if (pageIndex >= 0) {
+        await this.sendVaultIx(
+          buildSelectEpochWinner(this.ixCtx, { authority: this.payer.publicKey, iterationId, pageIndex }),
+          { kind: "vault_epoch_select", iterationId, pageIndex },
+        );
+      }
+    } else if (action === "claim") {
+      const outcome = await this.sendVaultIx(
+        buildClaimEpochReward(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
+        { kind: "vault_epoch_claim", iterationId },
+      );
+      if (outcome === "landed") this.db.markVaultClaimed("epoch", iterationId);
+    } else if (action === "done" && live) {
+      this.db.markVaultClaimed("epoch", iterationId); // lost or fully resolved
+    }
+  }
+
+  private async oneBtcClaimCrank(
+    programId: PublicKey,
+    iterationId: number,
+    selfCrank: boolean,
+    live: boolean,
+  ): Promise<void> {
+    const itInfo = await this.connection.getAccountInfo(
+      oneBtcVaultIterationPda(iterationId, programId),
+      "processed",
+    );
+    if (!itInfo) return;
+    const it = decodeAccount<OneBtcVaultIteration>("OneBtcVaultIteration", itInfo.data);
+    const stateName = Object.keys(it.state)[0] as OneBtcStateName;
+    const vInfo = await this.connection.getAccountInfo(oneBtcVaultPda(programId), "processed");
+    const v = vInfo ? decodeAccount<OneBtcVault>("OneBtcVault", vInfo.data) : null;
+    const triggerable =
+      v !== null &&
+      v.iteration_id === iterationId &&
+      Number(v.btc_amount.toString()) >= Number(v.reserved_btc_amount.toString());
+
+    let weWon = false;
+    let winningTicketAcct: PublicKey | null = null;
+    if (stateName !== "Open") {
+      const winningTicket = BigInt(it.winning_ticket.toString());
+      for (const pkStr of this.db.oneBtcTicketPubkeys(iterationId)) {
+        const info = await this.connection.getAccountInfo(new PublicKey(pkStr), "processed");
+        if (!info) continue;
+        const e = decodeAccount<OneBtcVaultEntry>("OneBtcVaultEntry", info.data);
+        const start = BigInt(e.start_ticket_id.toString());
+        const count = BigInt(e.tickets_count.toString());
+        if (winningTicket >= start && winningTicket < start + count) {
+          weWon = true;
+          winningTicketAcct = new PublicKey(pkStr);
+          break;
+        }
+      }
+    }
+    const action = oneBtcAction({ state: stateName, triggerable, weWon, selfCrank });
+
+    if (action === "trigger") {
+      await this.sendVaultIx(
+        buildTriggerOneBtcDraw(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
+        { kind: "vault_one_btc_trigger", iterationId },
+      );
+    } else if (action === "claim" && winningTicketAcct) {
+      const outcome = await this.sendVaultIx(
+        buildClaimOneBtcReward(this.ixCtx, {
+          authority: this.payer.publicKey,
+          iterationId,
+          ticket: winningTicketAcct,
+        }),
+        { kind: "vault_one_btc_claim", iterationId },
+      );
+      if (outcome === "landed") this.db.markVaultClaimed("one_btc", iterationId);
+    } else if (action === "done" && live) {
+      this.db.markVaultClaimed("one_btc", iterationId);
+    }
   }
 
   /**
