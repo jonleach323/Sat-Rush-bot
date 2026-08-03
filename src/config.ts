@@ -208,6 +208,18 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.5),
     ),
+    /** Enter the epoch draw only within this many slots of the window closing
+     * (buy late, after the field's hashrate is committed). */
+    VAULT_EPOCH_LATE_SLOTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(10),
+    ),
+    /** Enter the 1-BTC draw only once the vault is at least this full (bps of the
+     * trigger threshold) — near-trigger, so the entrant field is visible. */
+    VAULT_ONE_BTC_MIN_FILL_BPS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).max(10_000).default(8000),
+    ),
 
     TELEGRAM_TOKEN: optionalString,
     TELEGRAM_CHAT_ID: optionalString,

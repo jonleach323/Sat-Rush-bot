@@ -121,6 +121,16 @@ CREATE TABLE IF NOT EXISTS pnl_daily (
   fees_paid TEXT NOT NULL DEFAULT '0',
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS vault_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,          -- 'epoch' | 'one_btc'
+  iteration_id INTEGER NOT NULL,
+  tickets INTEGER NOT NULL,
+  ticket_pubkey TEXT,          -- 1-BTC entry account (needed to claim); null for epoch
+  sig TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vault_tickets_iter ON vault_tickets(kind, iteration_id);
 `;
 
 export class StateDb {
@@ -264,6 +274,35 @@ export class StateDb {
           s.sig,
         ),
     );
+  }
+
+  /** Record a vault ticket buy (kind+iteration, ticket account for 1-BTC claims). */
+  recordVaultTicket(v: {
+    kind: "epoch" | "one_btc";
+    iterationId: number;
+    tickets: number;
+    ticketPubkey: string | null;
+    sig: string;
+  }): void {
+    this.write(() =>
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO vault_tickets (kind, iteration_id, tickets, ticket_pubkey, sig)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(v.kind, v.iterationId, v.tickets, v.ticketPubkey, v.sig),
+    );
+  }
+
+  /** Total tickets we hold in a given vault iteration (0 if none). */
+  vaultTicketsHeld(kind: "epoch" | "one_btc", iterationId: number): number {
+    const row = this.queryOne<{ total: number | null }>(
+      `SELECT COALESCE(SUM(tickets), 0) AS total FROM vault_tickets
+       WHERE kind = ? AND iteration_id = ?`,
+      kind,
+      iterationId,
+    );
+    return row?.total ?? 0;
   }
 
   recordCompetitorDeploy(c: CompetitorDeployRecord): void {

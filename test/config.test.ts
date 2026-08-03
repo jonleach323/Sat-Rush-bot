@@ -17,6 +17,8 @@ describe("config defaults", () => {
     expect(cfg.VAULT_MAX_TICKETS).toBeGreaterThan(0);
     expect(cfg.VAULT_HASHRATE_FRACTION).toBeGreaterThanOrEqual(0);
     expect(cfg.VAULT_HASHRATE_FRACTION).toBeLessThanOrEqual(1);
+    expect(cfg.VAULT_EPOCH_LATE_SLOTS).toBeGreaterThan(0);
+    expect(cfg.VAULT_ONE_BTC_MIN_FILL_BPS).toBeGreaterThan(0);
   });
 
   it("treats empty strings as unset", () => {

@@ -12,16 +12,36 @@
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import type {
+  EpochVault,
+  EpochVaultEntry,
+  EpochVaultIteration,
+  Miner,
+  OneBtcVault,
+  OneBtcVaultIteration,
   PublicDeployCreated,
   PublicDeploySettled,
   RoundRevealed,
 } from "./adapter/idl.js";
+import { decodeAccount } from "./adapter/idl.js";
 import {
+  buildBuyEpochTickets,
+  buildBuyOneBtcTickets,
   buildClaimSats,
   buildSettleDeployPublic,
   type InstructionContext,
 } from "./adapter/instructions.js";
-import { minerPda, satsVaultPda } from "./adapter/pdas.js";
+import {
+  epochVaultEntryPda,
+  epochVaultIterationPda,
+  epochVaultPda,
+  minerPda,
+  oneBtcVaultIterationPda,
+  oneBtcVaultPda,
+  satsVaultPda,
+} from "./adapter/pdas.js";
+import { VaultEngine } from "./exec/vault-engine.js";
+import { VaultManager, type VaultReadState } from "./exec/vault-manager.js";
+import { btcBaseToUsd, type VaultKind } from "./strategy/vault.js";
 import { loadConfig, type Config } from "./config.js";
 import { CandidateSet } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
@@ -73,6 +93,11 @@ export class Orchestrator {
   private usdcBaselineBase: bigint | null = null;
   private usdcBaselineDate: string | null = null;
   private walletDriftTimer: NodeJS.Timeout | null = null;
+  private vaultManager: VaultManager | null = null;
+  // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
+  // that the manager's async readState refreshes immediately before evaluating.
+  private vaultHashrateCache = 0;
+  private vaultEpochEntryCache: { iter: number; tickets: number } = { iter: -1, tickets: 0 };
   private readonly roundWindows = new Map<number, { start: number; end: number }>();
 
   private readonly log = logger;
@@ -766,6 +791,184 @@ export class Orchestrator {
     if (!res.ok) this.engageKillSwitch(`wallet drift: ${res.reason}`);
   }
 
+  /**
+   * Wire and start the hashrate-vault manager. Reads chain state each tick,
+   * refreshes the per-tick caches the (sync) engine deps read, and drives entry
+   * decisions. Buys go through the same RaceSender as deploys and are gated by
+   * EXECUTION_MODE (the engine runs dry in dry mode). Only called when
+   * VAULT_STRATEGY_ENABLED — otherwise nothing here runs.
+   */
+  private startVaultManager(): void {
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const btcUsd = this.cfg.BTC_USD_ESTIMATE;
+    const btcDecimals = 8; // cbBTC-style; devnet + mainnet BTC mints are 8dp (FINDINGS E6)
+    const iterationDurationSlots = Number(
+      this.state.satrushConfig!.epoch_vault_iteration_duration.toString(),
+    );
+    const num = (v: { toString(): string }) => Number(v.toString());
+
+    const engine = new VaultEngine({
+      enabled: true, // gate is the manager itself (only started when enabled)
+      dry: this.cfg.EXECUTION_MODE === "dry",
+      hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
+      ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
+      maxTickets: this.cfg.VAULT_MAX_TICKETS,
+      hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
+      hashrateAvailable: () => this.vaultHashrateCache,
+      myTickets: (kind, iter) =>
+        kind === "epoch"
+          ? this.vaultEpochEntryCache.iter === iter
+            ? this.vaultEpochEntryCache.tickets
+            : 0
+          : this.db.vaultTicketsHeld("one_btc", iter),
+      buy: (kind, iter, tickets) => this.buyVaultTickets(kind, iter, tickets),
+      log: (obj) => this.log.info(obj, "vault"),
+    });
+
+    const readState = async (): Promise<VaultReadState> => {
+      const slot = await this.connection.getSlot("processed");
+      const minerInfo = await this.connection.getAccountInfo(
+        minerPda(this.payer.publicKey, programId),
+        "processed",
+      );
+      this.vaultHashrateCache = minerInfo
+        ? num(decodeAccount<Miner>("Miner", minerInfo.data).hashrate_amount)
+        : 0;
+
+      let epoch: VaultReadState["epoch"] = null;
+      const evInfo = await this.connection.getAccountInfo(epochVaultPda(programId), "processed");
+      if (evInfo) {
+        const ev = decodeAccount<EpochVault>("EpochVault", evInfo.data);
+        const itInfo = await this.connection.getAccountInfo(
+          epochVaultIterationPda(ev.iteration_id, programId),
+          "processed",
+        );
+        if (itInfo) {
+          const it = decodeAccount<EpochVaultIteration>("EpochVaultIteration", itInfo.data);
+          const entryInfo = await this.connection.getAccountInfo(
+            epochVaultEntryPda(ev.iteration_id, this.payer.publicKey, programId),
+            "processed",
+          );
+          this.vaultEpochEntryCache = {
+            iter: ev.iteration_id,
+            tickets: entryInfo
+              ? num(decodeAccount<EpochVaultEntry>("EpochVaultEntry", entryInfo.data).tickets)
+              : 0,
+          };
+          epoch = {
+            iterationId: ev.iteration_id,
+            open: "Open" in it.state,
+            totalTickets: num(it.total_tickets),
+            poolValueUsd:
+              num(ev.pool_usd_amount) / 1e6 +
+              btcBaseToUsd(num(ev.pool_btc_amount), btcDecimals, btcUsd),
+            lastTriggerSlot: num(ev.last_trigger_slot),
+            iterationDurationSlots,
+          };
+        }
+      }
+
+      let oneBtc: VaultReadState["oneBtc"] = null;
+      const obvInfo = await this.connection.getAccountInfo(oneBtcVaultPda(programId), "processed");
+      if (obvInfo) {
+        const obv = decodeAccount<OneBtcVault>("OneBtcVault", obvInfo.data);
+        const itInfo = await this.connection.getAccountInfo(
+          oneBtcVaultIterationPda(obv.iteration_id, programId),
+          "processed",
+        );
+        if (itInfo) {
+          const it = decodeAccount<OneBtcVaultIteration>("OneBtcVaultIteration", itInfo.data);
+          oneBtc = {
+            iterationId: obv.iteration_id,
+            open: "Open" in it.state,
+            totalTickets: num(it.total_tickets),
+            // prize ≈ the reserve paid to the winner at the trigger
+            poolValueUsd: btcBaseToUsd(num(obv.reserved_btc_amount), btcDecimals, btcUsd),
+            btcAmount: num(obv.btc_amount),
+            reservedBtc: num(obv.reserved_btc_amount),
+          };
+        }
+      }
+      return { slot, epoch, oneBtc };
+    };
+
+    this.vaultManager = new VaultManager({
+      engine,
+      readState,
+      epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
+      oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,
+      pollMs: 5_000,
+      killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
+      log: (obj) => this.log.info(obj, "vault-manager"),
+    });
+    this.vaultManager.start();
+  }
+
+  /**
+   * Build, sign, and send a vault ticket buy through the RaceSender. For the
+   * 1-BTC vault a fresh ticket keypair is generated, co-signs the tx, and its
+   * pubkey is persisted so the reward can be claimed later. Returns the sig.
+   */
+  private async buyVaultTickets(
+    kind: VaultKind,
+    iterationId: number,
+    tickets: number,
+  ): Promise<string> {
+    const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    let ticketPubkey: string | null = null;
+    let extraSigner: Keypair | null = null;
+    let ix;
+    if (kind === "one_btc") {
+      const ticket = Keypair.generate();
+      extraSigner = ticket;
+      ticketPubkey = ticket.publicKey.toBase58();
+      ix = buildBuyOneBtcTickets(this.ixCtx, {
+        authority: this.payer.publicKey,
+        iterationId,
+        ticket: ticket.publicKey,
+        ticketsToBuy: BigInt(tickets),
+      });
+    } else {
+      // page index: the iteration's current fill page (fresh read).
+      const itInfo = await this.connection.getAccountInfo(
+        epochVaultIterationPda(iterationId, new PublicKey(this.cfg.PROGRAM_ID)),
+        "processed",
+      );
+      const pageIndex = itInfo
+        ? decodeAccount<EpochVaultIteration>("EpochVaultIteration", itInfo.data)
+            .current_page_index
+        : 0;
+      ix = buildBuyEpochTickets(this.ixCtx, {
+        authority: this.payer.publicKey,
+        iterationId,
+        pageIndex,
+        ticketsToBuy: BigInt(tickets),
+      });
+    }
+
+    const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+      payer: this.payer,
+      instructions: [ix],
+      computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
+      priorityFeeMicroLamports: fee,
+    });
+    if (extraSigner) tx.sign([extraSigner]);
+    const signature = bs58.encode(tx.signatures[0]!);
+    const result = await this.sender.fire(
+      {
+        signature,
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        meta: { kind: `vault_${kind}`, iterationId, tickets },
+      },
+      { timeoutMs: 15_000 },
+    );
+    if (result.outcome === "landed" || result.outcome === "dry") {
+      this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, sig: signature });
+    }
+    return signature;
+  }
+
   private async maybeSweep(): Promise<void> {
     const miner = this.state.miner;
     const vault = this.state.satsVault;
@@ -969,6 +1172,9 @@ export class Orchestrator {
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode).
     this.walletDriftTimer = setInterval(() => void this.checkWalletDrift(), 30_000);
     this.walletDriftTimer.unref?.();
+    // Hashrate raffle vaults — only started when explicitly enabled; the deploy
+    // path is otherwise entirely untouched.
+    if (this.cfg.VAULT_STRATEGY_ENABLED) this.startVaultManager();
     void this.source.start();
     this.log.info(
       {
@@ -995,6 +1201,7 @@ export class Orchestrator {
     this.candidates.clear();
     this.health.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
+    this.vaultManager?.stop();
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
     await this.api?.stop().catch(() => undefined);
