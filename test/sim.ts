@@ -114,6 +114,8 @@ export interface RoundOutcome {
   grossCostUsd: number;
   netUsd: number;
   coveredWinner: boolean;
+  /** Bot covered the winning tile AND ≥1 rival was also on it (diluted). */
+  dilutedWin: boolean;
 }
 
 export function simulateRound(
@@ -192,7 +194,7 @@ export function simulateRound(
   const totalOnWinner = winners.reduce((acc, d) => acc + d.perTileNet, 0n);
 
   if (!botDeploy) {
-    return { fired: false, grossCostUsd: 0, netUsd: 0, coveredWinner: false };
+    return { fired: false, grossCostUsd: 0, netUsd: 0, coveredWinner: false, dilutedWin: false };
   }
   const mine: DeployRecord = botDeploy;
   const covered = mine.tiles.includes(winningTile);
@@ -200,11 +202,13 @@ export function simulateRound(
     covered && totalOnWinner > 0n
       ? potUsd * (Number(mine.perTileNet) / Number(totalOnWinner))
       : 0;
+  const rivalOnWinner = winners.some((d) => d.wallet !== -1);
   return {
     fired: true,
     grossCostUsd: mine.grossCostUsd,
     netUsd: payout - mine.grossCostUsd,
     coveredWinner: covered,
+    dilutedWin: covered && rivalOnWinner,
   };
 }
 
