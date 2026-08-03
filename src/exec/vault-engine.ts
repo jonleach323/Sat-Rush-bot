@@ -33,7 +33,10 @@ export interface VaultSnapshot {
 export interface VaultEngineOpts {
   enabled: boolean;
   dry: boolean;
+  /** Opportunity value of one hashrate POINT, in USD (pickiness floor). */
   hashrateValueUsd: number;
+  /** Program cost of one ticket in hashrate points (measured devnet = 100). */
+  ticketPriceHashrate: number;
   maxTickets: number;
   /** Fraction of claimable hashrate this strategy may spend (0..1). */
   hashrateFraction: number;
@@ -87,15 +90,16 @@ export class VaultEngine {
     if (!snap.open) return none("iteration_not_open");
     if (this.hasPlayed(snap.kind, snap.iterationId)) return none("already_played");
 
-    const budget = Math.floor(this.opts.hashrateAvailable() * this.opts.hashrateFraction);
+    const spendablePoints = this.opts.hashrateAvailable() * this.opts.hashrateFraction;
     const decision = selectVaultTickets(
       buildVaultContext({
         kind: snap.kind,
         poolValueUsd: snap.poolValueUsd,
         totalTickets: snap.totalTickets,
         myTickets: this.opts.myTickets(snap.kind, snap.iterationId),
-        hashrateAvailable: budget,
-        hashrateValueUsd: this.opts.hashrateValueUsd,
+        hashratePointsAvailable: spendablePoints,
+        ticketPriceHashrate: this.opts.ticketPriceHashrate,
+        hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
         maxTickets: this.opts.maxTickets,
       }),
     );

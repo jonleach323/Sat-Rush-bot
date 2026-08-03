@@ -15,9 +15,10 @@ function makeEngine(over: Partial<VaultEngineOpts> = {}) {
     enabled: true,
     dry: false,
     hashrateValueUsd: 0.01,
+    ticketPriceHashrate: 100,
     maxTickets: 1000,
     hashrateFraction: 1,
-    hashrateAvailable: () => 1000,
+    hashrateAvailable: () => 100_000, // points; 100/ticket → 1000 affordable
     myTickets: () => 0,
     buy,
     log,
@@ -92,16 +93,17 @@ describe("VaultEngine live buy", () => {
     expect(buy).toHaveBeenCalledTimes(1);
   });
 
-  it("respects the hashrate fraction budget", async () => {
+  it("respects the hashrate fraction budget (points ÷ ticket price)", async () => {
     const { engine, buy } = makeEngine({
-      hashrateAvailable: () => 100,
-      hashrateFraction: 0.1, // only 10 points spendable
+      hashrateAvailable: () => 100_000,
+      hashrateFraction: 0.1, // 10,000 points spendable → 100 tickets at 100/ticket
       hashrateValueUsd: 0,
       maxTickets: 10_000,
     });
     await engine.evaluate({ ...thin, totalTickets: 1000 });
     const tickets = (buy.mock.calls[0]!)[2];
-    expect(tickets).toBeLessThanOrEqual(10);
+    expect(tickets).toBeLessThanOrEqual(100);
+    expect(tickets).toBeGreaterThan(0);
   });
 
   it("markPlayed re-arms the latch (boot recovery)", async () => {

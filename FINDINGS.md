@@ -170,3 +170,19 @@ Three of E3's automated conclusion lines undersold the evidence:
    Some(mask) overrides on a Discretionary remains untested because the
    crank wins the race every round — it would need an execute fired in
    the same slot the round opens.
+
+## Vault tickets — hashrate cost measured (2026-08-03, epoch vault)
+
+Live devnet `buy_epoch_tickets` from the test wallet (iteration 293, an open
+$971 pool with 0 prior tickets): bought **5 tickets**, miner `hashrate_amount`
+went **1795 → 1295 = 500 spent → 100 hashrate points per ticket** (NOT 1:1 as
+first inferred from the IDL — there is no price constant in the IDL, so it had
+to be measured). Entry recorded 5 tickets; iteration total_tickets 0 → 5. Tx:
+[`2UPj2Wk4vRAX…`](https://explorer.solana.com/tx/2UPj2Wk4vRAXyvTSXTTh75sbjiqxQup95yRDXvv9PyKFbEP4s7bVTxmJXgfpHvu3JSVyeYwi4LLgSarh2RBgwgNg?cluster=devnet)
+
+Consequence: the vault EV model must convert hashrate points → tickets at this
+price (config `VAULT_HASHRATE_PER_TICKET`, default 100). Also confirmed live:
+the builders, PDAs, and page/entry init all land correctly, and the decoders
+round-trip against real on-chain vault accounts. **Verify the price on mainnet
+before enabling live** — and it is not yet confirmed for the 1-BTC vault (that
+buy takes a fresh ticket-keypair signer; untested).

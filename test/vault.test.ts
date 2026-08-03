@@ -37,12 +37,28 @@ describe("buildVaultContext", () => {
       poolValueUsd: 1000,
       totalTickets: 500,
       myTickets: 120,
-      hashrateAvailable: 200,
-      hashrateValueUsd: 0.5,
+      hashratePointsAvailable: 20_000,
+      ticketPriceHashrate: 100,
+      hashrateValueUsdPerPoint: 0.005,
       maxTickets: 1000,
     });
     expect(c.othersTickets).toBe(380);
     expect(c.myTickets).toBe(120);
+  });
+  it("converts hashrate points to affordable tickets at the ticket price", () => {
+    const c = buildVaultContext({
+      kind: "one_btc",
+      poolValueUsd: 1000,
+      totalTickets: 0,
+      myTickets: 0,
+      hashratePointsAvailable: 950, // 100/ticket → 9 affordable (floor)
+      ticketPriceHashrate: 100,
+      hashrateValueUsdPerPoint: 0.01,
+      maxTickets: 1000,
+    });
+    expect(c.hashrateAvailable).toBe(9);
+    // per-ticket cost = per-point value × price
+    expect(c.hashrateValueUsd).toBeCloseTo(1);
   });
   it("clamps others at zero on a read race", () => {
     const c = buildVaultContext({
@@ -50,11 +66,26 @@ describe("buildVaultContext", () => {
       poolValueUsd: 1,
       totalTickets: 5,
       myTickets: 9,
-      hashrateAvailable: 0,
-      hashrateValueUsd: 0,
+      hashratePointsAvailable: 0,
+      ticketPriceHashrate: 100,
+      hashrateValueUsdPerPoint: 0,
       maxTickets: 1,
     });
     expect(c.othersTickets).toBe(0);
+  });
+  it("rejects a non-positive ticket price", () => {
+    expect(() =>
+      buildVaultContext({
+        kind: "epoch",
+        poolValueUsd: 1,
+        totalTickets: 0,
+        myTickets: 0,
+        hashratePointsAvailable: 100,
+        ticketPriceHashrate: 0,
+        hashrateValueUsdPerPoint: 0,
+        maxTickets: 1,
+      }),
+    ).toThrow(RangeError);
   });
 });
 

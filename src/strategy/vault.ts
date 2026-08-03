@@ -80,24 +80,39 @@ export interface VaultContextInput {
   totalTickets: number;
   /** Our tickets already committed this iteration (0 if we have no entry). */
   myTickets: number;
-  hashrateAvailable: number;
-  hashrateValueUsd: number;
+  /** Spendable hashrate POINTS (any budget fraction already applied). */
+  hashratePointsAvailable: number;
+  /**
+   * Program cost of one ticket in hashrate points. Measured on devnet = 100
+   * (not 1 — see FINDINGS.md / vault-buy experiment). The selector works in
+   * ticket units, so we convert points→tickets here.
+   */
+  ticketPriceHashrate: number;
+  /** Opportunity value of one hashrate POINT, in USD. */
+  hashrateValueUsdPerPoint: number;
   maxTickets: number;
 }
 
 /**
- * Adapt on-chain totals into the selector's context. The chain reports
- * total_tickets (including ours); the selector needs others' tickets, so we
- * subtract our sunk holdings (clamped at 0 for read races).
+ * Adapt on-chain totals into the selector's context:
+ * - total_tickets → others' tickets (subtract our sunk holdings, clamp at 0);
+ * - spendable hashrate points → affordable tickets (÷ ticket price);
+ * - per-point opportunity value → per-ticket cost (× ticket price).
  */
 export function buildVaultContext(input: VaultContextInput): VaultTicketContext {
+  if (!Number.isFinite(input.ticketPriceHashrate) || input.ticketPriceHashrate <= 0) {
+    throw new RangeError(`ticketPriceHashrate must be positive: ${input.ticketPriceHashrate}`);
+  }
+  const affordableTickets = Math.floor(
+    Math.max(0, input.hashratePointsAvailable) / input.ticketPriceHashrate,
+  );
   return {
     kind: input.kind,
     poolValueUsd: input.poolValueUsd,
     othersTickets: Math.max(0, input.totalTickets - input.myTickets),
     myTickets: input.myTickets,
-    hashrateAvailable: input.hashrateAvailable,
-    hashrateValueUsd: input.hashrateValueUsd,
+    hashrateAvailable: affordableTickets,
+    hashrateValueUsd: input.hashrateValueUsdPerPoint * input.ticketPriceHashrate,
     maxTickets: input.maxTickets,
   };
 }

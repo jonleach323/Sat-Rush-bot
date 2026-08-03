@@ -193,6 +193,11 @@ const schema = z
       emptyToUndef,
       z.coerce.number().finite().nonnegative().default(0),
     ),
+    /** Hashrate points per vault ticket (measured on devnet = 100). */
+    VAULT_HASHRATE_PER_TICKET: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(100),
+    ),
     /** Max tickets to hold in a single vault iteration (risk bound). */
     VAULT_MAX_TICKETS: z.preprocess(
       emptyToUndef,
