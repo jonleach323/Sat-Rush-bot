@@ -53,28 +53,28 @@ Standing rules:
   doesn't clear it, more capital multiplies losses — drain per §3 instead.
 - Weekly: claim + sweep everything above $5,000 (wallet + unclaimed) to cold.
 
-## 0b. Canary — the first 50 mainnet rounds (MANDATORY before scaling)
+## 0b. Rollout — devnet verify, then full mainnet (no canary)
 
-The first 50 live rounds run as a canary at the tightest settings, to catch
-any surviving model/parse bug on small money before it can compound (see
-AUDIT.md R1/R2):
+Decision (operator, 2026-08-03): no canary warmup. The **$5,000 operator float
+is the risk bound** — the bot can only ever lose what's in the hot wallet, and
+the $95k cold firewall is the real containment. With the owner's $1M marketing
+campaign imminent, the cost of waiting out a 50-round warmup outweighs its
+benefit, so we validate once on devnet and then go straight to the §0
+max-extraction caps on mainnet.
 
-- `MAX_PER_ROUND_USD=1`, `STAKE_LADDER_USD=1`, `DAILY_LOSS_CAP_USD=10`
-  (minimum ladder — NOT the $1,000 max-extraction values; raise only after
-  the canary passes).
-- `RECONCILE_TOLERANCE=0.10` (tightest that doesn't false-trip on the coarse
-  USD/BTC magnitude check; the exact direction checks are always on).
-- `WALLET_DRIFT_TOLERANCE_USD=2`.
-- Watch every settlement: `/status`, `/me`, and the reconcile line in the
-  logs. The reconcile tripwire and the pre-send invariant BOTH write the KILL
-  file on any violation — a halted canary means "do not scale, investigate."
-- Pass criteria before raising caps: 50 rounds settled, zero tripwire halts,
-  and `ev_expected` vs realized (SQL: `SELECT round_id, ev_expected FROM
-  my_deploys; SELECT round_id, won_usd FROM settlements`) directionally
-  consistent. Only then move to the §0 max-extraction values, one step at a time.
+Rollout:
+1. **Devnet verify** — run the full bot (deploy + vault) on devnet, confirm it
+   deploys, settles, reconciles, and — with the vault enabled — buys/claims
+   without tripwire halts. This is the correctness gate.
+2. **Full mainnet** — arm at the §0 values immediately (`MAX_PER_ROUND_USD` =
+   `DAILY_LOSS_CAP_USD` = $1,000; EV sizes each fire). No step-up ladder.
 
-If the KILL file appears during the canary: read the alert/log reason, fix or
-explain it, `rm KILL`, and restart the canary from round 1 of a fresh 50.
+What is NOT removed (these are ruin protection, not a canary): the per-round +
+daily caps, the persisted kill switch, and the reconcile / wallet-drift
+tripwires all stay active on mainnet. If the KILL file appears, read the
+alert/log reason, fix or explain it, then `rm KILL` and restart. `RECONCILE_
+TOLERANCE` and `WALLET_DRIFT_TOLERANCE_USD` stay at their §0/​default values
+(sized for full-size deploys, not $1 tickets).
 
 ## 1. Launch morning sequence
 
@@ -100,15 +100,13 @@ explain it, `rm KILL`, and restart the canary from round 1 of a fresh 50.
 5. **Preflight drill, then arm:**
    - `pnpm preflight` — expect only `mode_gate` failing (MAINNET_CONFIRM unset).
    - Set `MAINNET_CONFIRM=yes`, run `pnpm preflight` again — ALL gates green.
-6. **Live at minimum ladder for 10 rounds:** start (`pnpm dev`), watch
-   `/status` per round. After ~10 played rounds verify in sqlite that
-   settlements reconcile: every `my_deploys` row `landed` has a matching
-   `settlements` row and `pnl_daily.net` equals returned − deployed
-   (`SELECT * FROM pnl_daily; SELECT status, COUNT(*) FROM my_deploys GROUP BY 1;`).
-   Expected at min stake: small negative drift (fees) unless boards are
-   busy — the point is reconciliation, not profit.
-7. **Scale per the pre-committed caps** — one doubling at a time, 50-round
-   review between steps, `/pnl` and `pnl_daily` as the source of truth.
+6. **Go live at the §0 caps.** After a green devnet verify (§0b step 1),
+   start the service in mainnet mode at the full max-extraction values — no
+   step-up ladder. EV sizes each fire; the daily cap + tripwires are the
+   backstops. Watch `/status`, `/pnl`, and the reconcile line, and confirm in
+   sqlite that settlements reconcile (`SELECT * FROM pnl_daily; SELECT status,
+   COUNT(*) FROM my_deploys GROUP BY 1;`). A tripwire halt (KILL file) means
+   stop and investigate — otherwise let the EV engine run.
 
 ## 2. Rollback / emergency stop
 

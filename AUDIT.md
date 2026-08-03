@@ -130,18 +130,19 @@ A report claiming zero residual risk is a failed audit. These remain:
 
 - **R1 — Model/predictor accuracy.** The EV engine and v1 linear occupancy
   predictor can mis-size within a direction the reconcile tripwire won't catch
-  (a bet that still loses "as modeled" is not a mismatch). *Controls*: 50-round
-  canary at minimum ladder (RUNBOOK §8), reconcile tripwire, daily loss cap,
-  `ev_expected`-vs-realized recorded per round for review.
+  (a bet that still loses "as modeled" is not a mismatch). *Controls*: devnet
+  verify before mainnet, reconcile tripwire, daily loss cap, the $5k float bound
+  (operator removed the canary warmup, 2026-08-03 — the $5k hot-wallet cap is
+  the risk bound), `ev_expected`-vs-realized recorded per round for review.
 - **R2 — Reconcile magnitude check is coarse.** The USD/BTC payout split is
   not fully characterized (CLAUDE.md open items), so magnitude uses a generous
   tolerance; a mid-size mis-payout inside tolerance could pass, or too-tight a
   tolerance could false-trip (fails safe: a false trip only halts). *Controls*:
   exact direction checks (cannot false-trip), configurable `RECONCILE_TOLERANCE`
-  set tight during canary, manual review of the first settlements.
+  sized for full-size deploys, manual review of the first settlements.
 - **R3 — Wallet-drift is coarse.** Fees, the BTC-leg, and claims are not
   precisely ledgered, so only gross drains trip. *Controls*: SOL-floor and
-  slot-lag health alerts, daily loss cap, canary sizing.
+  slot-lag health alerts, daily loss cap, the $5k float bound.
 - **R4 — Error-boundary wiring is not end-to-end unit-tested.** The
   `process.on` handlers are verified by inspection; the halt mechanism they
   invoke is tested. *Controls*: KILL-file persistence, `systemd Restart` into a
@@ -160,9 +161,11 @@ A report claiming zero residual risk is a failed audit. These remain:
   *Control*: chrony in the RUNBOOK §6 checklist.
 - **R9 — UTC-midnight pnl split.** A deploy at 23:59 settling at 00:01 splits
   across days, briefly loosening the daily cap. *Control*: accepted; caps are
-  per-UTC-day, canary sizing bounds the exposure.
+  per-UTC-day, the $5k float bounds the exposure.
 
 The load-bearing containment for everything above is the same three-layer
 stack: **caps** (per-round + daily, re-checked at the last line) → **tripwires**
-(reconcile + wallet-drift → persisted kill) → **canary + cold-storage
-firewall**. No single software guarantee is trusted alone.
+(reconcile + wallet-drift → persisted kill) → **$5k float + cold-storage
+firewall**. No single software guarantee is trusted alone. (The 50-round canary
+warmup was removed by operator decision 2026-08-03; the $5k hot-wallet float is
+the risk bound, validated once on devnet before mainnet.)
