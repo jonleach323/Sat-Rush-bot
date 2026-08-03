@@ -20,6 +20,8 @@ describe("config defaults", () => {
     expect(cfg.VAULT_EPOCH_LATE_SLOTS).toBeGreaterThan(0);
     expect(cfg.VAULT_ONE_BTC_MIN_FILL_BPS).toBeGreaterThan(0);
     expect(cfg.VAULT_SELF_CRANK).toBe(false);
+    expect(cfg.ANTI_COLLISION_ENABLED).toBe(false);
+    expect(cfg.COMPETITOR_LOOKBACK).toBeGreaterThan(0);
   });
 
   it("treats empty strings as unset", () => {

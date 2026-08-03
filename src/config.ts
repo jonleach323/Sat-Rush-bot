@@ -115,6 +115,15 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(1).max(21).default(3),
     ),
+    /** Anti-collision: fold predicted rival occupancy into the selector's
+     * forecast so it routes off tiles other snipers will crowd. Off = current
+     * behavior (own-observation occupancy only). */
+    ANTI_COLLISION_ENABLED: boolFromEnv(false),
+    /** How many recent competitor deploys to profile for anti-collision. */
+    COMPETITOR_LOOKBACK: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(500),
+    ),
     STAKE_LADDER_USD: commaListOfUsd,
 
     MAX_PER_ROUND_USD: z.preprocess(

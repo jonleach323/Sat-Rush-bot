@@ -82,6 +82,12 @@ import { Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
+import {
+  predictRivalInflow,
+  profileCompetitors,
+  type CompetitorDeployRow,
+  type RoundWindow,
+} from "./strategy/competitors.js";
 import type { SelectorConfig } from "./strategy/selector.js";
 import { usdToBase } from "./units.js";
 
@@ -487,6 +493,22 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Predicted per-tile stake rivals will add this round, from their profiled
+   * behavior — fed into the occupancy forecast so the selector routes off tiles
+   * other snipers will crowd (anti-collision). Gated by ANTI_COLLISION_ENABLED.
+   */
+  private predictedRivalInflow(): bigint[] {
+    const rows = this.db.query<CompetitorDeployRow>(
+      "SELECT round_id, authority, mask, amount, is_automation, slot FROM competitor_deploys ORDER BY id DESC LIMIT ?",
+      this.cfg.COMPETITOR_LOOKBACK,
+    );
+    const windows = new Map<number, RoundWindow>();
+    for (const [id, w] of this.roundWindows) windows.set(id, { end: w.end });
+    const profiles = profileCompetitors(rows, windows);
+    return predictRivalInflow(profiles.values(), this.state.visibleStakes());
+  }
+
   private evContext(): EvContext {
     const board = this.state.board;
     const cutoff = this.state.slotsToCutoff();
@@ -499,6 +521,9 @@ export class Orchestrator {
       hiddenPoolEstimate: this.state.hiddenPoolEstimate,
       elapsedSlots: elapsed,
       remainingSlots: cutoff ?? 0,
+      expectedAutomationInflow: this.cfg.ANTI_COLLISION_ENABLED
+        ? this.predictedRivalInflow()
+        : null,
     });
     return {
       predictedStakes: prediction.stakes,
