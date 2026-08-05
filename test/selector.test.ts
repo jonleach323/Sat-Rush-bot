@@ -107,6 +107,61 @@ describe("water-filling (acceptance)", () => {
   });
 });
 
+describe("minimum-edge floor", () => {
+  // A board with only modest leverage: tile 0 sits below a $10 field, so the
+  // snipe is +EV but thin — exactly the kind of round the live bot bled on.
+  function thinBoard(): bigint[] {
+    const stakes = zeroStakes().map(() => usdToBase(10));
+    stakes[0] = usdToBase(5);
+    return stakes;
+  }
+
+  it("skips a positive-but-thin round that fires with the floor off", () => {
+    const c = ctx(thinBoard());
+    const open = selectAllocation(c, cfg({ minEdgeBps: 0 }));
+    expect(open.kind).toBe("deploy");
+    if (open.kind !== "deploy") return;
+
+    // The allocation/EV are independent of the floor (the floor only gates the
+    // final return), so we can bracket the realized edge exactly.
+    const edgeBps = (open.ev / Number(open.totalGross)) * 10_000;
+    const above = selectAllocation(c, cfg({ minEdgeBps: Math.ceil(edgeBps) + 1 }));
+    expect(above).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+    const below = selectAllocation(
+      c,
+      cfg({ minEdgeBps: Math.max(0, Math.floor(edgeBps) - 1) }),
+    );
+    expect(below.kind).toBe("deploy");
+  });
+
+  it("still fires a fat edge under a strict floor", () => {
+    // chaseBoard: solo ownership of empty tiles in a ~$190 pot → edge ≫ 100%.
+    const sel = selectAllocation(ctx(chaseBoard()), cfg({ minEdgeBps: 5000 }));
+    expect(sel.kind).toBe("deploy");
+  });
+
+  it("applies to the k_emptiest fallback too", () => {
+    const c = ctx(thinBoard());
+    const open = selectAllocation(
+      c,
+      cfg({ strategy: "k_emptiest", ladder: [usdToBase(1)], kEmptiest: 1, minEdgeBps: 0 }),
+    );
+    expect(open.kind).toBe("deploy");
+    if (open.kind !== "deploy") return;
+    const edgeBps = (open.ev / Number(open.totalGross)) * 10_000;
+    const above = selectAllocation(
+      c,
+      cfg({
+        strategy: "k_emptiest",
+        ladder: [usdToBase(1)],
+        kEmptiest: 1,
+        minEdgeBps: Math.ceil(edgeBps) + 1,
+      }),
+    );
+    expect(above).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+  });
+});
+
 describe("cap-bound detection (MAX EXTRACTION telemetry)", () => {
   it("flags capBound when MAX_PER_ROUND binds before marginal EV does", () => {
     // Whale tiles build a fat pot; many cheap $1 tiles keep the marginal

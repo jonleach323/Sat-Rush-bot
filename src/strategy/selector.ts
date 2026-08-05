@@ -30,6 +30,15 @@ export interface SelectorConfig {
   /** On-chain SatrushConfig.min_deploy_usd_amount (gross, base units). */
   minDeploy: bigint;
   kEmptiest: number;
+  /**
+   * Minimum modeled edge required to fire, in bps of the gross deploy. The
+   * selector otherwise fires on any EV > 0, including razor-thin edges that a
+   * slightly-optimistic occupancy forecast turns negative in reality (measured
+   * live: wins paid ~2× when ~3.1× was needed to break even). Requiring a fat
+   * modeled margin absorbs residual model optimism and skips marginal rounds.
+   * 0 = off (fire on any positive EV, the old behavior).
+   */
+  minEdgeBps?: number | undefined;
   /** Injectable randomness for tie-breaks and k-emptiest choice. */
   rng?: (() => number) | undefined;
 }
@@ -57,6 +66,14 @@ export type Selection =
   | { kind: "skip"; reason: string; strategy: StrategyName };
 
 const EV_EPSILON = 1e-6;
+const BPS = 10_000;
+
+/** True when `ev` clears the configured minimum-edge floor for `gross`. */
+function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined): boolean {
+  const bps = minEdgeBps ?? 0;
+  if (bps <= 0) return true;
+  return ev >= (Number(gross) * bps) / BPS;
+}
 
 function validate(cfg: SelectorConfig): void {
   if (cfg.ladder.length === 0 || cfg.ladder.some((l) => l <= 0n)) {
@@ -136,6 +153,9 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
   if (ev <= 0) {
     return { kind: "skip", reason: "min_deploy_padding_made_ev_negative", strategy: "water_filling" };
   }
+  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps)) {
+    return { kind: "skip", reason: "below_min_edge", strategy: "water_filling" };
+  }
 
   // Cap-bound detection: the loop ended because the next quantum would
   // exceed MAX_PER_ROUND — was the model still asking for more?
@@ -186,13 +206,17 @@ function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
 
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
   allocation[tile] = amount;
+  const ev = evOfAllocation(ctx, allocation);
+  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps)) {
+    return { kind: "skip", reason: "below_min_edge", strategy: "k_emptiest" };
+  }
   return {
     kind: "deploy",
     mask: tilesToMask([tile]),
     tiles: [tile],
     allocation,
     totalGross: amount,
-    ev: evOfAllocation(ctx, allocation),
+    ev,
     strategy: "k_emptiest",
     capBound: false, // fixed-size strategy — the cap is the size by design
     marginalEvAtStop: 0,

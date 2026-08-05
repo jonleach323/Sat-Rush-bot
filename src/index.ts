@@ -524,6 +524,7 @@ export class Orchestrator {
       expectedAutomationInflow: this.cfg.ANTI_COLLISION_ENABLED
         ? this.predictedRivalInflow()
         : null,
+      endgameConvergence: this.cfg.ENDGAME_CONVERGENCE,
     });
     return {
       predictedStakes: prediction.stakes,
@@ -543,6 +544,7 @@ export class Orchestrator {
         this.state.satrushConfig?.min_deploy_usd_amount.toString() ?? "1000000",
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
+      minEdgeBps: this.cfg.MIN_EDGE_BPS,
     };
   }
 

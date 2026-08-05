@@ -115,6 +115,22 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(1).max(21).default(3),
     ),
+    /** Endgame convergence ∈ [0,1]: fraction of the gap to the board's mean
+     * stake that thin tiles are assumed to fill by close. Corrects the
+     * predictor's proportional extrapolation (which forecasts ~zero inflow onto
+     * empty tiles and so overvalues sniping them). 0 = off. Calibrated from live
+     * data where wins paid ~2× vs the ~3.1× needed; revisit as the sample grows. */
+    ENDGAME_CONVERGENCE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.5),
+    ),
+    /** Minimum modeled edge to fire, in bps of the gross deploy. The selector
+     * otherwise fires on any EV > 0, including thin edges a slightly-optimistic
+     * forecast turns negative in reality. 0 = off. */
+    MIN_EDGE_BPS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).max(10_000).default(1000),
+    ),
     /** Anti-collision: fold predicted rival occupancy into the selector's
      * forecast so it routes off tiles other snipers will crowd. Off = current
      * behavior (own-observation occupancy only). */
@@ -312,6 +328,9 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     btcMint: cfg.BTC_MINT ?? "<resolve-from-chain>",
     fireOffsetSlots: cfg.FIRE_OFFSET_SLOTS,
     kEmptiest: cfg.K_EMPTIEST,
+    endgameConvergence: cfg.ENDGAME_CONVERGENCE,
+    minEdgeBps: cfg.MIN_EDGE_BPS,
+    antiCollisionEnabled: cfg.ANTI_COLLISION_ENABLED,
     stakeLadderUsd: cfg.STAKE_LADDER_USD,
     maxPerRoundUsd: cfg.MAX_PER_ROUND_USD,
     dailyLossCapUsd: cfg.DAILY_LOSS_CAP_USD,
