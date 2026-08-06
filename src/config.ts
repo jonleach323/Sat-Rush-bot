@@ -119,6 +119,37 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(0).default(4),
     ),
+    /** Adaptive fire timing: self-calibrate the offset from measured land
+     * latency so the bot fires as late as safely possible (fresher board,
+     * smaller reaction window) and re-tunes as the send path changes. Off =
+     * always use the static FIRE_OFFSET_SLOTS. */
+    ADAPTIVE_FIRE_OFFSET: boolFromEnv(true),
+    /** Fraction of fires that must land in time — the adaptive offset is the
+     * quantile of land latency at this probability (higher = more cushion). */
+    FIRE_OFFSET_TARGET_LAND_PROB: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(1).default(0.95),
+    ),
+    /** Extra slots added to the latency quantile (program-cutoff safety). */
+    FIRE_OFFSET_CUSHION_SLOTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).default(1),
+    ),
+    /** Hard min offset — never fire later than this many slots before cutoff. */
+    FIRE_OFFSET_FLOOR: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).default(2),
+    ),
+    /** Hard max offset — never fire earlier than this. */
+    FIRE_OFFSET_CEILING: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1).default(6),
+    ),
+    /** Landed-deploy samples required before the adaptive offset engages. */
+    FIRE_OFFSET_MIN_SAMPLES: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(20),
+    ),
     K_EMPTIEST: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(1).max(21).default(3),
@@ -294,6 +325,13 @@ const schema = z
         message: "PRIORITY_FEE_MIN must not exceed PRIORITY_FEE_MAX",
       });
     }
+    if (cfg.FIRE_OFFSET_CEILING < cfg.FIRE_OFFSET_FLOOR) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["FIRE_OFFSET_CEILING"],
+        message: "FIRE_OFFSET_CEILING must not be below FIRE_OFFSET_FLOOR",
+      });
+    }
     if (cfg.MAX_PER_ROUND_USD > cfg.DAILY_LOSS_CAP_USD) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -347,6 +385,8 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     usdMint: cfg.USD_MINT ?? "<resolve-from-chain>",
     btcMint: cfg.BTC_MINT ?? "<resolve-from-chain>",
     fireOffsetSlots: cfg.FIRE_OFFSET_SLOTS,
+    adaptiveFireOffset: cfg.ADAPTIVE_FIRE_OFFSET,
+    fireOffsetBounds: `${cfg.FIRE_OFFSET_FLOOR}..${cfg.FIRE_OFFSET_CEILING}`,
     kEmptiest: cfg.K_EMPTIEST,
     endgameConvergence: cfg.ENDGAME_CONVERGENCE,
     minEdgeBps: cfg.MIN_EDGE_BPS,

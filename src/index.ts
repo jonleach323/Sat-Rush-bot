@@ -82,6 +82,7 @@ import { Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
+import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import {
   predictRivalInflow,
   profileCompetitors,
@@ -120,6 +121,9 @@ export class Orchestrator {
   /** Measured hashrate points earned per base unit deployed (from settlements).
    * Feeds the unified-EV hashrate rebate; 0 until settlements exist. */
   private hashratePerBaseDeployed = 0;
+  /** Current fire offset (slots before cutoff), self-calibrated from land
+   * latency; null until first computed → falls back to FIRE_OFFSET_SLOTS. */
+  private adaptiveOffsetSlots: number | null = null;
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -567,6 +571,47 @@ export class Orchestrator {
     return this.hashratePerBaseDeployed * this.cfg.HASHRATE_VALUE_USD * 1_000_000;
   }
 
+  /** Slots before cutoff to fire: the self-calibrated offset if available, else
+   * the static configured fallback. */
+  private currentFireOffset(): number {
+    return this.adaptiveOffsetSlots ?? this.cfg.FIRE_OFFSET_SLOTS;
+  }
+
+  /**
+   * Recompute the adaptive fire offset from recent land latencies. Fires as late
+   * as the measured send path safely allows; re-tunes as latency changes. No-op
+   * (uses the static offset) when ADAPTIVE_FIRE_OFFSET is off.
+   */
+  private refreshFireOffset(): void {
+    if (!this.cfg.ADAPTIVE_FIRE_OFFSET) {
+      this.adaptiveOffsetSlots = null;
+      return;
+    }
+    const rows = this.db.query<{ lat: number }>(
+      `SELECT (landed_slot - fired_slot) AS lat FROM my_deploys
+       WHERE status = 'landed' AND landed_slot IS NOT NULL AND fired_slot IS NOT NULL
+       ORDER BY id DESC LIMIT 200`,
+    );
+    const next = adaptiveFireOffset(
+      rows.map((r) => r.lat),
+      {
+        targetLandProb: this.cfg.FIRE_OFFSET_TARGET_LAND_PROB,
+        cushionSlots: this.cfg.FIRE_OFFSET_CUSHION_SLOTS,
+        floor: this.cfg.FIRE_OFFSET_FLOOR,
+        ceiling: this.cfg.FIRE_OFFSET_CEILING,
+        fallback: this.cfg.FIRE_OFFSET_SLOTS,
+        minSamples: this.cfg.FIRE_OFFSET_MIN_SAMPLES,
+      },
+    );
+    if (next !== this.adaptiveOffsetSlots) {
+      this.log.info(
+        { fireOffset: next, prev: this.adaptiveOffsetSlots, samples: rows.length },
+        "adaptive fire offset updated",
+      );
+    }
+    this.adaptiveOffsetSlots = next;
+  }
+
   /** Refresh the measured hashrate-earned-per-base-deployed from settlements. */
   private refreshHashrateRate(): void {
     const row = this.db.queryOne<{ hr: number | null; amt: number | null }>(
@@ -610,8 +655,8 @@ export class Orchestrator {
 
     if (this.botState === "ROUND_OPEN") {
       const cutoff = this.state.slotsToCutoff();
-      if (cutoff !== null && cutoff <= this.cfg.FIRE_OFFSET_SLOTS) {
-        this.transition("ARMED", { cutoff });
+      if (cutoff !== null && cutoff <= this.currentFireOffset()) {
+        this.transition("ARMED", { cutoff, fireOffset: this.currentFireOffset() });
         void this.tryFire();
       }
     } else if (this.botState === "ARMED") {
@@ -1455,9 +1500,11 @@ export class Orchestrator {
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
     // same tick refreshes the measured hashrate-per-deploy for the unified EV.
     this.refreshHashrateRate();
+    this.refreshFireOffset();
     this.walletDriftTimer = setInterval(() => {
       void this.checkWalletDrift();
       this.refreshHashrateRate();
+      this.refreshFireOffset();
     }, 30_000);
     this.walletDriftTimer.unref?.();
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy

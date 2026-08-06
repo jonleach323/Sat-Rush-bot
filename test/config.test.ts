@@ -32,6 +32,11 @@ describe("config defaults", () => {
     expect(cfg.KELLY_FRACTION).toBe(1);
     // Strike jackpot expectation is folded into EV by default.
     expect(cfg.STRIKE_EV_ENABLED).toBe(true);
+    // Adaptive fire timing on by default, within sane bounds.
+    expect(cfg.ADAPTIVE_FIRE_OFFSET).toBe(true);
+    expect(cfg.FIRE_OFFSET_FLOOR).toBeLessThanOrEqual(cfg.FIRE_OFFSET_CEILING);
+    expect(cfg.FIRE_OFFSET_TARGET_LAND_PROB).toBeGreaterThan(0);
+    expect(cfg.FIRE_OFFSET_TARGET_LAND_PROB).toBeLessThanOrEqual(1);
   });
 
   it("treats empty strings as unset", () => {
@@ -82,6 +87,12 @@ describe("gates and cross-checks", () => {
     expect(() =>
       loadConfig({ MAX_PER_ROUND_USD: "10", DAILY_LOSS_CAP_USD: "5", STAKE_LADDER_USD: "1" }),
     ).toThrow(/DAILY_LOSS_CAP_USD/);
+  });
+
+  it("rejects a fire-offset ceiling below the floor", () => {
+    expect(() =>
+      loadConfig({ FIRE_OFFSET_FLOOR: "5", FIRE_OFFSET_CEILING: "3" }),
+    ).toThrow(/FIRE_OFFSET_CEILING/);
   });
 
   it("rejects invalid pubkeys", () => {
