@@ -182,10 +182,15 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(1),
     ),
-    /** Anti-collision: fold predicted rival occupancy into the selector's
-     * forecast so it routes off tiles other snipers will crowd. Off = current
-     * behavior (own-observation occupancy only). */
-    ANTI_COLLISION_ENABLED: boolFromEnv(false),
+    /** Anti-collision: fold profiled rival occupancy into the selector's
+     * forecast so it routes off tiles other snipers will crowd. This is the
+     * TARGETED crowding signal (which tiles specific snipers chase); it composes
+     * with ENDGAME_CONVERGENCE (the blanket "cheap tiles fill toward the mean"
+     * signal) — the predictor adds rival inflow first, then convergence fills any
+     * residual gap to the mean, so the two are bounded, not runaway. If the bot
+     * proves too conservative with both on, lower ENDGAME_CONVERGENCE first (the
+     * blunter of the two). On by default (the campaign field is crowded). */
+    ANTI_COLLISION_ENABLED: boolFromEnv(true),
     /** How many recent competitor deploys to profile for anti-collision. */
     COMPETITOR_LOOKBACK: z.preprocess(
       emptyToUndef,

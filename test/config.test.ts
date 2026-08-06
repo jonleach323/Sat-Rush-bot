@@ -20,7 +20,7 @@ describe("config defaults", () => {
     expect(cfg.VAULT_EPOCH_LATE_SLOTS).toBeGreaterThan(0);
     expect(cfg.VAULT_ONE_BTC_MIN_FILL_BPS).toBeGreaterThan(0);
     expect(cfg.VAULT_SELF_CRANK).toBe(false);
-    expect(cfg.ANTI_COLLISION_ENABLED).toBe(false);
+    expect(cfg.ANTI_COLLISION_ENABLED).toBe(true);
     expect(cfg.COMPETITOR_LOOKBACK).toBeGreaterThan(0);
     // Payout-dilution corrections are ON by default (they only make the bot
     // more selective): thin tiles converge toward the board mean, and a

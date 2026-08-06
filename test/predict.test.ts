@@ -119,6 +119,26 @@ describe("predictFinalOccupancy v1", () => {
       expect(stakes[0]).toBe(mean);
     });
 
+    it("composes with rival inflow without double-counting past the mean", () => {
+      // Anti-collision adds inflow to an empty tile; convergence must not then
+      // pile more on top of an already-at/above-mean tile (it only lifts tiles
+      // still below the mean). Proves the two crowding models stay bounded.
+      const visible = zeroStakes().map(() => usdToBase(10));
+      visible[0] = 0n;
+      const inflow = zeroStakes();
+      inflow[0] = usdToBase(30); // rivals flood tile 0 well past the ~$9.5 mean
+      const { stakes } = predictFinalOccupancy({
+        visibleStakes: visible,
+        hiddenPoolEstimate: 0n,
+        elapsedSlots: 0,
+        expectedAutomationInflow: inflow,
+        endgameConvergence: 0.5,
+      });
+      // Tile 0 = visible(0) + inflow(30) = $30, already above mean → convergence
+      // leaves it untouched (no double-count).
+      expect(stakes[0]).toBe(usdToBase(30));
+    });
+
     it("barely moves a near-empty uniform board (early era stays snipeable)", () => {
       // The $12 flat board: mean is tiny, so convergence adds almost nothing and
       // genuine empty-board edges survive.

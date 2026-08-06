@@ -87,6 +87,7 @@ import {
   predictRivalInflow,
   profileCompetitors,
   type CompetitorDeployRow,
+  type RivalProfile,
   type RoundWindow,
 } from "./strategy/competitors.js";
 import type { SelectorConfig } from "./strategy/selector.js";
@@ -124,6 +125,8 @@ export class Orchestrator {
   /** Current fire offset (slots before cutoff), self-calibrated from land
    * latency; null until first computed → falls back to FIRE_OFFSET_SLOTS. */
   private adaptiveOffsetSlots: number | null = null;
+  /** Cached rival profiles for anti-collision, refreshed off the hot path. */
+  private rivalProfiles: RivalProfile[] = [];
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -504,19 +507,33 @@ export class Orchestrator {
   }
 
   /**
-   * Predicted per-tile stake rivals will add this round, from their profiled
-   * behavior — fed into the occupancy forecast so the selector routes off tiles
-   * other snipers will crowd (anti-collision). Gated by ANTI_COLLISION_ENABLED.
+   * Rebuild the cached rival profiles from competitor history (the expensive
+   * part: a lookback query + per-wallet aggregation). Profiles change slowly, so
+   * this runs on the 30s cadence, NOT on the hot fire path. Empty unless
+   * ANTI_COLLISION_ENABLED.
    */
-  private predictedRivalInflow(): bigint[] {
+  private refreshRivalProfiles(): void {
+    if (!this.cfg.ANTI_COLLISION_ENABLED) {
+      this.rivalProfiles = [];
+      return;
+    }
     const rows = this.db.query<CompetitorDeployRow>(
       "SELECT round_id, authority, mask, amount, is_automation, slot FROM competitor_deploys ORDER BY id DESC LIMIT ?",
       this.cfg.COMPETITOR_LOOKBACK,
     );
     const windows = new Map<number, RoundWindow>();
     for (const [id, w] of this.roundWindows) windows.set(id, { end: w.end });
-    const profiles = profileCompetitors(rows, windows);
-    return predictRivalInflow(profiles.values(), this.state.visibleStakes());
+    this.rivalProfiles = [...profileCompetitors(rows, windows).values()];
+  }
+
+  /**
+   * Predicted per-tile stake rivals will add this round — fed into the occupancy
+   * forecast so the selector routes off tiles other snipers will crowd
+   * (anti-collision). Uses the cached profiles (refreshed off the hot path) with
+   * the LIVE board, so the emptiest-tile ranking snipers chase is current. Cheap.
+   */
+  private predictedRivalInflow(): bigint[] {
+    return predictRivalInflow(this.rivalProfiles, this.state.visibleStakes());
   }
 
   private evContext(): EvContext {
@@ -1501,10 +1518,12 @@ export class Orchestrator {
     // same tick refreshes the measured hashrate-per-deploy for the unified EV.
     this.refreshHashrateRate();
     this.refreshFireOffset();
+    this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
       void this.checkWalletDrift();
       this.refreshHashrateRate();
       this.refreshFireOffset();
+      this.refreshRivalProfiles();
     }, 30_000);
     this.walletDriftTimer.unref?.();
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
