@@ -288,14 +288,17 @@ duplicate lands are impossible. To make that land in fewer slots:
    The single biggest, cheapest win. NOTE: Sender REQUIRES a Jito tip in the tx
    (min ~0.001 SOL = 1_000_000 lamports — verify in Helius docs), so set the tip
    below with `JITO_TIP_LAMPORTS=1000000` as the floor.
-2. **Jito tip path.** `JITO_BLOCK_ENGINE_URL=https://slc.mainnet.block-engine.jito.wtf`
-   and `JITO_TIP_ACCOUNTS=<comma list of the 8 mainnet tip accounts>` (see
-   .env.example). One account is picked at random per fire to dodge the
-   write-lock hotspot of a single account. The tip is EV-scaled:
-   `JITO_TIP_LAMPORTS` (floor) + `JITO_TIP_EV_FRACTION` (0.1 = bid 10% of the
-   round's modeled EV), clamped to `JITO_TIP_MAX_LAMPORTS`. Set `SOL_USD_ESTIMATE`
-   roughly right (it converts EV→lamports). If you use Helius Sender, set floor
-   1_000_000 and max higher (e.g. 5_000_000) to leave EV-scaling room.
+2. **Tip.** A tip is embedded on every fire whenever `JITO_TIP_ACCOUNTS` is set —
+   Helius Sender requires one (Sender routes to validators + Jito itself), so this
+   is NOT gated on `JITO_BLOCK_ENGINE_URL`. Use the tip accounts Helius gave you
+   for the Sender path (see .env.example); one is picked at random per fire to
+   dodge the write-lock hotspot. The tip is EV-scaled: `JITO_TIP_LAMPORTS` (floor)
+   + `JITO_TIP_EV_FRACTION` (0.1 = bid 10% of the round's modeled EV), clamped to
+   `JITO_TIP_MAX_LAMPORTS`. Set `SOL_USD_ESTIMATE` roughly right (converts
+   EV→lamports). For Helius Sender set floor `1_000_000` and max higher (e.g.
+   `5_000_000`) for EV-scaling room. `JITO_BLOCK_ENGINE_URL` is OPTIONAL — set it
+   only for a redundant *direct* Jito bundle (which needs Jito's own tip accounts);
+   with Helius Sender you can leave it unset and let Sender do the Jito routing.
 3. **Priority fee.** `PRIORITY_FEE_MIN/MAX_MICROLAMPORTS` clamp the dynamic fee;
    raise the max in contention.
 

@@ -248,8 +248,9 @@ const schema = z
     ),
     /** Fraction of a round's modeled EV to bid as the Jito tip, on top of the
      * base — outbids rivals for inclusion on fat rounds, tips the floor on thin
-     * ones. Clamped to JITO_TIP_MAX_LAMPORTS. 0 = flat base tip (off). Only
-     * active once a Jito block engine + tip account are configured. */
+     * ones. Clamped to JITO_TIP_MAX_LAMPORTS. 0 = flat base tip (off). A tip is
+     * embedded on every fire whenever tip accounts are configured (Helius Sender
+     * requires one); JITO_BLOCK_ENGINE_URL only controls the extra direct bundle. */
     JITO_TIP_EV_FRACTION: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.1),

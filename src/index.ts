@@ -260,8 +260,11 @@ export class Orchestrator {
         ...(cfg.JITO_TIP_ACCOUNT ? [cfg.JITO_TIP_ACCOUNT] : []),
       ]),
     ];
+    // Embed a tip whenever tip accounts are configured — NOT gated on
+    // JITO_BLOCK_ENGINE_URL. Helius Sender requires a tip in the tx even when we
+    // don't send a separate direct Jito bundle (Sender routes to Jito itself).
     const jitoTip =
-      cfg.JITO_BLOCK_ENGINE_URL && tipAccounts.length > 0
+      tipAccounts.length > 0
         ? {
             accounts: tipAccounts.map((a) => new PublicKey(a)),
             baseLamports: cfg.JITO_TIP_LAMPORTS,
