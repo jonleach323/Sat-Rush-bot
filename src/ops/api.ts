@@ -87,7 +87,7 @@ export class MonitorApi {
               case "/api/status":
                 return send(200, data.status());
               case "/api/pnl":
-                return send(200, data.pnlDaily() ?? {});
+                return send(200, data.pnlDaily(limit));
               case "/api/health":
                 return send(200, await data.health());
               case "/api/rounds":

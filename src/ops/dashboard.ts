@@ -121,6 +121,9 @@ export const DASHBOARD_HTML = `<!doctype html>
   <h2>Vitals</h2>
   <div class="stat" id="vitals"></div>
 
+  <h2>Daily P&amp;L · <span id="pnlsub" class="mono" style="color:var(--ink-2)"></span></h2>
+  <table id="pnl"><thead><tr><th>date</th><th class="r">deployed</th><th class="r">returned</th><th class="r">net</th><th class="r">fees</th></tr></thead><tbody></tbody></table>
+
   <div class="grid2">
     <div>
       <h2>Recent rounds</h2>
@@ -154,13 +157,13 @@ async function jget(path){ const r = await fetch(path, H); if(!r.ok) throw new E
 
 async function poll() {
   try {
-    const [s, rounds, deploys, comp, health, vault] = await Promise.all([
+    const [s, rounds, deploys, comp, health, vault, pnl] = await Promise.all([
       jget("/api/status"), jget("/api/rounds?limit=12"), jget("/api/deploys?limit=10"),
       jget("/api/competitors?limit=12"), jget("/api/health").catch(()=>null),
-      jget("/api/vault").catch(()=>null),
+      jget("/api/vault").catch(()=>null), jget("/api/pnl?limit=30").catch(()=>[]),
     ]);
     el("err").style.display="none";
-    render(s, rounds, deploys, comp, health, vault);
+    render(s, rounds, deploys, comp, health, vault, pnl);
     el("clock").textContent = new Date().toLocaleTimeString();
   } catch (e) {
     const err = el("err"); err.style.display="block";
@@ -170,7 +173,7 @@ async function poll() {
 
 function pill(id, text, cls){ const e=el(id); e.textContent=text; e.className="pill "+(cls||""); }
 
-function render(s, rounds, deploys, comp, health, vault) {
+function render(s, rounds, deploys, comp, health, vault, pnl) {
   pill("mode", s.mode, s.mode==="mainnet"?"bad":s.mode==="devnet"?"warn":"");
   pill("round", "round "+(s.round.id??"?")+" · "+(s.round.state??"—")+" · cutoff "+(s.round.slotsToCutoff??"—"), "accent");
   el("kill").style.display = s.killSwitch?"":"none";
@@ -220,6 +223,22 @@ function render(s, rounds, deploys, comp, health, vault) {
     '</td><td class="r mono">'+c.slot+'</td></tr>').join("") || emptyRow(6);
 
   renderVault(vault);
+  renderPnl(pnl);
+}
+
+function renderPnl(rows){
+  rows = rows||[];
+  let allTime=0; for(const r of rows) allTime += base(r.net);
+  el("pnlsub").textContent = rows.length
+    ? ("net "+usd(allTime)+" over last "+rows.length+" day"+(rows.length>1?"s":""))
+    : "no data yet";
+  el("pnl").querySelector("tbody").innerHTML = rows.map(r => {
+    const net = base(r.net);
+    const col = net>=0 ? "var(--success)" : "var(--danger)";
+    return '<tr><td class="mono">'+r.date+'</td><td class="r mono">'+usd(base(r.deployed))+
+      '</td><td class="r mono">'+usd(base(r.returned))+'</td><td class="r mono" style="color:'+col+'">'+usd(net)+
+      '</td><td class="r mono">'+usd(base(r.fees_paid))+'</td></tr>';
+  }).join("") || emptyRow(5);
 }
 
 function renderVault(v){

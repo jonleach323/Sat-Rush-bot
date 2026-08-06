@@ -49,7 +49,8 @@ export interface VaultJson {
 
 export interface MonitorData {
   status(): StatusJson;
-  pnlDaily(): Record<string, unknown> | null;
+  /** Day-by-day PnL history, newest first (up to `limit` rows). */
+  pnlDaily(limit: number): Record<string, unknown>[];
   recentRounds(limit: number): Record<string, unknown>[];
   recentDeploys(limit: number): Record<string, unknown>[];
   recentCompetitors(limit: number): Record<string, unknown>[];
@@ -147,11 +148,10 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
       };
     },
 
-    pnlDaily() {
-      return (
-        ctx.db.queryOne<Record<string, unknown>>(
-          "SELECT * FROM pnl_daily ORDER BY date DESC LIMIT 1",
-        ) ?? null
+    pnlDaily(limit) {
+      return ctx.db.query<Record<string, unknown>>(
+        "SELECT date, deployed, returned, net, fees_paid FROM pnl_daily ORDER BY date DESC LIMIT ?",
+        Math.min(Math.max(1, limit), 365),
       );
     },
 

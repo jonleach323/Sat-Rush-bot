@@ -16,7 +16,11 @@ const fakeData: MonitorData = {
     unclaimed: { usd: 8.1, shares: "141384" },
     caps: { maxPerRoundUsd: 1000, dailyLossCapUsd: 1000, dailyLossLeftUsd: 998.5 },
   }),
-  pnlDaily: () => ({ date: "2026-08-02", net: "-1500000" }),
+  pnlDaily: (n: number) =>
+    Array.from({ length: Math.min(n, 365) }, (_, i) => ({
+      date: "2026-08-0" + (2 + i),
+      net: "-1500000",
+    })),
   // clamp mirrors monitor.ts's contract (max 200)
   recentRounds: (n) => Array.from({ length: Math.min(n, 200) }, (_, i) => ({ id: 42 - i })),
   recentDeploys: (n) => Array.from({ length: Math.min(n, 200) }, (_, i) => ({ round_id: 42 - i })),
@@ -128,7 +132,8 @@ describe("MonitorApi — data endpoints", () => {
     (await fetch(`${base}${path}`, auth)).json();
 
   it("status/pnl/health/rounds/deploys/competitors", async () => {
-    expect((await json("/api/pnl")).date).toBe("2026-08-02");
+    expect((await json("/api/pnl"))[0].date).toBe("2026-08-02");
+    expect((await json("/api/pnl?limit=7")).length).toBe(7);
     expect((await json("/api/health")).usdcBalance).toBe(4990);
     expect((await json("/api/rounds?limit=5")).length).toBe(5);
     expect((await json("/api/deploys?limit=3")).length).toBe(3);
