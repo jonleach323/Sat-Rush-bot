@@ -784,6 +784,7 @@ export class Orchestrator {
       firedSlot: this.state.currentSlot,
       sig: candidate.signature,
       status: this.cfg.EXECUTION_MODE === "dry" ? "dry" : "fired",
+      streak: this.state.miner?.current_streak_count ?? null,
     });
     this.transition("FIRED", {
       mask: selection.mask,

@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { StateDb } from "../src/state/db.js";
 import { usdToBase } from "../src/units.js";
@@ -79,6 +80,49 @@ describe("StateDb", () => {
     );
     expect(row).toEqual({ status: "landed", landed_slot: 1002 });
     db.close();
+  });
+
+  it("records the streak snapshot on a deploy (instrumentation)", () => {
+    const db = freshDb();
+    db.recordMyDeploy({
+      roundId: 5,
+      mask: 1,
+      amount: usdToBase(1),
+      evExpected: 0.25,
+      firedSlot: 1000,
+      sig: "sigStreak",
+      status: "fired",
+      streak: 12,
+    });
+    const row = db.queryOne<{ streak: number }>(
+      "SELECT streak FROM my_deploys WHERE sig = 'sigStreak'",
+    );
+    expect(row?.streak).toBe(12);
+    db.close();
+  });
+
+  it("migrates an old my_deploys table missing the streak column", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "satrush-mig-")), "old.db");
+    // Simulate a pre-migration DB: create my_deploys WITHOUT the streak column.
+    const raw = new Database(path);
+    raw.exec(`CREATE TABLE my_deploys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER NOT NULL, mask INTEGER NOT NULL,
+      amount TEXT NOT NULL, ev_expected REAL, fired_slot INTEGER, landed_slot INTEGER,
+      sig TEXT NOT NULL UNIQUE, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    raw.close();
+    // Opening via StateDb must add the column idempotently and accept a streak.
+    const db = new StateDb(path);
+    db.recordMyDeploy({
+      roundId: 1, mask: 1, amount: usdToBase(1), evExpected: null,
+      firedSlot: 1, sig: "m1", status: "fired", streak: 7,
+    });
+    expect(
+      db.queryOne<{ streak: number }>("SELECT streak FROM my_deploys WHERE sig='m1'")?.streak,
+    ).toBe(7);
+    db.close();
+    // Reopening (column already present) must not error — idempotent migration.
+    const db2 = new StateDb(path);
+    db2.close();
   });
 
   it("competitor deploys dedupe on (round, authority)", () => {

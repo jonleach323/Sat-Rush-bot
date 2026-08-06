@@ -29,6 +29,10 @@ export interface MyDeployRecord {
   firedSlot: number | null;
   sig: string;
   status: "fired" | "landed" | "missed" | "failed" | "dry";
+  /** Miner's current_streak_count at deploy time — instrumentation so the
+   * streak's effect on the claim reward can be measured (its value is not yet
+   * quantifiable: it scales the hashrate/BTC-shares reward, price TBD). */
+  streak?: number | null;
 }
 
 export interface SettlementRecord {
@@ -84,6 +88,7 @@ CREATE TABLE IF NOT EXISTS my_deploys (
   landed_slot INTEGER,
   sig TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL,
+  streak INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_my_deploys_round ON my_deploys(round_id);
@@ -144,6 +149,17 @@ export class StateDb {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Additive, idempotent migrations for DBs created before a column existed. */
+  private migrate(): void {
+    const cols = this.db
+      .prepare(`SELECT name FROM pragma_table_info('my_deploys')`)
+      .all() as { name: string }[];
+    if (!cols.some((c) => c.name === "streak")) {
+      this.db.exec(`ALTER TABLE my_deploys ADD COLUMN streak INTEGER`);
+    }
   }
 
   /** Last write failure (message), for the health monitor. */
@@ -215,8 +231,8 @@ export class StateDb {
     this.write(() =>
       this.db
         .prepare(
-          `INSERT INTO my_deploys (round_id, mask, amount, ev_expected, fired_slot, sig, status)
-           VALUES (@roundId, @mask, @amount, @evExpected, @firedSlot, @sig, @status)
+          `INSERT INTO my_deploys (round_id, mask, amount, ev_expected, fired_slot, sig, status, streak)
+           VALUES (@roundId, @mask, @amount, @evExpected, @firedSlot, @sig, @status, @streak)
            ON CONFLICT(sig) DO UPDATE SET status = excluded.status`,
         )
         .run({
@@ -227,6 +243,7 @@ export class StateDb {
           firedSlot: d.firedSlot,
           sig: d.sig,
           status: d.status,
+          streak: d.streak ?? null,
         }),
     );
   }
