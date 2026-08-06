@@ -265,3 +265,43 @@ Use an outbound tunnel from the VPS:
 paste the HTTPS URL + token; Claude fetches `<url>/api/status` etc. and
 diagnoses. Use a monitoring-scoped API_TOKEN you can rotate (it's read-only
 and everything it shows is public chain data, but rotate it after sharing).
+
+## 8. Send-path infrastructure (latency + inclusion)
+
+Two independent latency paths — optimize them separately.
+
+**Read path (board → bot).** Already optimal if colocated with the stream:
+Helius LaserStream + a box in the same region (SLC). Verify on the dashboard —
+`ingest.slotAgeMs` should be a few hundred ms (≈ one slot). Geography is what
+makes this fast; nothing else to do.
+
+**Send path (deploy → into a block).** The leader rotates nationwide, so your
+geography barely helps here — you win on *how* you send, not *where from*. The
+bot already race-sends the same signed tx to every `SECONDARY_RPC_URLS` endpoint
+AND (when configured) a Jito bundle, simultaneously; identical signature, so
+duplicate lands are impossible. To make that land in fewer slots:
+
+1. **Staked / SWQoS send.** A plain RPC deprioritizes your tx under load — that's
+   your tail latency. On the Helius business plan use its staked/**Sender**
+   endpoint (low-latency, dual-routes to validators + Jito). Put it first in
+   `SECONDARY_RPC_URLS` (keep a normal RPC as a fallback). This is the single
+   biggest, cheapest win.
+2. **Jito tip path.** Set `JITO_BLOCK_ENGINE_URL` to the regional engine — SLC:
+   `https://slc.mainnet.block-engine.jito.wtf` — and `JITO_TIP_ACCOUNT` to a
+   current Jito tip account. The tip is EV-scaled: `JITO_TIP_LAMPORTS` (floor) +
+   `JITO_TIP_EV_FRACTION` (default 0.1 = bid 10% of a round's modeled EV),
+   clamped to `JITO_TIP_MAX_LAMPORTS`. Set `SOL_USD_ESTIMATE` roughly right (it
+   converts EV→lamports). Nothing tips until the URL + account are set.
+3. **Priority fee.** `PRIORITY_FEE_MIN/MAX_MICROLAMPORTS` clamp the dynamic fee;
+   raise the max in contention.
+
+**Payoff — this lowers the latency the adaptive fire offset feeds on.**
+`ADAPTIVE_FIRE_OFFSET` fires as late as your measured `landed_slot − fired_slot`
+safely allows (see §5). As the staked/Jito path drops that latency from ~2 slots
+toward ~1, the offset self-lowers from 4 toward its floor (2) — firing ~1 s later
+with no manual retune, which is exactly what shrinks win-dilution. Watch the
+"adaptive fire offset updated" log lines and the `land` column on the dashboard.
+
+**Setup order:** add the staked endpoint → confirm deploys still land (dashboard
+`land` column, near-zero "missed" alerts) → add the Jito URL + tip account →
+confirm again → let the adaptive offset re-tune down on its own.

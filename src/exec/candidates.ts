@@ -26,6 +26,7 @@ import {
 } from "../strategy/selector.js";
 import { assembleTx } from "./tx.js";
 import type { FeeEstimator } from "./fees.js";
+import { scaledTipLamports } from "./tip.js";
 
 export type DeploySelection = Extract<Selection, { kind: "deploy" }>;
 
@@ -38,6 +39,8 @@ export interface BuiltCandidate {
   blockhash: string;
   lastValidBlockHeight: number;
   feeMicroLamports: number;
+  /** Jito tip embedded in this candidate (lamports); 0 when no tip. */
+  tipLamports: number;
   roundId: number;
   builtAtMs: number;
 }
@@ -48,8 +51,11 @@ export interface CandidateSetOptions {
   ixCtx: InstructionContext;
   feeEstimator: FeeEstimator;
   computeUnitLimit: number;
-  /** Embed a Jito tip transfer in every candidate (bundle path). */
-  jitoTip?: { account: PublicKey; lamports: number } | undefined;
+  /** Embed a Jito tip transfer in every candidate (bundle path). The tip is
+   * EV-scaled per candidate (see scaledTipLamports); evFraction 0 = flat base. */
+  jitoTip?:
+    | { account: PublicKey; baseLamports: number; maxLamports: number; evFraction: number; solUsd: number }
+    | undefined;
   blockhashMaxAgeMs?: number | undefined;
   now?: (() => number) | undefined;
 }
@@ -156,12 +162,19 @@ export class CandidateSet {
           amountBaseUnits: selection.totalGross,
         }),
       ];
+      let tipLamports = 0;
       if (this.opts.jitoTip) {
+        tipLamports = scaledTipLamports(Number(selection.ev), {
+          baseLamports: this.opts.jitoTip.baseLamports,
+          maxLamports: this.opts.jitoTip.maxLamports,
+          evFraction: this.opts.jitoTip.evFraction,
+          solUsd: this.opts.jitoTip.solUsd,
+        });
         instructions.push(
           SystemProgram.transfer({
             fromPubkey: this.opts.payer.publicKey,
             toPubkey: this.opts.jitoTip.account,
-            lamports: this.opts.jitoTip.lamports,
+            lamports: tipLamports,
           }),
         );
       }
@@ -180,6 +193,7 @@ export class CandidateSet {
         blockhash,
         lastValidBlockHeight,
         feeMicroLamports: fee,
+        tipLamports,
         roundId,
         builtAtMs: now(),
       });

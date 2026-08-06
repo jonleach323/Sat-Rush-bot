@@ -256,7 +256,13 @@ export class Orchestrator {
 
     const jitoTip =
       cfg.JITO_BLOCK_ENGINE_URL && cfg.JITO_TIP_ACCOUNT
-        ? { account: new PublicKey(cfg.JITO_TIP_ACCOUNT), lamports: cfg.JITO_TIP_LAMPORTS }
+        ? {
+            account: new PublicKey(cfg.JITO_TIP_ACCOUNT),
+            baseLamports: cfg.JITO_TIP_LAMPORTS,
+            maxLamports: cfg.JITO_TIP_MAX_LAMPORTS,
+            evFraction: cfg.JITO_TIP_EV_FRACTION,
+            solUsd: cfg.SOL_USD_ESTIMATE,
+          }
         : undefined;
     const candidates = new CandidateSet({
       connection,
@@ -744,11 +750,8 @@ export class Orchestrator {
         realizedLossTodayBase: this.bankroll.realizedLossToday(),
         priorityFeeMicroLamports: candidate.feeMicroLamports,
         maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
-        tipLamports:
-          this.cfg.JITO_BLOCK_ENGINE_URL && this.cfg.JITO_TIP_ACCOUNT
-            ? this.cfg.JITO_TIP_LAMPORTS
-            : 0,
-        maxTipLamports: this.cfg.JITO_TIP_LAMPORTS,
+        tipLamports: candidate.tipLamports,
+        maxTipLamports: this.cfg.JITO_TIP_MAX_LAMPORTS,
         latchHeld: this.bankroll.hasDeployed(this.roundId),
         killSwitchEngaged: this.bankroll.killSwitchEngaged(),
       });

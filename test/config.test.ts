@@ -99,6 +99,12 @@ describe("gates and cross-checks", () => {
     ).toThrow(/FIRE_OFFSET_CEILING/);
   });
 
+  it("rejects a jito tip max below the base", () => {
+    expect(() =>
+      loadConfig({ JITO_TIP_LAMPORTS: "50000", JITO_TIP_MAX_LAMPORTS: "10000" }),
+    ).toThrow(/JITO_TIP_MAX_LAMPORTS/);
+  });
+
   it("rejects invalid pubkeys", () => {
     expect(() => loadConfig({ PROGRAM_ID: "not-a-pubkey" })).toThrow();
     expect(() => loadConfig({ USD_MINT: "zzz" })).toThrow();

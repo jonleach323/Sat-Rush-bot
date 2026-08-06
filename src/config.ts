@@ -224,9 +224,28 @@ const schema = z
       z.coerce.number().int().positive().default(400_000),
     ),
     JITO_TIP_ACCOUNT: optionalPubkey,
+    /** Base (floor) Jito tip in lamports — always tipped when Jito is configured. */
     JITO_TIP_LAMPORTS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().positive().default(10_000),
+    ),
+    /** Ceiling on the EV-scaled tip (lamports). Must be ≥ JITO_TIP_LAMPORTS. */
+    JITO_TIP_MAX_LAMPORTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(1_000_000),
+    ),
+    /** Fraction of a round's modeled EV to bid as the Jito tip, on top of the
+     * base — outbids rivals for inclusion on fat rounds, tips the floor on thin
+     * ones. Clamped to JITO_TIP_MAX_LAMPORTS. 0 = flat base tip (off). Only
+     * active once a Jito block engine + tip account are configured. */
+    JITO_TIP_EV_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.1),
+    ),
+    /** SOL price (USD) to convert EV into tip lamports. */
+    SOL_USD_ESTIMATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(150),
     ),
 
     STALENESS_MS: z.preprocess(
@@ -340,6 +359,13 @@ const schema = z
         message: "PRIORITY_FEE_MIN must not exceed PRIORITY_FEE_MAX",
       });
     }
+    if (cfg.JITO_TIP_MAX_LAMPORTS < cfg.JITO_TIP_LAMPORTS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["JITO_TIP_MAX_LAMPORTS"],
+        message: "JITO_TIP_MAX_LAMPORTS must not be below JITO_TIP_LAMPORTS",
+      });
+    }
     if (cfg.FIRE_OFFSET_CEILING < cfg.FIRE_OFFSET_FLOOR) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -416,7 +442,8 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     priorityFeeMicroLamports: `${cfg.PRIORITY_FEE_MIN_MICROLAMPORTS}..${cfg.PRIORITY_FEE_MAX_MICROLAMPORTS}`,
     deployCuLimit: cfg.DEPLOY_CU_LIMIT,
     jitoTipAccount: cfg.JITO_TIP_ACCOUNT ?? "<unset>",
-    jitoTipLamports: cfg.JITO_TIP_LAMPORTS,
+    jitoTipLamports: `${cfg.JITO_TIP_LAMPORTS}..${cfg.JITO_TIP_MAX_LAMPORTS} (EV frac ${cfg.JITO_TIP_EV_FRACTION})`,
+    solUsdEstimate: cfg.SOL_USD_ESTIMATE,
     stakeSemantics: cfg.STAKE_SEMANTICS,
     strategy: cfg.STRATEGY,
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,
