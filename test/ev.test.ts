@@ -227,4 +227,25 @@ describe("outcomeReturns", () => {
       evOfAllocation(ctx({ hashrateRebateFraction: -0.1 }), allocOn([0], usdToBase(1))),
     ).toThrow(RangeError);
   });
+
+  it("credits the expected strike jackpot into the payout, scaled by share", () => {
+    // Lone snipe on empty tile 0 (share ≈ 1) amid a $10 field.
+    const stakes = zeroStakes();
+    for (let i = 1; i < TILES_COUNT; i++) stakes[i] = usdToBase(10);
+    const alloc = allocOn([0], usdToBase(1));
+    const strikePot = Number(usdToBase(2)); // P(strike)·jackpot, e.g. $2,880/1440
+    const withStrike = ctx({ predictedStakes: stakes, strikeExpectedPot: strikePot });
+    const noStrike = ctx({ predictedStakes: stakes });
+
+    // EV rises by P_WIN · strikePot · share_0 (≈ (1/21)·strikePot since share≈1).
+    const lift = evOfAllocation(withStrike, alloc) - evOfAllocation(noStrike, alloc);
+    expect(lift).toBeGreaterThan(0);
+    expect(lift).toBeCloseTo((strikePot * 1) / TILES_COUNT, 0);
+  });
+
+  it("rejects a negative strikeExpectedPot", () => {
+    expect(() =>
+      evOfAllocation(ctx({ strikeExpectedPot: -1 }), allocOn([0], usdToBase(1))),
+    ).toThrow(RangeError);
+  });
 });

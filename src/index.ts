@@ -538,7 +538,22 @@ export class Orchestrator {
       multiplier: 1, // streak multiplier curve is open question 5 — 1 until measured
       semantics: this.cfg.STAKE_SEMANTICS,
       hashrateRebateFraction: this.hashrateRebateFraction(),
+      strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /**
+   * Expected strike-jackpot value this round (base units) = jackpot /
+   * strike_trigger_modulus. Sat Strike is a random ~1/1440 draw (rng % modulus
+   * == 0) that rolls the accumulated jackpot onto the winning tile — untimeable,
+   * but its expectation is real and scales with the pending pool. 0 when
+   * disabled or the modulus is unavailable.
+   */
+  private strikeExpectedPotBase(): number {
+    if (!this.cfg.STRIKE_EV_ENABLED) return 0;
+    const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? 0;
+    if (modulus <= 0) return 0;
+    return Number(this.state.strikePoolUsd()) / modulus;
   }
 
   /**

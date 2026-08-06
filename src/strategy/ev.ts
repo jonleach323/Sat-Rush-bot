@@ -21,8 +21,10 @@
  * by the hashrate a deploy earns (hashrateRebateFraction) — every deploy earns
  * hashrate, winners and losers, so it lowers the effective fee and softens loss
  * outcomes. That rebate is 0 until the hashrate→USD value is actually known
- * (the vault path prices a point), so nothing speculative is credited. strike
- * redistribution on trigger rounds is credited separately by the strike path.
+ * (the vault path prices a point), so nothing speculative is credited. The
+ * strike jackpot is credited at its true expectation (strikeExpectedPot =
+ * jackpot / modulus) — a random ~1/1440 draw that can't be timed, but whose
+ * expected value is real and rises with the pending pool.
  *
  * STAKE_SEMANTICS (CLAUDE.md open question 1): under "raw", S_i is other
  * players' raw net USD and we assume their multiplier is 1 (unobservable);
@@ -79,6 +81,16 @@ export interface EvContext {
    * until the vault path prices a hashrate point). Undefined = 0.
    */
   hashrateRebateFraction?: number | undefined;
+  /**
+   * Expected strike-jackpot value distributed to the winning tile this round
+   * (base units) = P(strike) · jackpot = strikePool / strike_trigger_modulus.
+   * Sat Strike fires when `rng % modulus == 0` (truly random, ~1/1440) and rolls
+   * the accumulated jackpot onto the winning tile's stakers pro-rata — the same
+   * share as the pot. It cannot be timed, but its expectation is real and grows
+   * with the pending pool, so late-cycle rounds are genuinely richer and sizing
+   * responds on its own. Added to the pot in the payout term only. Undefined = 0.
+   */
+  strikeExpectedPot?: number | undefined;
 }
 
 function validateContext(ctx: EvContext): void {
@@ -91,6 +103,10 @@ function validateContext(ctx: EvContext): void {
   const rebate = ctx.hashrateRebateFraction;
   if (rebate !== undefined && (!Number.isFinite(rebate) || rebate < 0)) {
     throw new RangeError(`invalid hashrateRebateFraction: ${rebate}`);
+  }
+  const strike = ctx.strikeExpectedPot;
+  if (strike !== undefined && (!Number.isFinite(strike) || strike < 0)) {
+    throw new RangeError(`invalid strikeExpectedPot: ${strike}`);
   }
   const { deployFeeBps, satsVaultRoundBps, satsVaultClaimBps } = ctx.fees;
   for (const [name, bps] of [
@@ -134,7 +150,9 @@ export function evOfAllocation(ctx: EvContext, allocGross: bigint[]): number {
   if (allocGross.length !== TILES_COUNT) {
     throw new RangeError(`allocation must have ${TILES_COUNT} entries`);
   }
-  const pot = potAfterFees(ctx, allocGross);
+  // The expected strike jackpot is distributed to the winning tile by the same
+  // pro-rata share as the pot, so it rides in the payout term as extra pot.
+  const pot = potAfterFees(ctx, allocGross) + (ctx.strikeExpectedPot ?? 0);
   const nf = netFactor(ctx.fees);
   const m = ctx.multiplier;
 
@@ -193,7 +211,7 @@ export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
   for (const a of allocGross) cost += Number(a);
   if (cost <= 0) return new Array<number>(TILES_COUNT).fill(0);
 
-  const pot = potAfterFees(ctx, allocGross);
+  const pot = potAfterFees(ctx, allocGross) + (ctx.strikeExpectedPot ?? 0);
   const nf = netFactor(ctx.fees);
   const m = ctx.multiplier;
   // Hashrate rebate is earned in every outcome, so it lifts every return —

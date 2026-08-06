@@ -104,6 +104,14 @@ const schema = z
       emptyToUndef,
       z.coerce.number().finite().positive().default(100),
     ),
+    /** Credit the expected strike jackpot (strikePool / strike_trigger_modulus)
+     * into each round's EV. Sat Strike is a random ~1/1440 draw that rolls the
+     * accumulated jackpot onto the winning tile — can't be timed, but its
+     * expectation is real and grows with the pool, so late-cycle rounds get
+     * richer and sizing responds on its own. Supersedes the crude
+     * STRIKE_SIZE_BOOST threshold. On by default (it is simply more accurate EV);
+     * disable only if the mainnet strike mechanic proves to differ. */
+    STRIKE_EV_ENABLED: boolFromEnv(true),
     /** Kill switch: if this file exists, all sending stops immediately. */
     KILL_SWITCH_FILE: z.preprocess(emptyToUndef, z.string().default("./KILL")),
 
@@ -343,6 +351,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     endgameConvergence: cfg.ENDGAME_CONVERGENCE,
     minEdgeBps: cfg.MIN_EDGE_BPS,
     kellyFraction: cfg.KELLY_FRACTION,
+    strikeEvEnabled: cfg.STRIKE_EV_ENABLED,
     antiCollisionEnabled: cfg.ANTI_COLLISION_ENABLED,
     stakeLadderUsd: cfg.STAKE_LADDER_USD,
     maxPerRoundUsd: cfg.MAX_PER_ROUND_USD,

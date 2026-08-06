@@ -30,6 +30,8 @@ describe("config defaults", () => {
     expect(cfg.MIN_EDGE_BPS).toBeGreaterThan(0);
     // Full Kelly by default (growth-maximizing); clamped at 1.0.
     expect(cfg.KELLY_FRACTION).toBe(1);
+    // Strike jackpot expectation is folded into EV by default.
+    expect(cfg.STRIKE_EV_ENABLED).toBe(true);
   });
 
   it("treats empty strings as unset", () => {
