@@ -23,6 +23,9 @@ describe("config defaults", () => {
     expect(cfg.VAULT_SELF_CRANK).toBe(false);
     expect(cfg.ANTI_COLLISION_ENABLED).toBe(true);
     expect(cfg.COMPETITOR_LOOKBACK).toBeGreaterThan(0);
+    // USDC compound loop on by default (fee-free); BTC-share sweep opt-in.
+    expect(cfg.CLAIM_USD_ENABLED).toBe(true);
+    expect(cfg.SWEEP_ENABLED).toBe(false);
     // Payout-dilution corrections are ON by default (they only make the bot
     // more selective): thin tiles converge toward the board mean, and a
     // minimum modeled edge is required to fire.

@@ -31,6 +31,7 @@ import {
   buildClaimEpochReward,
   buildClaimOneBtcReward,
   buildClaimSats,
+  buildClaimUsd,
   buildSelectEpochWinner,
   buildSettleDeployPublic,
   buildTriggerEpochDraw,
@@ -1316,53 +1317,99 @@ export class Orchestrator {
   }
 
   private async maybeSweep(): Promise<void> {
+    if (!this.state.miner || this.sweepInFlight) return;
+    if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    this.sweepInFlight = true;
+    try {
+      await this.claimUsdCompound(); // fee-free — the compound loop
+      await this.claimSatsSweep(); // fee-bearing (10% claim fee) — opt-in
+    } finally {
+      this.sweepInFlight = false;
+    }
+  }
+
+  /** Send a single claim instruction through the race sender (shared plumbing). */
+  private async fireClaim(
+    ix: TransactionInstruction,
+    meta: Record<string, unknown>,
+  ): Promise<string> {
+    const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    assertFeeBearingInvariants({
+      kind: "claim",
+      priorityFeeMicroLamports: fee,
+      maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+      killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+    });
+    const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+      payer: this.payer,
+      instructions: [ix],
+      computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
+      priorityFeeMicroLamports: fee,
+    });
+    const result = await this.sender.fire(
+      {
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        meta,
+      },
+      { timeoutMs: 15_000 },
+    );
+    return result.outcome;
+  }
+
+  /**
+   * Compound loop: claim won USDC (miner.unclaimed_usd_amount) back to the wallet
+   * so it re-enters the deployable bankroll and Kelly sizes against it next
+   * round. claim_usd is a straight transfer — the deploy fees were already taken,
+   * so there is no extra claim fee (unlike claim_sats) — making this pure upside.
+   * Batched by MAX_UNCLAIMED_USD_VALUE so the tx fee is amortized.
+   */
+  private async claimUsdCompound(): Promise<void> {
+    if (!this.cfg.CLAIM_USD_ENABLED) return;
+    const miner = this.state.miner;
+    if (!miner) return;
+    const amount = BigInt(miner.unclaimed_usd_amount.toString());
+    if (amount <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
+    const outcome = await this.fireClaim(
+      buildClaimUsd(this.ixCtx, { authority: this.payer.publicKey, amount }),
+      { kind: "claim_usd", amount: amount.toString() },
+    );
+    this.log.info({ amount: amount.toString(), outcome }, "usd compound claim resolved");
+    if (outcome === "landed") {
+      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet`);
+    }
+  }
+
+  /**
+   * BTC-share sweep: redeem a fraction of unclaimed vault shares to BTC. This
+   * pays the sats_vault_claim fee (~10%), so it's gated OFF by default — enable
+   * only when realizing BTC is worth the fee vs holding the shares as exposure.
+   */
+  private async claimSatsSweep(): Promise<void> {
     const miner = this.state.miner;
     const vault = this.state.satsVault;
-    if (!miner || !vault || this.sweepInFlight) return;
+    if (!miner || !vault) return;
     const value = this.pnl.unclaimedValue({
       miner,
       satsVault: vault,
       btcUsdPrice: this.cfg.BTC_USD_ESTIMATE,
       btcDecimals: 8, // cbBTC-style; read from mint before mainnet
     });
-    if (value.totalUsd <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
+    const sharesUsd = value.totalUsd - value.usd; // BTC-share value only
+    if (sharesUsd <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
     if (!this.cfg.SWEEP_ENABLED) {
-      this.skipOnce("sweep_disabled", { unclaimedTotalUsd: value.totalUsd.toString() });
+      this.skipOnce("sweep_disabled", { unclaimedSharesUsd: sharesUsd.toString() });
       return;
     }
-    if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
     const shares =
       (value.shares * BigInt(Math.round(this.cfg.CLAIM_FRACTION * 10_000))) / 10_000n;
     if (shares <= 0n) return;
-    this.sweepInFlight = true;
-    try {
-      const fee = this.feeEstimator.currentMicroLamportsPerCu();
-      assertFeeBearingInvariants({
-        kind: "claim",
-        priorityFeeMicroLamports: fee,
-        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
-        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
-      });
-      const ix = buildClaimSats(this.ixCtx, { authority: this.payer.publicKey, shares });
-      const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-        payer: this.payer,
-        instructions: [ix],
-        computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
-        priorityFeeMicroLamports: fee,
-      });
-      const result = await this.sender.fire(
-        {
-          signature: bs58.encode(tx.signatures[0]!),
-          serialized: Buffer.from(tx.serialize()),
-          lastValidBlockHeight,
-          meta: { kind: "claim_sats", shares: shares.toString() },
-        },
-        { timeoutMs: 15_000 },
-      );
-      this.log.info({ shares: shares.toString(), outcome: result.outcome }, "sweep resolved");
-    } finally {
-      this.sweepInFlight = false;
-    }
+    const outcome = await this.fireClaim(
+      buildClaimSats(this.ixCtx, { authority: this.payer.publicKey, shares }),
+      { kind: "claim_sats", shares: shares.toString() },
+    );
+    this.log.info({ shares: shares.toString(), outcome }, "sats sweep resolved");
   }
 
   // ── event wiring ────────────────────────────────────────────────────────────

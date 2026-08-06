@@ -236,7 +236,13 @@ const schema = z
 
     /** Self-settle our deployments after reveal (rent refund to the cranker). */
     SELF_SETTLE: boolFromEnv(true),
-    /** Sweep gate — off until claim-fee vs hashrate tradeoffs are measured. */
+    /** Compound loop: claim won USDC (unclaimed_usd_amount) back to the wallet
+     * once it exceeds MAX_UNCLAIMED_USD_VALUE, so it re-enters the deployable
+     * bankroll and Kelly sizes against it. claim_usd is fee-free (deploy fees
+     * already taken), so this is pure upside — on by default. */
+    CLAIM_USD_ENABLED: boolFromEnv(true),
+    /** BTC-share sweep gate (claim_sats). Pays the ~10% sats_vault_claim fee, so
+     * off by default — enable only when realizing BTC beats holding the shares. */
     SWEEP_ENABLED: boolFromEnv(false),
     /** Fraction of unclaimed shares claimed per sweep. */
     CLAIM_FRACTION: z.preprocess(
@@ -417,6 +423,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     strikeBoostThresholdUsd: cfg.STRIKE_BOOST_THRESHOLD_USD,
     killSwitchFile: cfg.KILL_SWITCH_FILE,
     selfSettle: cfg.SELF_SETTLE,
+    claimUsdEnabled: cfg.CLAIM_USD_ENABLED,
     sweepEnabled: cfg.SWEEP_ENABLED,
     claimFraction: cfg.CLAIM_FRACTION,
     solFloorSol: cfg.SOL_FLOOR_SOL,
