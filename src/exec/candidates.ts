@@ -52,12 +52,15 @@ export interface CandidateSetOptions {
   feeEstimator: FeeEstimator;
   computeUnitLimit: number;
   /** Embed a Jito tip transfer in every candidate (bundle path). The tip is
-   * EV-scaled per candidate (see scaledTipLamports); evFraction 0 = flat base. */
+   * EV-scaled per candidate (see scaledTipLamports); evFraction 0 = flat base.
+   * One `account` is chosen at random per fire to avoid write-lock contention. */
   jitoTip?:
-    | { account: PublicKey; baseLamports: number; maxLamports: number; evFraction: number; solUsd: number }
+    | { accounts: PublicKey[]; baseLamports: number; maxLamports: number; evFraction: number; solUsd: number }
     | undefined;
   blockhashMaxAgeMs?: number | undefined;
   now?: (() => number) | undefined;
+  /** Injectable randomness for the tip-account pick (deterministic in tests). */
+  rng?: (() => number) | undefined;
 }
 
 const BLOCKHASH_MAX_AGE_MS = 15_000;
@@ -163,7 +166,10 @@ export class CandidateSet {
         }),
       ];
       let tipLamports = 0;
-      if (this.opts.jitoTip) {
+      if (this.opts.jitoTip && this.opts.jitoTip.accounts.length > 0) {
+        const accts = this.opts.jitoTip.accounts;
+        const rng = this.opts.rng ?? Math.random;
+        const account = accts[Math.min(accts.length - 1, Math.floor(rng() * accts.length))]!;
         tipLamports = scaledTipLamports(Number(selection.ev), {
           baseLamports: this.opts.jitoTip.baseLamports,
           maxLamports: this.opts.jitoTip.maxLamports,
@@ -173,7 +179,7 @@ export class CandidateSet {
         instructions.push(
           SystemProgram.transfer({
             fromPubkey: this.opts.payer.publicKey,
-            toPubkey: this.opts.jitoTip.account,
+            toPubkey: account,
             lamports: tipLamports,
           }),
         );

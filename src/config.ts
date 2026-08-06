@@ -47,6 +47,14 @@ const commaListOfUrls = z.preprocess(
   z.array(z.string().url()).default([]),
 );
 
+const commaListOfPubkeys = z.preprocess(
+  (v) =>
+    typeof v === "string"
+      ? v.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+      : v,
+  z.array(pubkeyString).default([]),
+);
+
 const commaListOfUsd = z.preprocess(
   (v) =>
     typeof v === "string" && v.trim() !== ""
@@ -224,6 +232,10 @@ const schema = z
       z.coerce.number().int().positive().default(400_000),
     ),
     JITO_TIP_ACCOUNT: optionalPubkey,
+    /** Jito tip accounts (comma list). One is picked at random per fire to avoid
+     * the write-lock hotspot of tipping a single account every round. Merged
+     * with the singular JITO_TIP_ACCOUNT. */
+    JITO_TIP_ACCOUNTS: commaListOfPubkeys,
     /** Base (floor) Jito tip in lamports — always tipped when Jito is configured. */
     JITO_TIP_LAMPORTS: z.preprocess(
       emptyToUndef,
@@ -441,7 +453,8 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     stalenessMs: cfg.STALENESS_MS,
     priorityFeeMicroLamports: `${cfg.PRIORITY_FEE_MIN_MICROLAMPORTS}..${cfg.PRIORITY_FEE_MAX_MICROLAMPORTS}`,
     deployCuLimit: cfg.DEPLOY_CU_LIMIT,
-    jitoTipAccount: cfg.JITO_TIP_ACCOUNT ?? "<unset>",
+    jitoTipAccounts:
+      cfg.JITO_TIP_ACCOUNTS.length + (cfg.JITO_TIP_ACCOUNT ? 1 : 0) || "<unset>",
     jitoTipLamports: `${cfg.JITO_TIP_LAMPORTS}..${cfg.JITO_TIP_MAX_LAMPORTS} (EV frac ${cfg.JITO_TIP_EV_FRACTION})`,
     solUsdEstimate: cfg.SOL_USD_ESTIMATE,
     stakeSemantics: cfg.STAKE_SEMANTICS,

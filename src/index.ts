@@ -254,10 +254,16 @@ export class Orchestrator {
     });
     await feeEstimator.refreshFromRpc(connection);
 
+    const tipAccounts = [
+      ...new Set([
+        ...cfg.JITO_TIP_ACCOUNTS,
+        ...(cfg.JITO_TIP_ACCOUNT ? [cfg.JITO_TIP_ACCOUNT] : []),
+      ]),
+    ];
     const jitoTip =
-      cfg.JITO_BLOCK_ENGINE_URL && cfg.JITO_TIP_ACCOUNT
+      cfg.JITO_BLOCK_ENGINE_URL && tipAccounts.length > 0
         ? {
-            account: new PublicKey(cfg.JITO_TIP_ACCOUNT),
+            accounts: tipAccounts.map((a) => new PublicKey(a)),
             baseLamports: cfg.JITO_TIP_LAMPORTS,
             maxLamports: cfg.JITO_TIP_MAX_LAMPORTS,
             evFraction: cfg.JITO_TIP_EV_FRACTION,

@@ -80,6 +80,43 @@ describe("computeCandidateSelections", () => {
   });
 });
 
+describe("CandidateSet — Jito tip", () => {
+  it("embeds an EV-scaled tip to one of the rotation accounts", async () => {
+    const a1 = Keypair.generate().publicKey;
+    const a2 = Keypair.generate().publicKey;
+    const { conn } = mockConnection();
+    const set = new CandidateSet({
+      connection: conn,
+      payer: Keypair.generate(),
+      ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+      feeEstimator,
+      computeUnitLimit: 400_000,
+      jitoTip: {
+        accounts: [a1, a2],
+        baseLamports: 1_000_000,
+        maxLamports: 5_000_000,
+        evFraction: 0, // flat base tip
+        solUsd: 150,
+      },
+      rng: seededRng(1),
+    });
+    const built = await set.refresh(42, chaseCtx(), selCfg());
+    expect(built.length).toBeGreaterThan(0);
+    const c = built[0]!;
+    expect(c.tipLamports).toBe(1_000_000); // base, since evFraction = 0
+    // The tip transfer targets one of the rotation accounts (present in keys).
+    const tx = VersionedTransaction.deserialize(c.serialized);
+    const keys = tx.message.staticAccountKeys.map((k) => k.toBase58());
+    expect(keys.includes(a1.toBase58()) || keys.includes(a2.toBase58())).toBe(true);
+  });
+
+  it("carries no tip when Jito is unconfigured", async () => {
+    const { conn } = mockConnection();
+    const built = await candidateSet(conn).refresh(42, chaseCtx(), selCfg());
+    expect(built[0]!.tipLamports).toBe(0);
+  });
+});
+
 describe("CandidateSet", () => {
   it("builds signed, serialized candidates tagged to the round", async () => {
     const { conn } = mockConnection();

@@ -282,16 +282,20 @@ AND (when configured) a Jito bundle, simultaneously; identical signature, so
 duplicate lands are impossible. To make that land in fewer slots:
 
 1. **Staked / SWQoS send.** A plain RPC deprioritizes your tx under load — that's
-   your tail latency. On the Helius business plan use its staked/**Sender**
-   endpoint (low-latency, dual-routes to validators + Jito). Put it first in
-   `SECONDARY_RPC_URLS` (keep a normal RPC as a fallback). This is the single
-   biggest, cheapest win.
-2. **Jito tip path.** Set `JITO_BLOCK_ENGINE_URL` to the regional engine — SLC:
-   `https://slc.mainnet.block-engine.jito.wtf` — and `JITO_TIP_ACCOUNT` to a
-   current Jito tip account. The tip is EV-scaled: `JITO_TIP_LAMPORTS` (floor) +
-   `JITO_TIP_EV_FRACTION` (default 0.1 = bid 10% of a round's modeled EV),
-   clamped to `JITO_TIP_MAX_LAMPORTS`. Set `SOL_USD_ESTIMATE` roughly right (it
-   converts EV→lamports). Nothing tips until the URL + account are set.
+   your tail latency. Use the Helius **Sender** endpoint (low-latency, no API
+   key, dual-routes to validators + Jito) first in `SECONDARY_RPC_URLS`, with a
+   normal RPC as fallback: `SECONDARY_RPC_URLS=http://slc-sender.helius-rpc.com/fast,https://<your-rpc>`.
+   The single biggest, cheapest win. NOTE: Sender REQUIRES a Jito tip in the tx
+   (min ~0.001 SOL = 1_000_000 lamports — verify in Helius docs), so set the tip
+   below with `JITO_TIP_LAMPORTS=1000000` as the floor.
+2. **Jito tip path.** `JITO_BLOCK_ENGINE_URL=https://slc.mainnet.block-engine.jito.wtf`
+   and `JITO_TIP_ACCOUNTS=<comma list of the 8 mainnet tip accounts>` (see
+   .env.example). One account is picked at random per fire to dodge the
+   write-lock hotspot of a single account. The tip is EV-scaled:
+   `JITO_TIP_LAMPORTS` (floor) + `JITO_TIP_EV_FRACTION` (0.1 = bid 10% of the
+   round's modeled EV), clamped to `JITO_TIP_MAX_LAMPORTS`. Set `SOL_USD_ESTIMATE`
+   roughly right (it converts EV→lamports). If you use Helius Sender, set floor
+   1_000_000 and max higher (e.g. 5_000_000) to leave EV-scaling room.
 3. **Priority fee.** `PRIORITY_FEE_MIN/MAX_MICROLAMPORTS` clamp the dynamic fee;
    raise the max in contention.
 
