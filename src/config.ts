@@ -266,9 +266,13 @@ const schema = z
       z.coerce.number().finite().positive().default(0.02),
     ),
 
-    // ── hashrate raffle vaults (epoch + 1-BTC) — OFF by default ───────────
-    /** Master switch for the vault ticket strategy. Off = never buys tickets. */
-    VAULT_STRATEGY_ENABLED: boolFromEnv(false),
+    // ── hashrate raffle vaults (epoch + 1-BTC) ────────────────────────────
+    /** Master switch for the vault ticket strategy. On = spends earned hashrate
+     * (an otherwise-idle byproduct) on +share raffles, bounded by
+     * VAULT_MAX_TICKETS / VAULT_HASHRATE_FRACTION and gated by EXECUTION_MODE
+     * (dry sends nothing). VERIFY ON DEVNET before mainnet — the vault path caught
+     * a 100× cost error on devnet once. Off = deploy-only, never buys tickets. */
+    VAULT_STRATEGY_ENABLED: boolFromEnv(true),
     /** USD opportunity value of one hashrate point (the pickiness floor). */
     HASHRATE_VALUE_USD: z.preprocess(
       emptyToUndef,

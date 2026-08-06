@@ -11,8 +11,9 @@ describe("config defaults", () => {
     expect(cfg.SECONDARY_RPC_URLS).toEqual([]);
     expect(cfg.STAKE_LADDER_USD.length).toBeGreaterThan(0);
     expect(cfg.MAX_PER_ROUND_USD).toBeLessThanOrEqual(cfg.DAILY_LOSS_CAP_USD);
-    // Vault strategy is OFF by default — never buys tickets unless opted in.
-    expect(cfg.VAULT_STRATEGY_ENABLED).toBe(false);
+    // Vault strategy is ON by default — spends idle hashrate on +share raffles
+    // (bounded, and EXECUTION_MODE-gated so dry mode still sends nothing).
+    expect(cfg.VAULT_STRATEGY_ENABLED).toBe(true);
     expect(cfg.VAULT_HASHRATE_PER_TICKET).toBe(100); // measured on devnet
     expect(cfg.VAULT_MAX_TICKETS).toBeGreaterThan(0);
     expect(cfg.VAULT_HASHRATE_FRACTION).toBeGreaterThanOrEqual(0);
