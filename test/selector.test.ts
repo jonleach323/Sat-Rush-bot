@@ -162,6 +162,70 @@ describe("minimum-edge floor", () => {
   });
 });
 
+describe("fractional-Kelly sizing", () => {
+  it("no-ops when kellyFraction/bankroll are unset (pure EV-max)", () => {
+    const c = ctx(chaseBoard());
+    const plain = selectAllocation(c, cfg());
+    const kellyOff = selectAllocation(c, cfg({ kellyFraction: 0 }));
+    expect(kellyOff).toEqual(plain);
+  });
+
+  it("reduces the stake when the bankroll is small relative to the edge", () => {
+    // A cap-bound fat board: many cheap tiles keep the marginal quantum +EV past
+    // a big cap, so EV-max wants the whole cap.
+    const stakes = zeroStakes();
+    for (let i = 2; i < 15; i++) stakes[i] = usdToBase(1);
+    for (let i = 15; i < TILES_COUNT; i++) stakes[i] = usdToBase(200);
+    const c = ctx(stakes);
+    const evMax = selectAllocation(c, cfg({ maxPerRound: usdToBase(50) }));
+    expect(evMax.kind).toBe("deploy");
+    if (evMax.kind !== "deploy") return;
+
+    // With a tiny bankroll, half-Kelly caps the stake well below the EV-max bet.
+    const kelly = selectAllocation(
+      c,
+      cfg({ maxPerRound: usdToBase(50), kellyFraction: 0.5, bankrollBase: usdToBase(20) }),
+    );
+    expect(kelly.kind).toBe("deploy");
+    if (kelly.kind !== "deploy") return;
+    expect(kelly.totalGross).toBeLessThan(evMax.totalGross);
+  });
+
+  it("does not raise the stake above the EV-max bet, even with a huge bankroll", () => {
+    const c = ctx(chaseBoard());
+    const evMax = selectAllocation(c, cfg());
+    if (evMax.kind !== "deploy") return;
+    const kelly = selectAllocation(
+      c,
+      cfg({ kellyFraction: 1, bankrollBase: usdToBase(1_000_000) }),
+    );
+    expect(kelly.kind).toBe("deploy");
+    if (kelly.kind !== "deploy") return;
+    // Empty-tile own-dilution stops EV-max at $2; Kelly can't push past that.
+    expect(kelly.totalGross).toBe(evMax.totalGross);
+  });
+
+  it("skips when Kelly sizes below the on-chain minimum deploy", () => {
+    // Thin-but-positive edge (tile 0 below a $10 field) + tiny bankroll →
+    // growth-optimal stake < min deploy → sit out rather than over-bet the min.
+    const stakes = zeroStakes().map(() => usdToBase(10));
+    stakes[0] = usdToBase(5);
+    // Sanity: it's a genuine deploy with Kelly off.
+    const base = selectAllocation(ctx(stakes), cfg({ minEdgeBps: 0 }));
+    expect(base.kind).toBe("deploy");
+    const sel = selectAllocation(
+      ctx(stakes),
+      cfg({
+        minEdgeBps: 0,
+        kellyFraction: 0.5,
+        bankrollBase: usdToBase(2),
+        minDeploy: usdToBase(1),
+      }),
+    );
+    expect(sel).toMatchObject({ kind: "skip", reason: "kelly_below_min_deploy" });
+  });
+});
+
 describe("cap-bound detection (MAX EXTRACTION telemetry)", () => {
   it("flags capBound when MAX_PER_ROUND binds before marginal EV does", () => {
     // Whale tiles build a fat pot; many cheap $1 tiles keep the marginal

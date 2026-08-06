@@ -16,8 +16,10 @@ import {
   TILES_COUNT,
   evOfAllocation,
   marginalEv,
+  outcomeReturns,
   type EvContext,
 } from "./ev.js";
+import { kellyFraction } from "./kelly.js";
 
 export type StrategyName = "water_filling" | "k_emptiest";
 
@@ -39,6 +41,18 @@ export interface SelectorConfig {
    * 0 = off (fire on any positive EV, the old behavior).
    */
   minEdgeBps?: number | undefined;
+  /**
+   * Fractional-Kelly multiplier ∈ (0,1]. When set (with `bankrollBase`), the
+   * total round stake is capped at this fraction of the growth-optimal Kelly
+   * bet — sizing up on fat edges and down on thin/high-variance ones, scaled to
+   * the bankroll. It only ever *reduces* below the EV-maximizing water-filling
+   * stake (betting past Kelly lowers long-run growth), never raises it above the
+   * cap. 0/undefined = off (pure EV-max water-filling). Half-Kelly (0.5) is the
+   * conservative default.
+   */
+  kellyFraction?: number | undefined;
+  /** Deployable bankroll (base units) Kelly sizes against. Required for Kelly. */
+  bankrollBase?: bigint | undefined;
   /** Injectable randomness for tie-breaks and k-emptiest choice. */
   rng?: (() => number) | undefined;
 }
@@ -98,6 +112,23 @@ export function selectAllocation(ctx: EvContext, cfg: SelectorConfig): Selection
 }
 
 function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
+  // Fractional-Kelly overlay: find the EV-optimal allocation first, then cap the
+  // total stake at the growth-optimal Kelly bet if that is smaller. Two-pass so
+  // the shape is re-optimized for the reduced budget; the recursive call has
+  // Kelly disabled to avoid looping.
+  if (cfg.kellyFraction && cfg.kellyFraction > 0 && cfg.bankrollBase != null) {
+    const evMax = { ...cfg, kellyFraction: undefined, bankrollBase: undefined };
+    const base = selectWaterFilling(ctx, evMax);
+    if (base.kind !== "deploy") return base;
+    const f = kellyFraction(outcomeReturns(ctx, base.allocation)) * cfg.kellyFraction;
+    const kellyBudget = BigInt(Math.floor(f * Number(cfg.bankrollBase)));
+    if (kellyBudget >= base.totalGross) return base; // Kelly does not reduce
+    if (kellyBudget < cfg.minDeploy) {
+      return { kind: "skip", reason: "kelly_below_min_deploy", strategy: "water_filling" };
+    }
+    return selectWaterFilling(ctx, { ...evMax, maxPerRound: kellyBudget });
+  }
+
   const rng = cfg.rng ?? Math.random;
   const quantum = cfg.ladder.reduce((a, b) => (b < a ? b : a));
   if (quantum > cfg.maxPerRound) {

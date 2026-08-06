@@ -5,6 +5,7 @@ import {
   feeModelFromConfig,
   marginalEv,
   netFactor,
+  outcomeReturns,
   potAfterFees,
   TILES_COUNT,
   type EvContext,
@@ -169,5 +170,35 @@ describe("marginalEv", () => {
     expect(() => evOfAllocation(ctx({ multiplier: 0 }), zeroStakes())).toThrow(
       RangeError,
     );
+  });
+});
+
+describe("outcomeReturns", () => {
+  it("is all-zero when nothing is staked", () => {
+    expect(outcomeReturns(ctx(), zeroStakes())).toEqual(
+      new Array<number>(TILES_COUNT).fill(0),
+    );
+  });
+
+  it("a lone empty-tile snipe wins ~the whole pot, loses the stake elsewhere", () => {
+    // 20 tiles at $10, tile 0 empty; I put $1 on tile 0 only.
+    const stakes = zeroStakes();
+    for (let i = 1; i < TILES_COUNT; i++) stakes[i] = usdToBase(10);
+    const r = outcomeReturns(ctx({ predictedStakes: stakes }), allocOn([0], usdToBase(1)));
+    // Tile 0 wins → I own it outright → payout ≈ full pot ≫ my $1 stake.
+    expect(r[0]).toBeGreaterThan(100);
+    // Any other tile wins → I lose my whole stake → return −1.
+    for (let i = 1; i < TILES_COUNT; i++) expect(r[i]).toBeCloseTo(-1, 9);
+  });
+
+  it("the probability-weighted mean return equals EV/cost", () => {
+    const stakes = zeroStakes();
+    for (let i = 2; i < TILES_COUNT; i++) stakes[i] = usdToBase(8);
+    const c = ctx({ predictedStakes: stakes });
+    const alloc = allocOn([0, 1], usdToBase(1));
+    const r = outcomeReturns(c, alloc);
+    const meanReturn = r.reduce((a, b) => a + b, 0) / TILES_COUNT;
+    const cost = Number(usdToBase(2));
+    expect(meanReturn).toBeCloseTo(evOfAllocation(c, alloc) / cost, 6);
   });
 });

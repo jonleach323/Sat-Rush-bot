@@ -114,6 +114,9 @@ export class Orchestrator {
   private sweepInFlight = false;
   private usdcBaselineBase: bigint | null = null;
   private usdcBaselineDate: string | null = null;
+  /** Last on-chain USDC balance (base units), refreshed by the drift check.
+   * Feeds Kelly bet sizing; null until the first successful read (Kelly off). */
+  private usdcAvailableBase: bigint | null = null;
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -545,6 +548,8 @@ export class Orchestrator {
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
       minEdgeBps: this.cfg.MIN_EDGE_BPS,
+      kellyFraction: this.cfg.KELLY_FRACTION,
+      bankrollBase: this.usdcAvailableBase ?? undefined,
     };
   }
 
@@ -816,6 +821,8 @@ export class Orchestrator {
     } catch {
       return; // transient — try next tick
     }
+    // Cache for Kelly bet sizing (fresh within the 30s drift-check cadence).
+    this.usdcAvailableBase = actual;
     // Re-baseline at UTC-day rollover so the baseline shares the same clock as
     // deployedToday() (which resets per UTC day). Without this, at midnight the
     // expected delta resets to ~0 while the lifetime baseline still reflects the

@@ -158,6 +158,40 @@ export function evOfMask(
   return evOfAllocation(ctx, alloc);
 }
 
+/**
+ * Per-outcome return distribution for `allocGross`, length 21: entry i is the
+ * return on total stake if tile i wins — (payout_i − cost)/cost — where
+ * payout_i is my pro-rata share of the pot on tile i (0 if I'm not on it). The
+ * 21 outcomes are equally likely; this is the raw distribution Kelly sizing
+ * needs (probabilities applied by the caller). Returns an all-zero array when
+ * nothing is staked.
+ */
+export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
+  validateContext(ctx);
+  if (allocGross.length !== TILES_COUNT) {
+    throw new RangeError(`allocation must have ${TILES_COUNT} entries`);
+  }
+  let cost = 0;
+  for (const a of allocGross) cost += Number(a);
+  if (cost <= 0) return new Array<number>(TILES_COUNT).fill(0);
+
+  const pot = potAfterFees(ctx, allocGross);
+  const nf = netFactor(ctx.fees);
+  const m = ctx.multiplier;
+  const returns = new Array<number>(TILES_COUNT).fill(0);
+  for (let i = 0; i < TILES_COUNT; i++) {
+    const gross = allocGross[i] ?? 0n;
+    let payout = 0;
+    if (gross > 0n) {
+      const myEffective = Number(gross) * nf * m;
+      const othersEffective = Number(ctx.predictedStakes[i] ?? 0n);
+      payout = pot * (myEffective / (othersEffective + myEffective));
+    }
+    returns[i] = (payout - cost) / cost;
+  }
+  return returns;
+}
+
 /** EV gain from adding `incrementGross` to `tile` on top of `allocGross`. */
 export function marginalEv(
   ctx: EvContext,

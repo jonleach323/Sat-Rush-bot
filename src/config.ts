@@ -131,6 +131,15 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(0).max(10_000).default(1000),
     ),
+    /** Fractional-Kelly bet sizing ∈ [0,1]. Caps each round's total stake at
+     * this fraction of the growth-optimal Kelly bet (sized to the live wallet
+     * bankroll) — bigger on fat edges, smaller on thin/high-variance ones. Only
+     * ever reduces below the EV-max water-filling stake, never past the risk
+     * cap. 0 = off (pure EV-max). 0.5 = half-Kelly (standard, conservative). */
+    KELLY_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.5),
+    ),
     /** Anti-collision: fold predicted rival occupancy into the selector's
      * forecast so it routes off tiles other snipers will crowd. Off = current
      * behavior (own-observation occupancy only). */
@@ -330,6 +339,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     kEmptiest: cfg.K_EMPTIEST,
     endgameConvergence: cfg.ENDGAME_CONVERGENCE,
     minEdgeBps: cfg.MIN_EDGE_BPS,
+    kellyFraction: cfg.KELLY_FRACTION,
     antiCollisionEnabled: cfg.ANTI_COLLISION_ENABLED,
     stakeLadderUsd: cfg.STAKE_LADDER_USD,
     maxPerRoundUsd: cfg.MAX_PER_ROUND_USD,
