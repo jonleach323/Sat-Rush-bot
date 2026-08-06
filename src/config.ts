@@ -135,10 +135,13 @@ const schema = z
      * this fraction of the growth-optimal Kelly bet (sized to the live wallet
      * bankroll) — bigger on fat edges, smaller on thin/high-variance ones. Only
      * ever reduces below the EV-max water-filling stake, never past the risk
-     * cap. 0 = off (pure EV-max). 0.5 = half-Kelly (standard, conservative). */
+     * cap. 1.0 = full Kelly (default): the growth-maximizing bet — max long-run
+     * extraction, assuming the edge estimate is accurate. 0.5 = half-Kelly
+     * (robust to edge-estimate error). 0 = off (pure EV-max). Values >1 are
+     * rejected at load: over-betting Kelly provably lowers compounded growth. */
     KELLY_FRACTION: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.5),
+      z.coerce.number().min(0).max(1).default(1),
     ),
     /** Anti-collision: fold predicted rival occupancy into the selector's
      * forecast so it routes off tiles other snipers will crowd. Off = current

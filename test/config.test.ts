@@ -28,9 +28,8 @@ describe("config defaults", () => {
     expect(cfg.ENDGAME_CONVERGENCE).toBeGreaterThan(0);
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
     expect(cfg.MIN_EDGE_BPS).toBeGreaterThan(0);
-    // Fractional-Kelly sizing is on by default (half-Kelly).
-    expect(cfg.KELLY_FRACTION).toBeGreaterThan(0);
-    expect(cfg.KELLY_FRACTION).toBeLessThanOrEqual(1);
+    // Full Kelly by default (growth-maximizing); clamped at 1.0.
+    expect(cfg.KELLY_FRACTION).toBe(1);
   });
 
   it("treats empty strings as unset", () => {
