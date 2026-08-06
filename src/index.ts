@@ -117,6 +117,9 @@ export class Orchestrator {
   /** Last on-chain USDC balance (base units), refreshed by the drift check.
    * Feeds Kelly bet sizing; null until the first successful read (Kelly off). */
   private usdcAvailableBase: bigint | null = null;
+  /** Measured hashrate points earned per base unit deployed (from settlements).
+   * Feeds the unified-EV hashrate rebate; 0 until settlements exist. */
+  private hashratePerBaseDeployed = 0;
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -534,7 +537,31 @@ export class Orchestrator {
       fees: this.fees,
       multiplier: 1, // streak multiplier curve is open question 5 — 1 until measured
       semantics: this.cfg.STAKE_SEMANTICS,
+      hashrateRebateFraction: this.hashrateRebateFraction(),
     };
+  }
+
+  /**
+   * Hashrate rebate as a fraction of gross deployed: (measured hashrate earned
+   * per base unit deployed) × (USD value of a hashrate point). 0 until
+   * HASHRATE_VALUE_USD is set — i.e. until the vault path prices a point — so
+   * nothing speculative is credited to the edge that Kelly sizes against.
+   */
+  private hashrateRebateFraction(): number {
+    if (this.cfg.HASHRATE_VALUE_USD <= 0) return 0;
+    return this.hashratePerBaseDeployed * this.cfg.HASHRATE_VALUE_USD * 1_000_000;
+  }
+
+  /** Refresh the measured hashrate-earned-per-base-deployed from settlements. */
+  private refreshHashrateRate(): void {
+    const row = this.db.queryOne<{ hr: number | null; amt: number | null }>(
+      `SELECT SUM(CAST(s.hashrate_earned AS REAL)) AS hr,
+              SUM(CAST(d.amount AS REAL)) AS amt
+       FROM settlements s JOIN my_deploys d ON d.round_id = s.round_id`,
+    );
+    const hr = row?.hr ?? 0;
+    const amt = row?.amt ?? 0;
+    this.hashratePerBaseDeployed = amt > 0 ? hr / amt : 0;
   }
 
   private selectorConfig(): SelectorConfig {
@@ -1410,8 +1437,13 @@ export class Orchestrator {
     });
 
     this.health.start(10_000);
-    // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode).
-    this.walletDriftTimer = setInterval(() => void this.checkWalletDrift(), 30_000);
+    // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
+    // same tick refreshes the measured hashrate-per-deploy for the unified EV.
+    this.refreshHashrateRate();
+    this.walletDriftTimer = setInterval(() => {
+      void this.checkWalletDrift();
+      this.refreshHashrateRate();
+    }, 30_000);
     this.walletDriftTimer.unref?.();
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
     // path is otherwise entirely untouched.

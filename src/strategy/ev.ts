@@ -17,10 +17,12 @@
  * full satsVaultRound. Treating it as fully lost (the previous model) under-
  * valued every win by ~the vault leg and made the selector skip beatable boards.
  *
- * Conservative scope: the deploy legs are still modeled as a full cost here.
- * strike is redistributed only on strike-trigger rounds, and epoch/one_btc are
- * recaptured only via the hashrate→vault ticket path (a separate strategy);
- * neither is credited until that value is actually captured.
+ * Conservative scope: the deploy legs are modeled as a cost, partially rebated
+ * by the hashrate a deploy earns (hashrateRebateFraction) — every deploy earns
+ * hashrate, winners and losers, so it lowers the effective fee and softens loss
+ * outcomes. That rebate is 0 until the hashrate→USD value is actually known
+ * (the vault path prices a point), so nothing speculative is credited. strike
+ * redistribution on trigger rounds is credited separately by the strike path.
  *
  * STAKE_SEMANTICS (CLAUDE.md open question 1): under "raw", S_i is other
  * players' raw net USD and we assume their multiplier is 1 (unobservable);
@@ -67,6 +69,16 @@ export interface EvContext {
   /** My effective streak multiplier m (≥ 1; 1 when unknown). */
   multiplier: number;
   semantics: StakeSemantics;
+  /**
+   * Hashrate rebate as a fraction of gross deployed — the USD value of the
+   * hashrate points a deploy earns, per dollar staked. Every deploy earns
+   * hashrate (winners AND losers), so this credits back part of the deploy fee
+   * and, crucially, softens the loss outcomes (a losing round returns
+   * −(1 − rebate), not −1) — which the sizing math must see. Measured from
+   * settlements × the hashrate→USD value; 0 until that value is known (i.e.
+   * until the vault path prices a hashrate point). Undefined = 0.
+   */
+  hashrateRebateFraction?: number | undefined;
 }
 
 function validateContext(ctx: EvContext): void {
@@ -75,6 +87,10 @@ function validateContext(ctx: EvContext): void {
   }
   if (!Number.isFinite(ctx.multiplier) || ctx.multiplier <= 0) {
     throw new RangeError(`invalid multiplier: ${ctx.multiplier}`);
+  }
+  const rebate = ctx.hashrateRebateFraction;
+  if (rebate !== undefined && (!Number.isFinite(rebate) || rebate < 0)) {
+    throw new RangeError(`invalid hashrateRebateFraction: ${rebate}`);
   }
   const { deployFeeBps, satsVaultRoundBps, satsVaultClaimBps } = ctx.fees;
   for (const [name, bps] of [
@@ -136,7 +152,9 @@ export function evOfAllocation(ctx: EvContext, allocGross: bigint[]): number {
     const othersEffective = Number(ctx.predictedStakes[i] ?? 0n);
     expectedPayout += P_WIN * pot * (myEffective / (othersEffective + myEffective));
   }
-  return expectedPayout - cost;
+  // Hashrate rebate: value earned on the gross deploy regardless of outcome.
+  const rebate = (ctx.hashrateRebateFraction ?? 0) * cost;
+  return expectedPayout - cost + rebate;
 }
 
 /**
@@ -178,6 +196,9 @@ export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
   const pot = potAfterFees(ctx, allocGross);
   const nf = netFactor(ctx.fees);
   const m = ctx.multiplier;
+  // Hashrate rebate is earned in every outcome, so it lifts every return —
+  // a losing round returns −(1 − rebate) instead of −1.
+  const rebate = (ctx.hashrateRebateFraction ?? 0) * cost;
   const returns = new Array<number>(TILES_COUNT).fill(0);
   for (let i = 0; i < TILES_COUNT; i++) {
     const gross = allocGross[i] ?? 0n;
@@ -187,7 +208,7 @@ export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
       const othersEffective = Number(ctx.predictedStakes[i] ?? 0n);
       payout = pot * (myEffective / (othersEffective + myEffective));
     }
-    returns[i] = (payout - cost) / cost;
+    returns[i] = (payout + rebate - cost) / cost;
   }
   return returns;
 }

@@ -201,4 +201,30 @@ describe("outcomeReturns", () => {
     const cost = Number(usdToBase(2));
     expect(meanReturn).toBeCloseTo(evOfAllocation(c, alloc) / cost, 6);
   });
+
+  it("the hashrate rebate softens loss outcomes and lifts EV", () => {
+    const stakes = zeroStakes();
+    for (let i = 1; i < TILES_COUNT; i++) stakes[i] = usdToBase(10);
+    const alloc = allocOn([0], usdToBase(1));
+    const noRebate = ctx({ predictedStakes: stakes });
+    const withRebate = ctx({ predictedStakes: stakes, hashrateRebateFraction: 0.2 });
+
+    // Losing outcomes: −1 without the rebate, −(1 − 0.2) = −0.8 with it.
+    const rLoss = outcomeReturns(withRebate, alloc)[5]!;
+    expect(outcomeReturns(noRebate, alloc)[5]).toBeCloseTo(-1, 9);
+    expect(rLoss).toBeCloseTo(-0.8, 9);
+
+    // EV rises by exactly rebate × cost.
+    const cost = Number(usdToBase(1));
+    expect(evOfAllocation(withRebate, alloc)).toBeCloseTo(
+      evOfAllocation(noRebate, alloc) + 0.2 * cost,
+      6,
+    );
+  });
+
+  it("rejects a negative hashrate rebate", () => {
+    expect(() =>
+      evOfAllocation(ctx({ hashrateRebateFraction: -0.1 }), allocOn([0], usdToBase(1))),
+    ).toThrow(RangeError);
+  });
 });
