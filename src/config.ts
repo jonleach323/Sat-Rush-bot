@@ -173,10 +173,20 @@ const schema = z
     ),
     /** Minimum modeled edge to fire, in bps of the gross deploy. The selector
      * otherwise fires on any EV > 0, including thin edges a slightly-optimistic
-     * forecast turns negative in reality. 0 = off. */
+     * forecast turns negative in reality. 0 = off.
+     *
+     * Calibrated from live data (2026-08-06, n=98): with ENDGAME_CONVERGENCE
+     * active the model's average modeled edge is ~368 bps and it realized
+     * +552 bps — i.e. roughly calibrated, slightly pessimistic. The former
+     * default of 1000 was set from PRE-convergence data (where the model
+     * overstated edge by ~2150 bps) and blocks the very band that is now
+     * profitable. 200 keeps a small margin for residual optimism without
+     * gating out the tradeable range. Re-check as the post-fix sample grows:
+     * realized consistently >= modeled -> lower toward 0; realized falling
+     * below modeled -> raise toward the break-even crossover. */
     MIN_EDGE_BPS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(0).max(10_000).default(1000),
+      z.coerce.number().int().min(0).max(10_000).default(200),
     ),
     /** Fractional-Kelly bet sizing ∈ [0,1]. Caps each round's total stake at
      * this fraction of the growth-optimal Kelly bet (sized to the live wallet
