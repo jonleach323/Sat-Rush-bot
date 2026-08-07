@@ -21,10 +21,13 @@ sudo -u "$USER_" git -C "$DIR" reset --hard "origin/$BRANCH"
 echo "  now at $(sudo -u "$USER_" git -C "$DIR" rev-parse --short HEAD)"
 
 echo "▶ install deps (compiles better-sqlite3 against this box)"
-sudo -u "$USER_" pnpm -C "$DIR" install --frozen-lockfile
+# cd into the repo so corepack reads THIS package.json for the pnpm version —
+# `pnpm -C` alone isn't enough (corepack checks cwd before pnpm honors -C, and a
+# home-dir package.json the user can't read would EACCES).
+sudo -u "$USER_" bash -c "cd '$DIR' && pnpm install --frozen-lockfile"
 
 echo "▶ build (tsc — also the typecheck gate; aborts the deploy on error)"
-sudo -u "$USER_" pnpm -C "$DIR" -s build
+sudo -u "$USER_" bash -c "cd '$DIR' && pnpm -s build"
 
 echo "▶ restart $SVC"
 sudo systemctl restart "$SVC"
