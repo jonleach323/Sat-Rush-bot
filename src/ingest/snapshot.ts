@@ -69,14 +69,16 @@ export class GameState {
    * Returns what was applied, or null for account types we don't track.
    * Throws HaltError on any integrity violation.
    */
-  applyAccount(pubkey: PublicKey, data: Buffer): AppliedAccount | null {
+  applyAccount(pubkey: PublicKey, data: Buffer, slot?: number): AppliedAccount | null {
     switch (classifyAccount(data)) {
       case "Board":
         this.board = decodeAccountOrHalt<Board>("Board", data);
         return { kind: "Board" };
       case "Round": {
         const round = decodeRoundStrict(data);
-        this.guard.check(round);
+        // Stale/out-of-order replay (older slot than one already applied) —
+        // drop it rather than regressing round state.
+        if (!this.guard.check(round, slot)) return null;
         this.rounds.set(round.id, round);
         this.pruneRounds();
         return { kind: "Round", roundId: round.id };
@@ -202,13 +204,16 @@ export async function bootstrapGameState(
   const minerInfo = infos[3];
   if (minerAddress && minerInfo) state.applyAccount(minerAddress, minerInfo.data);
 
-  state.applySlot(await connection.getSlot("processed"));
+  const bootSlot = await connection.getSlot("processed");
+  state.applySlot(bootSlot);
 
   const roundId = state.board?.round_id;
   if (roundId !== undefined) {
     const roundAddress = roundPda(roundId, programId);
     const roundInfo = await connection.getAccountInfo(roundAddress, "processed");
-    if (roundInfo) state.applyAccount(roundAddress, roundInfo.data);
+    // Stamp the boot slot so later stream updates are ordered against this
+    // snapshot — an unstamped baseline would compare against older replays.
+    if (roundInfo) state.applyAccount(roundAddress, roundInfo.data, bootSlot);
   }
   return state;
 }

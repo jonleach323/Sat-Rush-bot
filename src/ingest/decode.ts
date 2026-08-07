@@ -76,6 +76,8 @@ export function decodeRoundStrict(data: Buffer): Round {
 interface RoundBaseline {
   stakes: bigint[];
   deployCounts: number[];
+  /** Slot this baseline was observed at; undefined when the source omits it. */
+  slot?: number | undefined;
 }
 
 /**
@@ -87,13 +89,37 @@ interface RoundBaseline {
 export class RoundMonotonicityGuard {
   private readonly baselines = new Map<number, RoundBaseline>();
 
-  check(round: Round): void {
+  /**
+   * Validate an update for `round`, observed at `slot` (when known).
+   *
+   * Returns false when the update is STALE — an account state from a slot at or
+   * before one already applied for this round. Yellowstone delivers account
+   * updates at `processed`, which can arrive out of order (and a re-subscribe or
+   * bootstrap can replay an older snapshot), so an older payload legitimately
+   * shows smaller stakes. Without slot ordering that reads as a decrease and
+   * false-halts the bot. Stale updates are ignored, not treated as corruption.
+   *
+   * A decrease at a NEWER slot is still a genuine integrity violation (bad
+   * decode / layout change) and throws. Caveat: a deep fork rollback at
+   * `processed` could also surface that way; it has not been observed, and
+   * halting is the safe response to an unexplained decrease.
+   */
+  check(round: Round, slot?: number): boolean {
     validateRoundShape(round);
     const next: RoundBaseline = {
       stakes: round.public_tile_stakes.map((t) => BigInt(t.stake.toString())),
       deployCounts: round.public_tile_stakes.map((t) => t.deploy_count),
+      slot,
     };
     const prev = this.baselines.get(round.id);
+    if (
+      prev &&
+      slot !== undefined &&
+      prev.slot !== undefined &&
+      slot <= prev.slot
+    ) {
+      return false; // stale/out-of-order replay — ignore
+    }
     if (prev) {
       for (let i = 0; i < TILES_COUNT; i++) {
         const prevStake = prev.stakes[i] ?? 0n;
@@ -120,6 +146,7 @@ export class RoundMonotonicityGuard {
     }
     this.baselines.set(round.id, next);
     this.prune(round.id);
+    return true;
   }
 
   private prune(latestId: number): void {

@@ -89,6 +89,34 @@ describe("hard validation", () => {
     );
   });
 
+  it("monotonicity guard: ignores a stale (older-slot) replay instead of halting", () => {
+    // The live false-halt: an out-of-order/replayed account update from earlier
+    // in the round shows tile 0 back at 0 after it had grown. With slot
+    // ordering that is dropped as stale, not read as corruption.
+    const guard = new RoundMonotonicityGuard();
+    const grown = zeros();
+    grown[0] = 3_570_503;
+    expect(guard.check(makeRound(5809, grown), 1000)).toBe(true);
+    // Replay of the round's initial state, stamped at an EARLIER slot.
+    expect(guard.check(makeRound(5809, zeros()), 990)).toBe(false);
+    // Same slot is also stale (no new information).
+    expect(guard.check(makeRound(5809, zeros()), 1000)).toBe(false);
+    // A newer slot still applies normally, and growth is fine.
+    const more = zeros();
+    more[0] = 4_000_000;
+    expect(guard.check(makeRound(5809, more), 1001)).toBe(true);
+  });
+
+  it("monotonicity guard: still halts on a decrease at a NEWER slot", () => {
+    const guard = new RoundMonotonicityGuard();
+    const s1 = zeros();
+    s1[2] = 9_000_000;
+    guard.check(makeRound(11, s1), 500);
+    const s2 = zeros();
+    s2[2] = 1_000_000;
+    expect(() => guard.check(makeRound(11, s2), 501)).toThrow(/stake decreased/);
+  });
+
   it("monotonicity guard: a new round id resets the baseline", () => {
     const guard = new RoundMonotonicityGuard();
     const s1 = zeros();

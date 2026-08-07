@@ -1490,7 +1490,9 @@ export class Orchestrator {
 
     this.source.on("account", (u) => {
       try {
-        const applied = this.state.applyAccount(u.pubkey, u.data);
+        // Pass the update's slot so the monotonicity guard can drop stale /
+        // out-of-order replays instead of reading them as a stake decrease.
+        const applied = this.state.applyAccount(u.pubkey, u.data, u.slot);
         if (!applied) return;
         if (applied.kind === "Board") this.cacheRoundWindow();
         if (applied.kind === "Round" && applied.roundId !== undefined) {
