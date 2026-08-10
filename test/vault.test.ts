@@ -4,6 +4,7 @@ import {
   buildVaultContext,
   EPOCH_PAYOUT_FRACTION,
   EPOCH_REWARD_CURVE_BPS,
+  epochWinFraction,
   expectedWinningsUsd,
   selectVaultTickets,
   type VaultTicketContext,
@@ -39,7 +40,7 @@ describe("epoch reward curve", () => {
     expect(EPOCH_PAYOUT_FRACTION).toBeCloseTo(0.9, 10);
   });
 
-  it("discounts the epoch pool but not the winner-take-all 1-BTC prize", () => {
+  it("passes the RAW pool through — the 90% lives in the curve sum", () => {
     const common = {
       poolValueUsd: 1000,
       totalTickets: 100,
@@ -49,8 +50,48 @@ describe("epoch reward curve", () => {
       hashrateValueUsdPerPoint: 0,
       maxTickets: 100,
     };
-    expect(buildVaultContext({ ...common, kind: "epoch" }).poolValueUsd).toBeCloseTo(900);
+    // Discounting here would double-count against epochWinFraction().
+    expect(buildVaultContext({ ...common, kind: "epoch" }).poolValueUsd).toBeCloseTo(1000);
     expect(buildVaultContext({ ...common, kind: "one_btc" }).poolValueUsd).toBeCloseTo(1000);
+  });
+});
+
+describe("epochWinFraction — per-wallet dedup makes payoff concave", () => {
+  it("matches the linear model for a tiny share", () => {
+    // Small p: E ≈ p · Σw = 0.9p
+    expect(epochWinFraction(0.005)).toBeCloseTo(0.9 * 0.005, 3);
+  });
+
+  it("falls increasingly short of linear as share grows", () => {
+    for (const [p, expected] of [
+      [0.10, 0.0659],
+      [0.20, 0.1110],
+      [0.30, 0.1484],
+    ] as const) {
+      expect(epochWinFraction(p)).toBeCloseTo(expected, 3);
+      expect(epochWinFraction(p)).toBeLessThan(0.9 * p); // strictly below linear
+    }
+  });
+
+  it("caps at rank-1 only when we hold every ticket (win once, not 21×)", () => {
+    expect(epochWinFraction(1)).toBeCloseTo(0.32, 10);
+  });
+
+  it("is monotonic and bounded", () => {
+    expect(epochWinFraction(0)).toBe(0);
+    let prev = 0;
+    for (let p = 0.05; p <= 1.0001; p += 0.05) {
+      const v = epochWinFraction(p);
+      expect(v).toBeGreaterThan(prev);
+      expect(v).toBeLessThanOrEqual(EPOCH_PAYOUT_FRACTION);
+      prev = v;
+    }
+  });
+
+  it("1-BTC stays linear (single winner, dedup irrelevant)", () => {
+    expect(expectedWinningsUsd(30, 70, 1000, "one_btc")).toBeCloseTo(300);
+    // epoch on the same holding is materially lower
+    expect(expectedWinningsUsd(30, 70, 1000, "epoch")).toBeLessThan(200);
   });
 });
 
@@ -114,9 +155,16 @@ describe("buildVaultContext", () => {
 });
 
 describe("expectedWinningsUsd", () => {
-  it("is ticket-fraction times pool", () => {
-    expect(expectedWinningsUsd(9, 1, 1000)).toBeCloseTo(900);
-    expect(expectedWinningsUsd(1, 9, 1000)).toBeCloseTo(100);
+  it("1-BTC is ticket-fraction times prize (linear — single winner)", () => {
+    expect(expectedWinningsUsd(9, 1, 1000, "one_btc")).toBeCloseTo(900);
+    expect(expectedWinningsUsd(1, 9, 1000, "one_btc")).toBeCloseTo(100);
+  });
+  it("epoch is concave — owning the field can't win 21 prizes", () => {
+    // 90% share: the naive linear model claims 810; per-wallet dedup caps it far
+    // lower because we can only be drawn once.
+    expect(expectedWinningsUsd(9, 1, 1000, "epoch")).toBeCloseTo(301.4, 0);
+    // A tiny share still tracks the linear approximation (0.9·p·pool).
+    expect(expectedWinningsUsd(1, 999, 1000, "epoch")).toBeCloseTo(0.9, 1);
   });
   it("is zero when no tickets exist", () => {
     expect(expectedWinningsUsd(0, 0, 1000)).toBe(0);
@@ -214,10 +262,14 @@ describe("selectVaultTickets", () => {
     expect(big.tickets).toBeGreaterThan(small.tickets);
   });
 
-  it("epoch and one_btc use the same math", () => {
-    const a = selectVaultTickets(ctx({ kind: "one_btc" }));
-    const b = selectVaultTickets(ctx({ kind: "epoch" }));
-    expect(a.tickets).toBe(b.tickets);
+  it("buys fewer epoch tickets than 1-BTC — dedup saturates the epoch payoff", () => {
+    // Same pool and field: 1-BTC is linear in share so the marginal ticket keeps
+    // paying; epoch is concave (a wallet can only win once) so the marginal
+    // ticket decays faster and the selector stops earlier.
+    const oneBtc = selectVaultTickets(ctx({ kind: "one_btc" }));
+    const epoch = selectVaultTickets(ctx({ kind: "epoch" }));
+    expect(epoch.tickets).toBeGreaterThan(0);
+    expect(epoch.tickets).toBeLessThan(oneBtc.tickets);
   });
 
   it("rejects invalid inputs", () => {

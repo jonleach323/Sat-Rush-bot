@@ -61,9 +61,35 @@ export const EPOCH_REWARD_CURVE_BPS: readonly number[] = [
 export const EPOCH_PAYOUT_FRACTION =
   EPOCH_REWARD_CURVE_BPS.reduce((a, b) => a + b, 0) / 10_000;
 
-/** Fraction of the prize a vault kind pays out; 1-BTC is winner-take-all. */
-export function payoutFraction(kind: VaultKind): number {
-  return kind === "epoch" ? EPOCH_PAYOUT_FRACTION : 1;
+/**
+ * Expected epoch winnings as a fraction of the pool, for ticket share `p`.
+ *
+ * Winners are deduped BY WALLET (owner-confirmed): when a wallet is drawn, ALL
+ * of its tickets leave the pool, so one wallet can win at most once. Payoff is
+ * therefore CONCAVE in tickets, not linear — buying more raises P(selected) and
+ * improves expected rank, but can never win twice. At p→1 you take rank 1 only
+ * (32% of the pool), not the full 90%.
+ *
+ *   E/pool = Σ_{i=1..21} p·(1-p)^(i-1) · w_i        (first selected at rank i)
+ *
+ * For small p this reduces to p·Σw = 0.9p, matching the naive linear model; the
+ * models diverge sharply above ~5% share (10% → 73% of linear, 30% → 55%).
+ *
+ * Deliberately CONSERVATIVE: it assumes the pool barely shrinks between draws.
+ * In reality each rival winner's tickets are removed too, which lifts our share
+ * on later draws — so true EV is somewhat higher. Understating vault EV is the
+ * safe direction when this feeds Kelly sizing.
+ *
+ * Not modeled: if participants_count <= 21 every entrant wins something, which
+ * is a materially better regime. Refine once recon shows typical participation.
+ */
+export function epochWinFraction(p: number): number {
+  const share = Math.max(0, Math.min(1, p));
+  let acc = 0;
+  for (let i = 0; i < EPOCH_REWARD_CURVE_BPS.length; i++) {
+    acc += share * Math.pow(1 - share, i) * ((EPOCH_REWARD_CURVE_BPS[i] ?? 0) / 10_000);
+  }
+  return acc;
 }
 
 export interface VaultTicketContext {
@@ -144,8 +170,9 @@ export function buildVaultContext(input: VaultContextInput): VaultTicketContext 
   );
   return {
     kind: input.kind,
-    // Only the distributed fraction of the pool can be won (epoch pays 90%).
-    poolValueUsd: input.poolValueUsd * payoutFraction(input.kind),
+    // RAW pool — the epoch payout fraction lives inside epochWinFraction()'s
+    // curve sum, so discounting here would double-count it.
+    poolValueUsd: input.poolValueUsd,
     othersTickets: Math.max(0, input.totalTickets - input.myTickets),
     myTickets: input.myTickets,
     hashrateAvailable: affordableTickets,
@@ -154,15 +181,23 @@ export function buildVaultContext(input: VaultContextInput): VaultTicketContext 
   };
 }
 
-/** E[winnings] = ticket fraction · pool (see file header). */
+/**
+ * E[winnings] for a ticket holding (see file header).
+ * - epoch: concave in share (per-wallet dedup) — epochWinFraction(p)·pool.
+ *   The 90% payout fraction is already inside the curve sum, so the pool passed
+ *   in must be the RAW pool (do not pre-discount, or it double-counts).
+ * - one_btc: single winner drawn from all tickets → linear share·prize.
+ */
 export function expectedWinningsUsd(
   myTickets: number,
   othersTickets: number,
   poolValueUsd: number,
+  kind: VaultKind = "epoch",
 ): number {
   const total = myTickets + othersTickets;
   if (total <= 0) return 0;
-  return (myTickets / total) * poolValueUsd;
+  const p = myTickets / total;
+  return kind === "epoch" ? epochWinFraction(p) * poolValueUsd : p * poolValueUsd;
 }
 
 function validate(ctx: VaultTicketContext): void {
@@ -206,14 +241,20 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
     };
   }
 
-  const base = expectedWinningsUsd(ctx.myTickets, ctx.othersTickets, ctx.poolValueUsd);
+  const base = expectedWinningsUsd(ctx.myTickets, ctx.othersTickets, ctx.poolValueUsd, ctx.kind);
   let buy = 0;
   while (buy < budget) {
-    const cur = expectedWinningsUsd(ctx.myTickets + buy, ctx.othersTickets, ctx.poolValueUsd);
+    const cur = expectedWinningsUsd(
+      ctx.myTickets + buy,
+      ctx.othersTickets,
+      ctx.poolValueUsd,
+      ctx.kind,
+    );
     const next = expectedWinningsUsd(
       ctx.myTickets + buy + 1,
       ctx.othersTickets,
       ctx.poolValueUsd,
+      ctx.kind,
     );
     if (next - cur <= ctx.hashrateValueUsd) break; // marginal ticket not worth it
     buy++;
@@ -229,7 +270,8 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
   }
 
   const gain =
-    expectedWinningsUsd(ctx.myTickets + buy, ctx.othersTickets, ctx.poolValueUsd) - base;
+    expectedWinningsUsd(ctx.myTickets + buy, ctx.othersTickets, ctx.poolValueUsd, ctx.kind) -
+    base;
   const evUsd = gain - buy * ctx.hashrateValueUsd;
   const reason = buy === budget ? "cap_reached" : "ok";
   return { tickets: buy, evUsd, winShareAfter: winShare(ctx.myTickets + buy), reason };
