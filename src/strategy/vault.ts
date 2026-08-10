@@ -36,9 +36,17 @@ export type VaultKind = "one_btc" | "epoch";
  * takes 32%, the top five take 63%, the bottom eleven ~1.55% each.
  *
  * IMPORTANT: it sums to 9_000 bps, NOT 10_000 — only 90% of the pool is paid
- * out to winners each iteration. The remaining 10% is undistributed (presumed
- * rolled into the next iteration; unconfirmed). Expected winnings must be
- * discounted by that fraction or the vault EV is overstated by ~11%.
+ * out per iteration; the remaining 10% ROLLS OVER into the next iteration
+ * (confirmed by the owner, same mechanic as Sat Strike). Expected winnings for
+ * THIS iteration must be discounted by that fraction or vault EV is overstated
+ * by ~11%.
+ *
+ * Note the rollover is a buffer, not a rake: at steady state pool = F/0.9 for
+ * fee inflow F, so distribution per iteration (0.9 · pool) equals F exactly —
+ * nothing leaks from the player pool. It just means pools run ~11% larger than
+ * the per-iteration inflow, and a long-idle vault carries accumulated value.
+ * Do NOT "simplify" the discount away: it is correct for the per-iteration
+ * decision, which is the only decision this selector makes.
  *
  * The rank weights themselves do NOT affect the mean: each of the 21 slots is
  * equally likely to be ours, so E[winnings] = ticketShare · Σ(weights) · pool.
