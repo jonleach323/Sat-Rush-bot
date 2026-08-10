@@ -8,12 +8,12 @@
  *
  * - 1-BTC vault: one winning ticket drawn uniformly takes the whole prize, so
  *   E = P(hold winner)·prize = (myTickets/total)·prize.
- * - Epoch vault: up to 21 winners drawn WITHOUT replacement split the pool. Each
- *   winning ticket is equally likely to be mine, so E[my winning tickets] =
- *   21·myTickets/total, and whatever the per-rank split, the pool is shared
- *   among the 21, averaging pool/21 per winner → E = (21·myTickets/total)·
- *   (pool/21) = (myTickets/total)·pool. The rank split changes variance, not
- *   the mean.
+ * - Epoch vault: up to 21 winners drawn WITHOUT replacement share the pool by a
+ *   steep rank curve (EPOCH_REWARD_CURVE_BPS: 32% / 14% / 8% / … ). Each of the
+ *   21 slots is equally likely to be mine, so the rank weights cancel out of the
+ *   mean: E = (myTickets/total)·Σ(weights)·pool. The curve changes VARIANCE, not
+ *   the mean — but Σ(weights) = 9_000 bps, so only 90% of the pool is
+ *   distributed, and `buildVaultContext` discounts the pool accordingly.
  *
  * The edge is timing: value per ticket ∝ poolValue/(others+k), so the fewer
  * tickets already committed by the field, the more each of ours is worth. The
@@ -29,6 +29,34 @@
  */
 
 export type VaultKind = "one_btc" | "epoch";
+
+/**
+ * Epoch reward curve in bps of the pool, by winner rank — the program's
+ * EPOCH_REWARD_CURVE_BPS (confirmed by the owner). Steeply top-heavy: rank 1
+ * takes 32%, the top five take 63%, the bottom eleven ~1.55% each.
+ *
+ * IMPORTANT: it sums to 9_000 bps, NOT 10_000 — only 90% of the pool is paid
+ * out to winners each iteration. The remaining 10% is undistributed (presumed
+ * rolled into the next iteration; unconfirmed). Expected winnings must be
+ * discounted by that fraction or the vault EV is overstated by ~11%.
+ *
+ * The rank weights themselves do NOT affect the mean: each of the 21 slots is
+ * equally likely to be ours, so E[winnings] = ticketShare · Σ(weights) · pool.
+ * The curve only shapes variance — which the top-heavy shape makes severe.
+ */
+export const EPOCH_REWARD_CURVE_BPS: readonly number[] = [
+  3200, 1400, 800, 500, 400, 200, 200, 200, 200, 200,
+  155, 155, 155, 155, 155, 155, 154, 154, 154, 154, 154,
+];
+
+/** Fraction of the epoch pool actually distributed (0.90 — see the curve). */
+export const EPOCH_PAYOUT_FRACTION =
+  EPOCH_REWARD_CURVE_BPS.reduce((a, b) => a + b, 0) / 10_000;
+
+/** Fraction of the prize a vault kind pays out; 1-BTC is winner-take-all. */
+export function payoutFraction(kind: VaultKind): number {
+  return kind === "epoch" ? EPOCH_PAYOUT_FRACTION : 1;
+}
 
 export interface VaultTicketContext {
   kind: VaultKind;
@@ -108,7 +136,8 @@ export function buildVaultContext(input: VaultContextInput): VaultTicketContext 
   );
   return {
     kind: input.kind,
-    poolValueUsd: input.poolValueUsd,
+    // Only the distributed fraction of the pool can be won (epoch pays 90%).
+    poolValueUsd: input.poolValueUsd * payoutFraction(input.kind),
     othersTickets: Math.max(0, input.totalTickets - input.myTickets),
     myTickets: input.myTickets,
     hashrateAvailable: affordableTickets,

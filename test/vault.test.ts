@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   btcBaseToUsd,
   buildVaultContext,
+  EPOCH_PAYOUT_FRACTION,
+  EPOCH_REWARD_CURVE_BPS,
   expectedWinningsUsd,
   selectVaultTickets,
   type VaultTicketContext,
@@ -27,6 +29,28 @@ describe("btcBaseToUsd", () => {
   });
   it("rejects bad decimals", () => {
     expect(() => btcBaseToUsd(1, -1, 100_000)).toThrow(RangeError);
+  });
+});
+
+describe("epoch reward curve", () => {
+  it("has 21 ranks and sums to 9000 bps — only 90% of the pool is paid out", () => {
+    expect(EPOCH_REWARD_CURVE_BPS).toHaveLength(21);
+    expect(EPOCH_REWARD_CURVE_BPS.reduce((a, b) => a + b, 0)).toBe(9000);
+    expect(EPOCH_PAYOUT_FRACTION).toBeCloseTo(0.9, 10);
+  });
+
+  it("discounts the epoch pool but not the winner-take-all 1-BTC prize", () => {
+    const common = {
+      poolValueUsd: 1000,
+      totalTickets: 100,
+      myTickets: 0,
+      hashratePointsAvailable: 1000,
+      ticketPriceHashrate: 100,
+      hashrateValueUsdPerPoint: 0,
+      maxTickets: 100,
+    };
+    expect(buildVaultContext({ ...common, kind: "epoch" }).poolValueUsd).toBeCloseTo(900);
+    expect(buildVaultContext({ ...common, kind: "one_btc" }).poolValueUsd).toBeCloseTo(1000);
   });
 });
 
