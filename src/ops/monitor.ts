@@ -44,6 +44,20 @@ export interface VaultJson {
   unclaimedHashrate: number;
   epoch: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
   oneBtc: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
+  /**
+   * Realized economics — what tickets cost in hashrate vs what claims paid.
+   * `usdPerRawUnit` is the empirical price of a hashrate unit: the value that
+   * belongs in HASHRATE_VALUE_USD once enough iterations have resolved. Null
+   * until at least one claim has been measured.
+   */
+  economics: {
+    hashrateSpentRaw: number;
+    usdClaimed: number;
+    btcClaimedUsd: number;
+    iterationsResolved: number;
+    iterationsPaid: number;
+    usdPerRawUnit: number | null;
+  };
   recent: Record<string, unknown>[];
 }
 
@@ -74,6 +88,8 @@ export interface MonitorContext {
   usdcBalanceBaseUnits: () => Promise<bigint>;
   btcUsdEstimate: number;
   vaultEnabled: boolean;
+  /** Raw hashrate units per vault ticket — converts tickets bought into spend. */
+  ticketPriceHashrate: number;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -177,6 +193,27 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
     },
 
     vault(): VaultJson {
+      // Realized vault economics. usdPerRawUnit is the empirical price of a
+      // hashrate unit — the figure that belongs in HASHRATE_VALUE_USD, and the
+      // input the whole hashrate credit is currently waiting on.
+      const economics = (): VaultJson["economics"] => {
+        const v = ctx.db.vaultEconomics();
+        const hashrateSpentRaw = v.ticketsBought * ctx.ticketPriceHashrate;
+        const usdClaimed = baseToUsd(v.usdClaimed);
+        const btcClaimedUsd = (Number(v.btcClaimed) / 1e8) * ctx.btcUsdEstimate;
+        return {
+          hashrateSpentRaw,
+          usdClaimed,
+          btcClaimedUsd,
+          iterationsResolved: v.iterationsResolved,
+          iterationsPaid: v.iterationsPaid,
+          // Only meaningful once something has actually been claimed AND spent.
+          usdPerRawUnit:
+            v.iterationsPaid > 0 && hashrateSpentRaw > 0
+              ? (usdClaimed + btcClaimedUsd) / hashrateSpentRaw
+              : null,
+        };
+      };
       const agg = (kind: "epoch" | "one_btc") =>
         ctx.db.queryOne<{ tickets: number; iters: number; claimed: number }>(
           `SELECT COALESCE(SUM(tickets),0) AS tickets,
@@ -194,6 +231,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         unclaimedHashrate: Number(big(miner?.unclaimed_hashrate).toString()),
         epoch: { ticketsBought: e.tickets, iterationsPlayed: e.iters, iterationsClaimed: e.claimed },
         oneBtc: { ticketsBought: o.tickets, iterationsPlayed: o.iters, iterationsClaimed: o.claimed },
+        economics: economics(),
         recent: ctx.db.query(
           "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
         ),

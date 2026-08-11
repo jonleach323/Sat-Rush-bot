@@ -137,6 +137,21 @@ CREATE TABLE IF NOT EXISTS vault_tickets (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_vault_tickets_iter ON vault_tickets(kind, iteration_id);
+-- Vault claim PROCEEDS. The claim instructions emit no event, so the only way to
+-- learn what a claim actually paid is to diff our token balances around it. This
+-- is the receipts side of the vault ledger: without it, vault_tickets records
+-- what we spend and nothing records what we get, so a hashrate unit can never
+-- be priced (HASHRATE_VALUE_USD stays 0 and the whole hashrate credit is inert).
+CREATE TABLE IF NOT EXISTS vault_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,           -- 'epoch' | 'one_btc'
+  iteration_id INTEGER NOT NULL,
+  usd_base TEXT NOT NULL DEFAULT '0',   -- USDC delta observed on our ATA
+  btc_base TEXT NOT NULL DEFAULT '0',   -- BTC delta observed on our ATA
+  sig TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(kind, iteration_id)
+);
 `;
 
 export class StateDb {
@@ -338,6 +353,57 @@ export class StateDb {
        WHERE kind = 'one_btc' AND iteration_id = ? AND ticket_pubkey IS NOT NULL`,
       iterationId,
     ).map((r) => r.ticket_pubkey);
+  }
+
+  /** Record what a vault claim actually paid (token-balance deltas). */
+  recordVaultClaim(c: {
+    kind: "epoch" | "one_btc";
+    iterationId: number;
+    usdBase: bigint;
+    btcBase: bigint;
+    sig: string;
+  }): void {
+    this.write(() =>
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO vault_claims (kind, iteration_id, usd_base, btc_base, sig)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(c.kind, c.iterationId, c.usdBase.toString(), c.btcBase.toString(), c.sig),
+    );
+  }
+
+  /**
+   * Realized vault economics: hashrate spent on tickets vs value received.
+   * This is what prices a raw hashrate unit (HASHRATE_VALUE_USD) empirically —
+   * value ÷ spend — once enough iterations have resolved.
+   */
+  vaultEconomics(): {
+    ticketsBought: number;
+    iterationsResolved: number;
+    iterationsPaid: number;
+    usdClaimed: bigint;
+    btcClaimed: bigint;
+  } {
+    const t = this.queryOne<{ tickets: number | null }>(
+      `SELECT COALESCE(SUM(tickets), 0) AS tickets FROM vault_tickets`,
+    );
+    const resolved = this.queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM (SELECT DISTINCT kind, iteration_id FROM vault_tickets WHERE claimed = 1)`,
+    );
+    const c = this.queryOne<{ n: number; usd: string | null; btc: string | null }>(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(CAST(usd_base AS INTEGER)), 0) AS usd,
+              COALESCE(SUM(CAST(btc_base AS INTEGER)), 0) AS btc
+       FROM vault_claims`,
+    );
+    return {
+      ticketsBought: t?.tickets ?? 0,
+      iterationsResolved: resolved?.n ?? 0,
+      iterationsPaid: c?.n ?? 0,
+      usdClaimed: BigInt(c?.usd ?? "0"),
+      btcClaimed: BigInt(c?.btc ?? "0"),
+    };
   }
 
   /** Mark an iteration resolved for us (claimed a win, or confirmed a loss). */

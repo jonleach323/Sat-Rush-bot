@@ -125,6 +125,39 @@ describe("StateDb", () => {
     db2.close();
   });
 
+  it("records vault claim proceeds and derives realized economics", () => {
+    const db = freshDb();
+    db.recordVaultTicket({
+      kind: "epoch", iterationId: 7, tickets: 5, ticketPubkey: null, sig: "buy1",
+    });
+    db.recordVaultTicket({
+      kind: "one_btc", iterationId: 3, tickets: 2, ticketPubkey: "TicketPk", sig: "buy2",
+    });
+    // Only the epoch iteration paid out.
+    db.recordVaultClaim({
+      kind: "epoch", iterationId: 7, usdBase: usdToBase(12), btcBase: 50_000n, sig: "claim1",
+    });
+    const e = db.vaultEconomics();
+    expect(e.ticketsBought).toBe(7);
+    expect(e.iterationsPaid).toBe(1);
+    expect(e.usdClaimed).toBe(usdToBase(12));
+    expect(e.btcClaimed).toBe(50_000n);
+
+    // Resolved counts only iterations we've marked done.
+    expect(e.iterationsResolved).toBe(0);
+    db.markVaultClaimed("epoch", 7);
+    expect(db.vaultEconomics().iterationsResolved).toBe(1);
+    db.close();
+  });
+
+  it("vault claims dedupe on (kind, iteration) so a retry can't double-count", () => {
+    const db = freshDb();
+    db.recordVaultClaim({ kind: "epoch", iterationId: 1, usdBase: 100n, btcBase: 0n, sig: "a" });
+    db.recordVaultClaim({ kind: "epoch", iterationId: 1, usdBase: 999n, btcBase: 0n, sig: "b" });
+    expect(db.vaultEconomics().usdClaimed).toBe(100n);
+    db.close();
+  });
+
   it("competitor deploys dedupe on (round, authority)", () => {
     const db = freshDb();
     const record = {

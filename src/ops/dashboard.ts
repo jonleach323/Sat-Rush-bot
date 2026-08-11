@@ -243,7 +243,10 @@ function renderPnl(rows){
 
 function renderVault(v){
   if(!v){ el("vaultsub").textContent="unavailable"; el("vaultstat").innerHTML=""; return; }
-  el("vaultsub").textContent = v.enabled ? "ON" : "OFF";
+  const ec = v.economics || {};
+  const price = ec.usdPerRawUnit;
+  el("vaultsub").textContent = (v.enabled ? "ON" : "OFF")
+    + (price!=null ? " · hashrate ≈ $"+price.toFixed(6)+"/raw unit" : " · hashrate unpriced");
   el("vaultstat").innerHTML = [
     ["Hashrate", v.hashrate, ""],
     ["Unclaimed HR", v.unclaimedHashrate, ""],
@@ -251,7 +254,11 @@ function renderVault(v){
     ["Epoch claims", v.epoch.iterationsClaimed+"/"+v.epoch.iterationsPlayed, ""],
     ["1-BTC tickets", v.oneBtc.ticketsBought, ""],
     ["1-BTC claims", v.oneBtc.iterationsClaimed+"/"+v.oneBtc.iterationsPlayed, ""],
-  ].map(([k,val,c]) => card(k,val,c)).join("");
+    ["HR spent (raw)", ec.hashrateSpentRaw??0, ""],
+    ["Claimed value", usd((ec.usdClaimed||0)+(ec.btcClaimedUsd||0)), (ec.iterationsPaid?"pos":"")],
+    ["$/raw unit", price!=null ? "$"+price.toFixed(6) : "—", price!=null?"accent":"",
+      price!=null ? "set HASHRATE_VALUE_USD to this" : "awaiting a paid claim"],
+  ].map(([k,val,c,sub]) => card(k,val,c,sub)).join("");
   el("vaulttbl").querySelector("tbody").innerHTML = (v.recent||[]).map(r =>
     '<tr><td>'+r.kind+'</td><td class="r mono">'+r.iteration_id+'</td><td class="r mono">'+r.tickets+
     '</td><td class="'+(r.claimed?"win":"")+'">'+(r.claimed?"claimed":"open")+'</td></tr>').join("") || emptyRow(4);

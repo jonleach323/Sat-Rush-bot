@@ -208,6 +208,7 @@ export class Orchestrator {
       },
       btcUsdEstimate: cfg.BTC_USD_ESTIMATE,
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
+      ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
     });
   }
 
@@ -1130,6 +1131,58 @@ export class Orchestrator {
     return result.outcome;
   }
 
+  /** Our SPL balance for a mint, in base units; 0 when the ATA doesn't exist. */
+  private async ataBalanceBase(mint: PublicKey): Promise<bigint> {
+    try {
+      const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+      const ata = getAssociatedTokenAddressSync(mint, this.payer.publicKey);
+      const bal = await this.connection.getTokenAccountBalance(ata, "confirmed");
+      return BigInt(bal.value.amount);
+    } catch {
+      return 0n; // ATA not yet created, or a transient read failure
+    }
+  }
+
+  /**
+   * Send a vault CLAIM and record what it actually paid.
+   *
+   * The claim instructions emit no event, and both pay straight into our USDC /
+   * BTC ATAs — so the only way to learn the proceeds is to diff those balances
+   * across the send. Without this the vault ledger has spend but no receipts and
+   * a hashrate unit can never be priced. Measurement failures are logged and
+   * never block the claim itself.
+   */
+  private async sendVaultClaim(
+    kind: "epoch" | "one_btc",
+    iterationId: number,
+    ix: TransactionInstruction,
+    meta: Record<string, unknown>,
+  ): Promise<string> {
+    const usdBefore = await this.ataBalanceBase(this.ixCtx.usdMint);
+    const btcBefore = await this.ataBalanceBase(this.ixCtx.btcMint);
+    const outcome = await this.sendVaultIx(ix, meta);
+    if (outcome !== "landed") return outcome;
+    try {
+      const usdBase = (await this.ataBalanceBase(this.ixCtx.usdMint)) - usdBefore;
+      const btcBase = (await this.ataBalanceBase(this.ixCtx.btcMint)) - btcBefore;
+      this.db.recordVaultClaim({
+        kind,
+        iterationId,
+        // Clamp: a concurrent deploy/claim could move USDC the other way.
+        usdBase: usdBase > 0n ? usdBase : 0n,
+        btcBase: btcBase > 0n ? btcBase : 0n,
+        sig: String(meta["sig"] ?? `${kind}:${iterationId}`),
+      });
+      this.log.info(
+        { kind, iterationId, usdBase: usdBase.toString(), btcBase: btcBase.toString() },
+        "vault claim proceeds recorded",
+      );
+    } catch (err) {
+      this.log.warn({ err: String(err), kind, iterationId }, "vault claim proceeds unmeasured");
+    }
+    return outcome;
+  }
+
   /**
    * Claim resolved winnings (and, if VAULT_SELF_CRANK, crank draws) for every
    * iteration we hold unresolved tickets in. Claiming always runs; cranking is
@@ -1216,7 +1269,9 @@ export class Orchestrator {
         );
       }
     } else if (action === "claim") {
-      const outcome = await this.sendVaultIx(
+      const outcome = await this.sendVaultClaim(
+        "epoch",
+        iterationId,
         buildClaimEpochReward(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
         { kind: "vault_epoch_claim", iterationId },
       );
@@ -1274,7 +1329,9 @@ export class Orchestrator {
         { kind: "vault_one_btc_trigger", iterationId },
       );
     } else if (action === "claim" && winningTicketAcct) {
-      const outcome = await this.sendVaultIx(
+      const outcome = await this.sendVaultClaim(
+        "one_btc",
+        iterationId,
         buildClaimOneBtcReward(this.ixCtx, {
           authority: this.payer.publicKey,
           iterationId,

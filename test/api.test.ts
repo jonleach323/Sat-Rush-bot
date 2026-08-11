@@ -32,6 +32,14 @@ const fakeData: MonitorData = {
     unclaimedHashrate: 607,
     epoch: { ticketsBought: 5, iterationsPlayed: 1, iterationsClaimed: 0 },
     oneBtc: { ticketsBought: 2, iterationsPlayed: 1, iterationsClaimed: 0 },
+    economics: {
+      hashrateSpentRaw: 700,
+      usdClaimed: 0,
+      btcClaimedUsd: 0,
+      iterationsResolved: 0,
+      iterationsPaid: 0,
+      usdPerRawUnit: null,
+    },
     recent: [{ kind: "epoch", iteration_id: 293, tickets: 5, claimed: 0 }],
   }),
   health: async () => ({
