@@ -321,10 +321,28 @@ const schema = z
      * (dry sends nothing). VERIFY ON DEVNET before mainnet — the vault path caught
      * a 100× cost error on devnet once. Off = deploy-only, never buys tickets. */
     VAULT_STRATEGY_ENABLED: boolFromEnv(true),
-    /** USD opportunity value of one hashrate point (the pickiness floor). */
+    /** USD value of ONE RAW hashrate unit — the on-chain unit (100 raw = 1.00
+     * display point). Dual use: the vault pickiness floor, and the deploy-EV
+     * hashrate credit (applied per the program formula R = s·(m + 21/n), so it
+     * scales with streak and rewards concentration). 0 = hashrate valued at
+     * zero: no deploy credit, vault enters on any positive share. Leave 0 until
+     * vault payouts actually price a unit — a wrong value here corrupts the edge
+     * that Kelly sizes against. */
     HASHRATE_VALUE_USD: z.preprocess(
       emptyToUndef,
       z.coerce.number().finite().nonnegative().default(0),
+    ),
+    /** Promo multiplier on hashrate earned during the post-Sat-Strike bonus
+     * window (owner announced 2× for 4h after each Strike). 1 = feature off. */
+    STRIKE_HASHRATE_MULTIPLIER: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().min(1).default(2),
+    ),
+    /** Length of that bonus window in minutes; any Strike inside it resets the
+     * timer (we track only the most recent trigger). */
+    STRIKE_BONUS_WINDOW_MINUTES: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(240),
     ),
     /** Hashrate points per vault ticket (measured on devnet = 100). */
     VAULT_HASHRATE_PER_TICKET: z.preprocess(

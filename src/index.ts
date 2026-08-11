@@ -84,6 +84,8 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
+import { maskToTiles } from "./adapter/mask.js";
+import { hashrateRawPerUsd, strikeBonusMultiplier } from "./strategy/hashrate.js";
 import {
   predictRivalInflow,
   profileCompetitors,
@@ -120,14 +122,14 @@ export class Orchestrator {
   /** Last on-chain USDC balance (base units), refreshed by the drift check.
    * Feeds Kelly bet sizing; null until the first successful read (Kelly off). */
   private usdcAvailableBase: bigint | null = null;
-  /** Measured hashrate points earned per base unit deployed (from settlements).
-   * Feeds the unified-EV hashrate rebate; 0 until settlements exist. */
-  private hashratePerBaseDeployed = 0;
   /** Current fire offset (slots before cutoff), self-calibrated from land
    * latency; null until first computed → falls back to FIRE_OFFSET_SLOTS. */
   private adaptiveOffsetSlots: number | null = null;
   /** Cached rival profiles for anti-collision, refreshed off the hot path. */
   private rivalProfiles: RivalProfile[] = [];
+  /** Wall-clock ms of the most recent Sat Strike, for the post-Strike hashrate
+   * bonus window; null until one is observed this process. */
+  private lastStrikeAtMs: number | null = null;
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -574,9 +576,23 @@ export class Orchestrator {
       fees: this.fees,
       multiplier: 1, // streak multiplier curve is open question 5 — 1 until measured
       semantics: this.cfg.STAKE_SEMANTICS,
-      hashrateRebateFraction: this.hashrateRebateFraction(),
+      hashrate: {
+        streak: this.state.miner?.current_streak_count ?? 1,
+        valueUsdPerRawUnit: this.cfg.HASHRATE_VALUE_USD,
+        multiplier: this.strikeBonusMultiplier(),
+      },
       strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /** Current post-Sat-Strike hashrate promo multiplier (1 outside the window). */
+  private strikeBonusMultiplier(): number {
+    return strikeBonusMultiplier({
+      lastStrikeAtMs: this.lastStrikeAtMs,
+      nowMs: Date.now(),
+      windowMs: this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000,
+      multiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER,
+    });
   }
 
   /**
@@ -591,17 +607,6 @@ export class Orchestrator {
     const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? 0;
     if (modulus <= 0) return 0;
     return Number(this.state.strikePoolUsd()) / modulus;
-  }
-
-  /**
-   * Hashrate rebate as a fraction of gross deployed: (measured hashrate earned
-   * per base unit deployed) × (USD value of a hashrate point). 0 until
-   * HASHRATE_VALUE_USD is set — i.e. until the vault path prices a point — so
-   * nothing speculative is credited to the edge that Kelly sizes against.
-   */
-  private hashrateRebateFraction(): number {
-    if (this.cfg.HASHRATE_VALUE_USD <= 0) return 0;
-    return this.hashratePerBaseDeployed * this.cfg.HASHRATE_VALUE_USD * 1_000_000;
   }
 
   /** Slots before cutoff to fire: the self-calibrated offset if available, else
@@ -645,16 +650,42 @@ export class Orchestrator {
     this.adaptiveOffsetSlots = next;
   }
 
-  /** Refresh the measured hashrate-earned-per-base-deployed from settlements. */
-  private refreshHashrateRate(): void {
-    const row = this.db.queryOne<{ hr: number | null; amt: number | null }>(
-      `SELECT SUM(CAST(s.hashrate_earned AS REAL)) AS hr,
-              SUM(CAST(d.amount AS REAL)) AS amt
-       FROM settlements s JOIN my_deploys d ON d.round_id = s.round_id`,
+  /**
+   * Validate the hashrate formula against reality. We now credit hashrate in the
+   * EV model straight from R = s·(m + 21/n); if mainnet actually pays something
+   * else, that silently corrupts the edge Kelly sizes against. Compare realized
+   * `hashrate_earned` to what the formula predicts for the same deploys (using
+   * the streak snapshot and mask we recorded) and warn on material divergence.
+   * Diagnostic only — it never feeds the model.
+   */
+  private validateHashrateFormula(): void {
+    const rows = this.db.query<{
+      hashrate_earned: string;
+      amount: string;
+      mask: number;
+      streak: number | null;
+    }>(
+      `SELECT s.hashrate_earned, d.amount, d.mask, d.streak
+       FROM settlements s JOIN my_deploys d ON d.round_id = s.round_id
+       WHERE d.streak IS NOT NULL ORDER BY s.id DESC LIMIT 200`,
     );
-    const hr = row?.hr ?? 0;
-    const amt = row?.amt ?? 0;
-    this.hashratePerBaseDeployed = amt > 0 ? hr / amt : 0;
+    let actual = 0;
+    let predicted = 0;
+    for (const r of rows) {
+      const tiles = maskToTiles(r.mask).length;
+      if (tiles < 1) continue;
+      actual += Number(r.hashrate_earned);
+      predicted +=
+        (Number(r.amount) / 1e6) * hashrateRawPerUsd(r.streak ?? 1, tiles);
+    }
+    if (rows.length < 20 || predicted <= 0) return; // too few samples to judge
+    const ratio = actual / predicted;
+    if (ratio < 0.9 || ratio > 1.1) {
+      this.log.warn(
+        { samples: rows.length, actual, predicted, ratio: Number(ratio.toFixed(3)) },
+        "hashrate formula divergence — realized differs from R = s·(m + 21/n)",
+      );
+    }
   }
 
   private selectorConfig(): SelectorConfig {
@@ -1443,6 +1474,16 @@ export class Orchestrator {
   private onRevealed(reveal: RoundRevealed): void {
     const round = this.state.round(reveal.round_id);
     const window = this.roundWindows.get(reveal.round_id);
+    // Sat Strike opens (or resets) the post-Strike hashrate bonus window. We
+    // learn this from the event in the same slot it reveals — well before the
+    // site banner — so the EV model can size up for the whole window.
+    if (reveal.is_strike_triggered) {
+      this.lastStrikeAtMs = Date.now();
+      this.alert(
+        `⚡ Sat Strike round ${reveal.round_id} — ${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate ` +
+          `for ${this.cfg.STRIKE_BONUS_WINDOW_MINUTES}min`,
+      );
+    }
     this.db.recordRound({
       id: reveal.round_id,
       startSlot: window?.start ?? null,
@@ -1578,12 +1619,12 @@ export class Orchestrator {
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
     // same tick refreshes the measured hashrate-per-deploy for the unified EV.
-    this.refreshHashrateRate();
+    this.validateHashrateFormula();
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
       void this.checkWalletDrift();
-      this.refreshHashrateRate();
+      this.validateHashrateFormula();
       this.refreshFireOffset();
       this.refreshRivalProfiles();
     }, 30_000);

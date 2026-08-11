@@ -34,6 +34,7 @@
  */
 import type { SatrushConfig } from "../adapter/idl.js";
 import { maskToTiles } from "../adapter/mask.js";
+import { hashrateRebateFraction, type HashrateValuation } from "./hashrate.js";
 
 export const TILES_COUNT = 21;
 const P_WIN = 1 / TILES_COUNT;
@@ -72,15 +73,19 @@ export interface EvContext {
   multiplier: number;
   semantics: StakeSemantics;
   /**
-   * Hashrate rebate as a fraction of gross deployed — the USD value of the
-   * hashrate points a deploy earns, per dollar staked. Every deploy earns
-   * hashrate (winners AND losers), so this credits back part of the deploy fee
-   * and, crucially, softens the loss outcomes (a losing round returns
-   * −(1 − rebate), not −1) — which the sizing math must see. Measured from
-   * settlements × the hashrate→USD value; 0 until that value is known (i.e.
-   * until the vault path prices a hashrate point). Undefined = 0.
+   * Hashrate rebate as a FLAT fraction of gross deployed. Legacy/manual escape
+   * hatch — prefer `hashrate` below, which derives the rebate from the program
+   * formula and so correctly depends on tile coverage and streak. When both are
+   * set they are summed (normally only one is used). Undefined = 0.
    */
   hashrateRebateFraction?: number | undefined;
+  /**
+   * Hashrate valuation, applied per the program formula R = s·(m + N/n): the
+   * rebate scales with the miner's streak and INVERSELY with the number of
+   * tiles covered, so the selector correctly prefers concentration. Inert while
+   * `valueUsdPerRawUnit` is 0 (i.e. until the vault prices a hashrate unit).
+   */
+  hashrate?: HashrateValuation | undefined;
   /**
    * Expected strike-jackpot value distributed to the winning tile this round
    * (base units) = P(strike) · jackpot = strikePool / strike_trigger_modulus.
@@ -126,6 +131,19 @@ export function netFactor(fees: FeeModel): number {
 }
 
 /**
+ * Total hashrate rebate for an allocation, in base units. Combines the flat
+ * legacy fraction with the formula-driven term, which needs the allocation's
+ * tile count — covering fewer tiles earns proportionally more hashrate, so this
+ * is what lets the selector price concentration correctly.
+ */
+function rebateBase(ctx: EvContext, cost: number, tilesCovered: number): number {
+  if (cost <= 0 || tilesCovered <= 0) return 0;
+  let fraction = ctx.hashrateRebateFraction ?? 0;
+  if (ctx.hashrate) fraction += hashrateRebateFraction(ctx.hashrate, tilesCovered);
+  return fraction * cost;
+}
+
+/**
  * Effective round pot distributed to the winning tile's stakers (base units,
  * as a float), including my own contribution. The USD portion is
  * (ΣS + Σa·netFactor)·(1 − satsVaultRound); the sats_vault_round leg is paid
@@ -158,11 +176,13 @@ export function evOfAllocation(ctx: EvContext, allocGross: bigint[]): number {
 
   let expectedPayout = 0;
   let cost = 0;
+  let tilesCovered = 0;
   for (let i = 0; i < TILES_COUNT; i++) {
     const gross = allocGross[i] ?? 0n;
     if (gross < 0n) throw new RangeError(`negative allocation on tile ${i}`);
     if (gross === 0n) continue;
     cost += Number(gross);
+    tilesCovered++;
     const myEffective = Number(gross) * nf * m;
     // "raw": S_i is others' raw stake, assumed multiplier 1.
     // "effective": S_i is already in effective units.
@@ -170,9 +190,8 @@ export function evOfAllocation(ctx: EvContext, allocGross: bigint[]): number {
     const othersEffective = Number(ctx.predictedStakes[i] ?? 0n);
     expectedPayout += P_WIN * pot * (myEffective / (othersEffective + myEffective));
   }
-  // Hashrate rebate: value earned on the gross deploy regardless of outcome.
-  const rebate = (ctx.hashrateRebateFraction ?? 0) * cost;
-  return expectedPayout - cost + rebate;
+  // Hashrate value earned on the gross deploy regardless of outcome.
+  return expectedPayout - cost + rebateBase(ctx, cost, tilesCovered);
 }
 
 /**
@@ -208,15 +227,19 @@ export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
     throw new RangeError(`allocation must have ${TILES_COUNT} entries`);
   }
   let cost = 0;
-  for (const a of allocGross) cost += Number(a);
+  let tilesCovered = 0;
+  for (const a of allocGross) {
+    cost += Number(a);
+    if (a > 0n) tilesCovered++;
+  }
   if (cost <= 0) return new Array<number>(TILES_COUNT).fill(0);
 
   const pot = potAfterFees(ctx, allocGross) + (ctx.strikeExpectedPot ?? 0);
   const nf = netFactor(ctx.fees);
   const m = ctx.multiplier;
-  // Hashrate rebate is earned in every outcome, so it lifts every return —
+  // Hashrate value is earned in every outcome, so it lifts every return —
   // a losing round returns −(1 − rebate) instead of −1.
-  const rebate = (ctx.hashrateRebateFraction ?? 0) * cost;
+  const rebate = rebateBase(ctx, cost, tilesCovered);
   const returns = new Array<number>(TILES_COUNT).fill(0);
   for (let i = 0; i < TILES_COUNT; i++) {
     const gross = allocGross[i] ?? 0n;

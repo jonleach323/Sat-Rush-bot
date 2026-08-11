@@ -222,6 +222,57 @@ describe("outcomeReturns", () => {
     );
   });
 
+  it("credits hashrate per the program formula, favouring concentration", () => {
+    // Same $21 gross, spread 21 ways vs concentrated on 1 tile. The pot term is
+    // held equal by using an empty board, so the only difference is hashrate:
+    // 1 tile earns m+21 raw/$, 21 tiles earn m+1 — an 11x gap at m=1.
+    const hashrate = { streak: 1, valueUsdPerRawUnit: 0.01, multiplier: 1 };
+    const c = ctx({ hashrate });
+    const one = zeroStakes();
+    one[0] = usdToBase(21);
+    const spread = zeroStakes().map(() => usdToBase(1));
+
+    const cost = Number(usdToBase(21));
+    // rebate(1 tile) = 22 x 0.01 = 22% of gross; rebate(21 tiles) = 2%.
+    const evOne = evOfAllocation(c, one);
+    const evSpread = evOfAllocation(c, spread);
+    const noHr = ctx();
+    expect(evOne - evOfAllocation(noHr, one)).toBeCloseTo(0.22 * cost, 3);
+    expect(evSpread - evOfAllocation(noHr, spread)).toBeCloseTo(0.02 * cost, 3);
+    // and the concentrated allocation is the one the credit favours
+    expect(evOne - evOfAllocation(noHr, one)).toBeGreaterThan(
+      evSpread - evOfAllocation(noHr, spread),
+    );
+  });
+
+  it("the post-Strike window doubles the hashrate credit", () => {
+    const alloc = allocOn([0], usdToBase(10));
+    const normal = ctx({ hashrate: { streak: 1, valueUsdPerRawUnit: 0.01, multiplier: 1 } });
+    const bonus = ctx({ hashrate: { streak: 1, valueUsdPerRawUnit: 0.01, multiplier: 2 } });
+    const plain = ctx();
+    const creditNormal = evOfAllocation(normal, alloc) - evOfAllocation(plain, alloc);
+    const creditBonus = evOfAllocation(bonus, alloc) - evOfAllocation(plain, alloc);
+    expect(creditBonus).toBeCloseTo(2 * creditNormal, 6);
+  });
+
+  it("the hashrate credit softens every loss outcome, not just the mean", () => {
+    const stakes = zeroStakes();
+    for (let i = 1; i < TILES_COUNT; i++) stakes[i] = usdToBase(10);
+    const alloc = allocOn([0], usdToBase(1));
+    const c = ctx({
+      predictedStakes: stakes,
+      hashrate: { streak: 1, valueUsdPerRawUnit: 0.01, multiplier: 1 },
+    });
+    // 1 tile at m=1 → 22 raw/$ → 22% credit, so a loss returns −0.78 not −1.
+    expect(outcomeReturns(c, alloc)[5]).toBeCloseTo(-0.78, 6);
+  });
+
+  it("is inert while hashrate is unpriced", () => {
+    const alloc = allocOn([0], usdToBase(5));
+    const priced = ctx({ hashrate: { streak: 50, valueUsdPerRawUnit: 0, multiplier: 2 } });
+    expect(evOfAllocation(priced, alloc)).toBeCloseTo(evOfAllocation(ctx(), alloc), 9);
+  });
+
   it("rejects a negative hashrate rebate", () => {
     expect(() =>
       evOfAllocation(ctx({ hashrateRebateFraction: -0.1 }), allocOn([0], usdToBase(1))),
