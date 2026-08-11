@@ -38,6 +38,35 @@ export interface HealthJson {
   dbError: string | null;
 }
 
+/**
+ * Live on-chain vault state. These accounts are read only by the vault manager's
+ * poll loop, so it caches them here — otherwise pool size, field size and what a
+ * ticket is currently worth are invisible to monitoring, and entry decisions
+ * happen against data nobody can see.
+ */
+export interface VaultPoolsJson {
+  slot: number;
+  epoch: {
+    iterationId: number;
+    open: boolean;
+    totalTickets: number;
+    myTickets: number;
+    poolUsd: number;
+    slotsToClose: number;
+    /** Marginal USD value of the next ticket, at our current holding. */
+    ticketEvUsd: number;
+  } | null;
+  oneBtc: {
+    iterationId: number;
+    open: boolean;
+    totalTickets: number;
+    prizeUsd: number;
+    /** Vault fill toward the 1-BTC trigger, in bps. */
+    fillBps: number;
+    ticketEvUsd: number;
+  } | null;
+}
+
 export interface VaultJson {
   enabled: boolean;
   hashrate: number;
@@ -58,6 +87,8 @@ export interface VaultJson {
     iterationsPaid: number;
     usdPerRawUnit: number | null;
   };
+  /** Live on-chain pool state; null until the vault manager's first poll. */
+  pools: VaultPoolsJson | null;
   recent: Record<string, unknown>[];
 }
 
@@ -90,6 +121,8 @@ export interface MonitorContext {
   vaultEnabled: boolean;
   /** Raw hashrate units per vault ticket — converts tickets bought into spend. */
   ticketPriceHashrate: number;
+  /** Latest on-chain vault pool state, cached by the vault manager poll. */
+  vaultPools: () => VaultPoolsJson | null;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -232,6 +265,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         epoch: { ticketsBought: e.tickets, iterationsPlayed: e.iters, iterationsClaimed: e.claimed },
         oneBtc: { ticketsBought: o.tickets, iterationsPlayed: o.iters, iterationsClaimed: o.claimed },
         economics: economics(),
+        pools: ctx.vaultPools(),
         recent: ctx.db.query(
           "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
         ),

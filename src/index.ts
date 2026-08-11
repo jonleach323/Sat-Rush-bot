@@ -50,7 +50,7 @@ import {
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, type VaultReadState } from "./exec/vault-manager.js";
-import { btcBaseToUsd, type VaultKind } from "./strategy/vault.js";
+import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
 import {
   epochAction,
   epochWinIndex,
@@ -76,7 +76,7 @@ import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
 import { HealthMonitor } from "./ops/health.js";
 import { MonitorApi } from "./ops/api.js";
-import { createMonitorData, type MonitorData } from "./ops/monitor.js";
+import { createMonitorData, type MonitorData, type VaultPoolsJson } from "./ops/monitor.js";
 import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { Pnl, utcDate } from "./state/pnl.js";
@@ -136,6 +136,9 @@ export class Orchestrator {
   // that the manager's async readState refreshes immediately before evaluating.
   private vaultHashrateCache = 0;
   private vaultEpochEntryCache: { iter: number; tickets: number } = { iter: -1, tickets: 0 };
+  /** Latest on-chain vault pool state, populated by the vault manager poll.
+   * Null when the vault strategy is off or before the first read. */
+  private vaultPoolCache: VaultPoolsJson | null = null;
   private readonly roundWindows = new Map<number, { start: number; end: number }>();
 
   private readonly log = logger;
@@ -209,6 +212,7 @@ export class Orchestrator {
       btcUsdEstimate: cfg.BTC_USD_ESTIMATE,
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
+      vaultPools: () => this.vaultPoolCache,
     });
   }
 
@@ -1091,6 +1095,49 @@ export class Orchestrator {
           };
         }
       }
+      // Cache the live pool state for monitoring. These accounts are only read
+      // here, so without this the dashboard can't show pool size, field size, or
+      // what a ticket is currently worth — the numbers that decide entry.
+      const myEpoch =
+        epoch && this.vaultEpochEntryCache.iter === epoch.iterationId
+          ? this.vaultEpochEntryCache.tickets
+          : 0;
+      const ticketEv = (
+        kind: "epoch" | "one_btc",
+        pool: number,
+        total: number,
+        mine: number,
+      ): number => {
+        const others = Math.max(0, total - mine);
+        return (
+          expectedWinningsUsd(mine + 1, others, pool, kind) -
+          expectedWinningsUsd(mine, others, pool, kind)
+        );
+      };
+      this.vaultPoolCache = {
+        slot,
+        epoch: epoch && {
+          iterationId: epoch.iterationId,
+          open: epoch.open,
+          totalTickets: epoch.totalTickets,
+          myTickets: myEpoch,
+          poolUsd: epoch.poolValueUsd,
+          slotsToClose:
+            epoch.lastTriggerSlot + iterationDurationSlots - slot,
+          ticketEvUsd: ticketEv("epoch", epoch.poolValueUsd, epoch.totalTickets, myEpoch),
+        },
+        oneBtc: oneBtc && {
+          iterationId: oneBtc.iterationId,
+          open: oneBtc.open,
+          totalTickets: oneBtc.totalTickets,
+          prizeUsd: oneBtc.poolValueUsd,
+          fillBps:
+            oneBtc.reservedBtc > 0
+              ? Math.round((oneBtc.btcAmount / oneBtc.reservedBtc) * 10_000)
+              : 0,
+          ticketEvUsd: ticketEv("one_btc", oneBtc.poolValueUsd, oneBtc.totalTickets, 0),
+        },
+      };
       return { slot, epoch, oneBtc };
     };
 

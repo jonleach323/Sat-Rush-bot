@@ -40,6 +40,7 @@ const fakeData: MonitorData = {
       iterationsPaid: 0,
       usdPerRawUnit: null,
     },
+    pools: null,
     recent: [{ kind: "epoch", iteration_id: 293, tickets: 5, claimed: 0 }],
   }),
   health: async () => ({

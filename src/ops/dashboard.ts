@@ -137,6 +137,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 
   <h2>Vault · <span id="vaultsub" class="mono" style="color:var(--ink-2)"></span></h2>
   <div class="stat" id="vaultstat"></div>
+  <div class="stat" id="vaultpools" style="margin-top:12px"></div>
   <table id="vaulttbl"><thead><tr><th>kind</th><th class="r">iter</th><th class="r">tickets</th><th>status</th></tr></thead><tbody></tbody></table>
 
   <h2>Recent competitor deploys</h2>
@@ -259,6 +260,22 @@ function renderVault(v){
     ["$/raw unit", price!=null ? "$"+price.toFixed(6) : "—", price!=null?"accent":"",
       price!=null ? "set HASHRATE_VALUE_USD to this" : "awaiting a paid claim"],
   ].map(([k,val,c,sub]) => card(k,val,c,sub)).join("");
+  const p = v.pools;
+  el("vaultpools").innerHTML = !p ? "" : [
+    p.epoch ? ["Epoch pool", usd(p.epoch.poolUsd), "accent",
+      "iter "+p.epoch.iterationId+" · "+(p.epoch.open?"open":"closed")
+      +" · "+p.epoch.slotsToClose+" slots left"] : null,
+    p.epoch ? ["Epoch field", p.epoch.totalTickets+" tickets", "",
+      "mine "+p.epoch.myTickets] : null,
+    p.epoch ? ["Epoch ticket EV", usd(p.epoch.ticketEvUsd),
+      p.epoch.ticketEvUsd>0?"pos":"", "value of next ticket"] : null,
+    p.oneBtc ? ["1-BTC prize", usd(p.oneBtc.prizeUsd), "accent",
+      "iter "+p.oneBtc.iterationId+" · "+(p.oneBtc.fillBps/100).toFixed(1)+"% full"] : null,
+    p.oneBtc ? ["1-BTC field", p.oneBtc.totalTickets+" tickets", ""] : null,
+    p.oneBtc ? ["1-BTC ticket EV", usd(p.oneBtc.ticketEvUsd),
+      p.oneBtc.ticketEvUsd>0?"pos":"", "value of next ticket"] : null,
+  ].filter(Boolean).map(([k,val,c,sub]) => card(k,val,c,sub)).join("");
+
   el("vaulttbl").querySelector("tbody").innerHTML = (v.recent||[]).map(r =>
     '<tr><td>'+r.kind+'</td><td class="r mono">'+r.iteration_id+'</td><td class="r mono">'+r.tickets+
     '</td><td class="'+(r.claimed?"win":"")+'">'+(r.claimed?"claimed":"open")+'</td></tr>').join("") || emptyRow(4);
