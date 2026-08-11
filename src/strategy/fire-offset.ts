@@ -30,8 +30,17 @@ export interface FireOffsetOptions {
   ceiling: number;
   /** Static offset used when there aren't enough samples to calibrate. */
   fallback: number;
-  /** Minimum landed-deploy samples required before adapting. */
+  /** Minimum samples (landed + missed) required before adapting. */
   minSamples: number;
+  /**
+   * Deploys in the same window that did NOT land in time. Load-bearing: a miss
+   * is a RIGHT-CENSORED latency observation — we know it exceeded the offset we
+   * used, we just don't know by how much. Calibrating on landed deploys alone
+   * is survivorship bias: the evidence that the offset is too aggressive is
+   * exactly the evidence being discarded, so the estimate can never widen no
+   * matter how many rounds are missed.
+   */
+  missCount?: number | undefined;
 }
 
 /** Nearest-rank quantile of an unsorted numeric sample. */
@@ -45,9 +54,21 @@ export function quantile(values: number[], p: number): number {
 }
 
 /**
- * The offset to fire at, given observed land latencies (landed_slot −
- * fired_slot) for recent landed deploys. Falls back to the static offset until
- * `minSamples` are available. Always returned within [floor, ceiling].
+ * The offset to fire at, given land latencies (landed_slot − fired_slot) for
+ * recent LANDED deploys plus the count of deploys in the same window that
+ * missed. Always returned within [floor, ceiling].
+ *
+ * Misses are treated as right-censored: each one sorts above every landed
+ * observation, because its true latency exceeded the offset in use. The target
+ * quantile is then taken over the FULL sample (landed + missed):
+ *
+ *   rank = ceil(targetLandProb · total)
+ *   rank <= landed  → the quantile is observable; use it as before.
+ *   rank >  landed  → no observed latency achieves the target land probability,
+ *                     so widen past the worst observation. The overshoot scales
+ *                     with how far into the censored region the target sits, so
+ *                     a light miss rate nudges the offset and a heavy one drives
+ *                     it to the ceiling.
  */
 export function adaptiveFireOffset(
   latencies: number[],
@@ -55,7 +76,20 @@ export function adaptiveFireOffset(
 ): number {
   const clampToBounds = (v: number) =>
     Math.min(opts.ceiling, Math.max(opts.floor, v));
-  if (latencies.length < opts.minSamples) return clampToBounds(opts.fallback);
-  const q = quantile(latencies, opts.targetLandProb);
-  return clampToBounds(Math.ceil(q) + opts.cushionSlots);
+  const misses = Math.max(0, Math.trunc(opts.missCount ?? 0));
+  const total = latencies.length + misses;
+  if (total < opts.minSamples) return clampToBounds(opts.fallback);
+
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const p = Math.max(0, Math.min(1, opts.targetLandProb));
+  const rank = Math.ceil(p * total);
+
+  if (rank <= sorted.length && sorted.length > 0) {
+    return clampToBounds(Math.ceil(sorted[rank - 1] as number) + opts.cushionSlots);
+  }
+  // Censored region: even firing at our worst observed latency would not hit
+  // the target land rate. Widen beyond it by the shortfall in landed samples.
+  const worst = sorted.length > 0 ? (sorted[sorted.length - 1] as number) : opts.fallback;
+  const shortfall = rank - sorted.length;
+  return clampToBounds(Math.ceil(worst) + opts.cushionSlots + shortfall);
 }

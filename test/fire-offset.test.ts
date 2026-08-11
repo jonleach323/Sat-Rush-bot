@@ -57,6 +57,41 @@ describe("adaptiveFireOffset", () => {
     expect(adaptiveFireOffset(instant, opts)).toBe(opts.floor); // 0+1 → clamped up to 2
   });
 
+  it("REGRESSION: widens when misses appear, instead of ignoring them", () => {
+    // The survivorship bug: calibrating on landed deploys only, a consistently
+    // 1-slot-landing bot sits at the floor forever even while missing 30% of
+    // rounds — the evidence it is too aggressive is exactly what was discarded.
+    const landed = new Array<number>(35).fill(1);
+    const blind = adaptiveFireOffset(landed, opts); // no miss information
+    const withMisses = adaptiveFireOffset(landed, { ...opts, missCount: 15 }); // 30%
+    expect(blind).toBe(opts.floor);
+    expect(withMisses).toBeGreaterThan(blind);
+  });
+
+  it("ignores a miss rate inside the allowed failure budget", () => {
+    // targetLandProb 0.95 tolerates 5% misses: the target quantile is still
+    // observable, so the offset should not move.
+    const landed = new Array<number>(96).fill(1);
+    const clean = adaptiveFireOffset(landed, opts);
+    const tolerated = adaptiveFireOffset(landed, { ...opts, missCount: 4 });
+    expect(tolerated).toBe(clean);
+  });
+
+  it("escalates monotonically with the miss rate, up to the ceiling", () => {
+    const landed = new Array<number>(50).fill(2);
+    const a = adaptiveFireOffset(landed, { ...opts, missCount: 5 });
+    const b = adaptiveFireOffset(landed, { ...opts, missCount: 20 });
+    const c = adaptiveFireOffset(landed, { ...opts, missCount: 200 });
+    expect(b).toBeGreaterThanOrEqual(a);
+    expect(c).toBeGreaterThanOrEqual(b);
+    expect(c).toBe(opts.ceiling); // a hopeless miss rate pins it wide
+  });
+
+  it("counts misses toward minSamples so an all-miss start still calibrates", () => {
+    // 0 landed, 25 missed: we have plenty of evidence, all of it censored.
+    expect(adaptiveFireOffset([], { ...opts, missCount: 25 })).toBeGreaterThan(opts.fallback);
+  });
+
   it("re-tunes lower as latency improves (the send-path upgrade payoff)", () => {
     const before = adaptiveFireOffset(new Array<number>(50).fill(2), opts); // 3
     const after = adaptiveFireOffset(new Array<number>(50).fill(1), opts); // 2

@@ -630,25 +630,36 @@ export class Orchestrator {
       this.adaptiveOffsetSlots = null;
       return;
     }
-    const rows = this.db.query<{ lat: number }>(
-      `SELECT (landed_slot - fired_slot) AS lat FROM my_deploys
-       WHERE status = 'landed' AND landed_slot IS NOT NULL AND fired_slot IS NOT NULL
+    // Pull landed AND missed from the SAME window: misses are censored latency
+    // observations, and dropping them is the survivorship bias that let the
+    // offset sit too aggressive while missing rounds.
+    const rows = this.db.query<{ status: string; lat: number | null }>(
+      `SELECT status, (landed_slot - fired_slot) AS lat FROM my_deploys
+       WHERE fired_slot IS NOT NULL AND status IN ('landed','missed','failed')
        ORDER BY id DESC LIMIT 200`,
     );
-    const next = adaptiveFireOffset(
-      rows.map((r) => r.lat),
-      {
-        targetLandProb: this.cfg.FIRE_OFFSET_TARGET_LAND_PROB,
-        cushionSlots: this.cfg.FIRE_OFFSET_CUSHION_SLOTS,
-        floor: this.cfg.FIRE_OFFSET_FLOOR,
-        ceiling: this.cfg.FIRE_OFFSET_CEILING,
-        fallback: this.cfg.FIRE_OFFSET_SLOTS,
-        minSamples: this.cfg.FIRE_OFFSET_MIN_SAMPLES,
-      },
-    );
+    const latencies = rows
+      .filter((r) => r.status === "landed" && r.lat !== null)
+      .map((r) => r.lat as number);
+    const missCount = rows.length - latencies.length;
+    const next = adaptiveFireOffset(latencies, {
+      missCount,
+      targetLandProb: this.cfg.FIRE_OFFSET_TARGET_LAND_PROB,
+      cushionSlots: this.cfg.FIRE_OFFSET_CUSHION_SLOTS,
+      floor: this.cfg.FIRE_OFFSET_FLOOR,
+      ceiling: this.cfg.FIRE_OFFSET_CEILING,
+      fallback: this.cfg.FIRE_OFFSET_SLOTS,
+      minSamples: this.cfg.FIRE_OFFSET_MIN_SAMPLES,
+    });
     if (next !== this.adaptiveOffsetSlots) {
       this.log.info(
-        { fireOffset: next, prev: this.adaptiveOffsetSlots, samples: rows.length },
+        {
+          fireOffset: next,
+          prev: this.adaptiveOffsetSlots,
+          landed: latencies.length,
+          missed: missCount,
+          missRate: rows.length > 0 ? Number((missCount / rows.length).toFixed(3)) : 0,
+        },
         "adaptive fire offset updated",
       );
     }
