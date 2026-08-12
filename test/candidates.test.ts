@@ -96,7 +96,7 @@ describe("CandidateSet — Jito tip", () => {
         baseLamports: 1_000_000,
         maxLamports: 5_000_000,
         evFraction: 0, // flat base tip
-        solUsd: 150,
+        solUsd: () => 150,
       },
       rng: seededRng(1),
     });

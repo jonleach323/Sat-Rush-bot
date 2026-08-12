@@ -120,6 +120,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 
   <h2>Vitals</h2>
   <div class="stat" id="vitals"></div>
+  <div class="stat" id="prices" style="margin-top:12px"></div>
 
   <h2>Daily P&amp;L · <span id="pnlsub" class="mono" style="color:var(--ink-2)"></span></h2>
   <table id="pnl"><thead><tr><th>date</th><th class="r">deployed</th><th class="r">returned</th><th class="r">net</th><th class="r">fees</th></tr></thead><tbody></tbody></table>
@@ -206,6 +207,14 @@ function render(s, rounds, deploys, comp, health, vault, pnl) {
     ["SOL", health&&health.solBalance!=null?health.solBalance.toFixed(4):"—", ""],
     ["USDC", health&&health.usdcBalance!=null?usd(health.usdcBalance):"—", ""],
   ].map(([k,v,c]) => card(k,v,c)).join("");
+
+  // Oracle prices. "fallback" is a warning, not a footnote: every
+  // BTC-denominated figure below and the tip sizing are scaled by these.
+  const px = s.prices || {btc:{usd:0,live:false},sol:{usd:0,live:false}};
+  el("prices").innerHTML = [
+    ["BTC / USD", usd(px.btc.usd), px.btc.live?"":"neg", px.btc.live?"pyth live":"FALLBACK — oracle rejected"],
+    ["SOL / USD", usd(px.sol.usd), px.sol.live?"":"neg", px.sol.live?"pyth live":"FALLBACK — oracle rejected"],
+  ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
 
   el("rounds").querySelector("tbody").innerHTML = rounds.map(r =>
     '<tr><td class="mono">'+r.id+'</td><td class="r mono">'+(r.winning_tile??"—")+'</td><td class="r mono">'+usd(base(r.deployed_usd))+

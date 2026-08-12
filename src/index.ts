@@ -70,6 +70,7 @@ import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guard
 import { reconcileRoundOutcome, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
+import { PriceFeed } from "./ingest/prices.js";
 import { bootstrapGameState, type GameState } from "./ingest/snapshot.js";
 import type { IngestSource } from "./ingest/types.js";
 import { WsRpcIngest } from "./ingest/wsrpc.js";
@@ -162,6 +163,7 @@ export class Orchestrator {
     private readonly payer: Keypair,
     private readonly ixCtx: InstructionContext,
     private readonly fees: FeeModel,
+    private readonly prices: PriceFeed,
   ) {
     this.health = new HealthMonitor(
       {
@@ -209,7 +211,8 @@ export class Orchestrator {
         const balance = await this.connection.getTokenAccountBalance(ata, "processed");
         return BigInt(balance.value.amount);
       },
-      btcUsdEstimate: cfg.BTC_USD_ESTIMATE,
+      btcUsdEstimate: () => this.prices.btcUsd(),
+      priceStatus: () => this.prices.status(),
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
       vaultPools: () => this.vaultPoolCache,
@@ -277,6 +280,25 @@ export class Orchestrator {
     // Embed a tip whenever tip accounts are configured — NOT gated on
     // JITO_BLOCK_ENGINE_URL. Helius Sender requires a tip in the tx even when we
     // don't send a separate direct Jito bundle (Sender routes to Jito itself).
+    // Live USD prices. Everything BTC-denominated (vault pools, unclaimed
+    // position value, and the hashrate price derived from them) and the Jito
+    // tip sizing read from here; the config constants are fallbacks only.
+    const prices = new PriceFeed({
+      connection,
+      accounts: {
+        btc: cfg.PYTH_BTC_USD_ACCOUNT ? new PublicKey(cfg.PYTH_BTC_USD_ACCOUNT) : undefined,
+        sol: cfg.PYTH_SOL_USD_ACCOUNT ? new PublicKey(cfg.PYTH_SOL_USD_ACCOUNT) : undefined,
+      },
+      fallback: { btc: cfg.BTC_USD_ESTIMATE, sol: cfg.SOL_USD_ESTIMATE },
+      maxStaleSlots: cfg.PRICE_MAX_STALE_SLOTS,
+      maxConfidenceRatio: cfg.PRICE_MAX_CONFIDENCE_RATIO,
+      pollMs: cfg.PRICE_POLL_MS,
+      log: (obj, msg) => logger.warn(obj, msg),
+    });
+    // Prime before anything prices against it; start() begins the poll.
+    await prices.start();
+    logger.info(prices.status(), "price feed primed");
+
     const jitoTip =
       tipAccounts.length > 0
         ? {
@@ -284,7 +306,7 @@ export class Orchestrator {
             baseLamports: cfg.JITO_TIP_LAMPORTS,
             maxLamports: cfg.JITO_TIP_MAX_LAMPORTS,
             evFraction: cfg.JITO_TIP_EV_FRACTION,
-            solUsd: cfg.SOL_USD_ESTIMATE,
+            solUsd: () => prices.solUsd(),
           }
         : undefined;
     const candidates = new CandidateSet({
@@ -336,6 +358,7 @@ export class Orchestrator {
       payer,
       ixCtx,
       fees,
+      prices,
     );
   }
 
@@ -1024,7 +1047,7 @@ export class Orchestrator {
    */
   private startVaultManager(): void {
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
-    const btcUsd = this.cfg.BTC_USD_ESTIMATE;
+    const btcUsd = () => this.prices.btcUsd();
     const btcDecimals = 8; // cbBTC-style; devnet + mainnet BTC mints are 8dp (FINDINGS E6)
     const iterationDurationSlots = Number(
       this.state.satrushConfig!.epoch_vault_iteration_duration.toString(),
@@ -1085,7 +1108,7 @@ export class Orchestrator {
             totalTickets: num(it.total_tickets),
             poolValueUsd:
               num(ev.pool_usd_amount) / 1e6 +
-              btcBaseToUsd(num(ev.pool_btc_amount), btcDecimals, btcUsd),
+              btcBaseToUsd(num(ev.pool_btc_amount), btcDecimals, btcUsd()),
             lastTriggerSlot: num(ev.last_trigger_slot),
             iterationDurationSlots,
           };
@@ -1107,7 +1130,7 @@ export class Orchestrator {
             open: "Open" in it.state,
             totalTickets: num(it.total_tickets),
             // prize ≈ the reserve paid to the winner at the trigger
-            poolValueUsd: btcBaseToUsd(num(obv.reserved_btc_amount), btcDecimals, btcUsd),
+            poolValueUsd: btcBaseToUsd(num(obv.reserved_btc_amount), btcDecimals, btcUsd()),
             btcAmount: num(obv.btc_amount),
             reservedBtc: num(obv.reserved_btc_amount),
           };
@@ -1558,7 +1581,7 @@ export class Orchestrator {
     const value = this.pnl.unclaimedValue({
       miner,
       satsVault: vault,
-      btcUsdPrice: this.cfg.BTC_USD_ESTIMATE,
+      btcUsdPrice: this.prices.btcUsd(),
       btcDecimals: 8, // cbBTC-style; read from mint before mainnet
     });
     const sharesUsd = value.totalUsd - value.usd; // BTC-share value only
@@ -1781,6 +1804,7 @@ export class Orchestrator {
     this.health.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     this.vaultManager?.stop();
+    this.prices.stop();
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
     await this.api?.stop().catch(() => undefined);

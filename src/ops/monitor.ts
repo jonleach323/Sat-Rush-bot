@@ -6,6 +6,7 @@
  */
 import type { Miner, Round, SatrushConfig, SatsVault } from "../adapter/idl.js";
 import { TILES_COUNT } from "../ingest/decode.js";
+import type { PriceStatus } from "../ingest/prices.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
 import type { Pnl } from "../state/pnl.js";
@@ -28,6 +29,8 @@ export interface StatusJson {
   pnl: { todayNetUsd: number; deployedTodayUsd: number; returnedTodayUsd: number };
   unclaimed: { usd: number; shares: string };
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
+  /** Oracle prices actually in force; `live: false` means a fallback is in use. */
+  prices: PriceStatus;
 }
 
 export interface HealthJson {
@@ -117,7 +120,10 @@ export interface MonitorContext {
   myAuthority: string;
   solBalanceLamports: () => Promise<number>;
   usdcBalanceBaseUnits: () => Promise<bigint>;
-  btcUsdEstimate: number;
+  /** Live BTC/USD (oracle-backed); a getter so it isn't frozen at boot. */
+  btcUsdEstimate: () => number;
+  /** Full oracle status (both symbols + live flags) for the status payload. */
+  priceStatus: () => PriceStatus;
   vaultEnabled: boolean;
   /** Raw hashrate units per vault ticket — converts tickets bought into spend. */
   ticketPriceHashrate: number;
@@ -194,6 +200,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
             ctx.dailyLossCapBase > dailyLoss ? ctx.dailyLossCapBase - dailyLoss : 0n,
           ),
         },
+        prices: ctx.priceStatus(),
       };
     },
 
@@ -233,7 +240,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         const v = ctx.db.vaultEconomics();
         const hashrateSpentRaw = v.ticketsBought * ctx.ticketPriceHashrate;
         const usdClaimed = baseToUsd(v.usdClaimed);
-        const btcClaimedUsd = (Number(v.btcClaimed) / 1e8) * ctx.btcUsdEstimate;
+        const btcClaimedUsd = (Number(v.btcClaimed) / 1e8) * ctx.btcUsdEstimate();
         return {
           hashrateSpentRaw,
           usdClaimed,

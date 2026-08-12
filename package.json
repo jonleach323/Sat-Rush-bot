@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "sim": "tsx test/sim.ts",
     "preflight": "tsx scripts/preflight.ts",
+    "prices": "tsx scripts/check-prices.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "switch:devnet": "bash scripts/switch-cluster.sh devnet",

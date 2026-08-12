@@ -265,10 +265,12 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.1),
     ),
-    /** SOL price (USD) to convert EV into tip lamports. */
+    /** COLD-START SOL/USD seed. The live oracle is authoritative (see
+     * PYTH_SOL_USD_ACCOUNT) and is primed before the first decision; this is
+     * only in force if that very first read fails. */
     SOL_USD_ESTIMATE: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().positive().default(150),
+      z.coerce.number().finite().positive().default(75),
     ),
 
     STALENESS_MS: z.preprocess(
@@ -291,10 +293,43 @@ const schema = z
       emptyToUndef,
       z.coerce.number().gt(0).max(1).default(0.5),
     ),
-    /** BTC/USD estimate for valuing unclaimed shares (until a price feed). */
+    /** COLD-START BTC/USD seed. The live oracle is authoritative (see
+     * PYTH_BTC_USD_ACCOUNT) and is primed before the first decision; this is
+     * only in force if that very first read fails. */
     BTC_USD_ESTIMATE: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().positive().default(100_000),
+      z.coerce.number().finite().positive().default(65_000),
+    ),
+    /** Pyth Solana Receiver push accounts (mainnet sponsored feeds), verified
+     * live. Read over the RPC we already hold — no API key, no extra
+     * dependency. Set to empty to disable a feed and pin that symbol to its
+     * fallback. A wrong address is safe: the update carries its own feed ID, so
+     * it is rejected rather than silently mispriced. NOT the legacy v2 oracle
+     * accounts — those are frozen at status 0 and never accept. */
+    PYTH_BTC_USD_ACCOUNT: z.preprocess(
+      emptyToUndef,
+      pubkeyString.optional().default("4cSM2e6rvbGQUFiJbqytoVMi5GgghSMr8LwVrT9VPSPo"),
+    ),
+    PYTH_SOL_USD_ACCOUNT: z.preprocess(
+      emptyToUndef,
+      pubkeyString.optional().default("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"),
+    ),
+    /** Max slots between an update's posted slot and chain head before it is
+     * rejected as stale (~150 slots ≈ 60s). */
+    PRICE_MAX_STALE_SLOTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(150),
+    ),
+    /** Reject a quote whose confidence/price exceeds this. */
+    PRICE_MAX_CONFIDENCE_RATIO: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(1).default(0.02),
+    ),
+    /** Oracle refresh cadence. Prices move slowly relative to a 50-slot round;
+     * 30s is well inside the staleness window with room for a missed poll. */
+    PRICE_POLL_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(30_000),
     ),
 
     /** Reconciliation tripwire: modeled-vs-realized payout tolerance (fraction). */

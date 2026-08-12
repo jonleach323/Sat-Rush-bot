@@ -15,6 +15,7 @@ const fakeData: MonitorData = {
     pnl: { todayNetUsd: -1.5, deployedTodayUsd: 5, returnedTodayUsd: 3.5 },
     unclaimed: { usd: 8.1, shares: "141384" },
     caps: { maxPerRoundUsd: 1000, dailyLossCapUsd: 1000, dailyLossLeftUsd: 998.5 },
+    prices: { btc: { usd: 118_423.1, live: true }, sol: { usd: 212.55, live: true } },
   }),
   pnlDaily: (n: number) =>
     Array.from({ length: Math.min(n, 365) }, (_, i) => ({

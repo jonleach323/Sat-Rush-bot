@@ -55,7 +55,7 @@ export interface CandidateSetOptions {
    * EV-scaled per candidate (see scaledTipLamports); evFraction 0 = flat base.
    * One `account` is chosen at random per fire to avoid write-lock contention. */
   jitoTip?:
-    | { accounts: PublicKey[]; baseLamports: number; maxLamports: number; evFraction: number; solUsd: number }
+    | { accounts: PublicKey[]; baseLamports: number; maxLamports: number; evFraction: number; solUsd: () => number }
     | undefined;
   blockhashMaxAgeMs?: number | undefined;
   now?: (() => number) | undefined;
@@ -174,7 +174,7 @@ export class CandidateSet {
           baseLamports: this.opts.jitoTip.baseLamports,
           maxLamports: this.opts.jitoTip.maxLamports,
           evFraction: this.opts.jitoTip.evFraction,
-          solUsd: this.opts.jitoTip.solUsd,
+          solUsd: this.opts.jitoTip.solUsd(),
         });
         instructions.push(
           SystemProgram.transfer({
