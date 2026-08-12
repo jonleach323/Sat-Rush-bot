@@ -7,6 +7,7 @@
 import type { Miner, Round, SatrushConfig, SatsVault } from "../adapter/idl.js";
 import { TILES_COUNT } from "../ingest/decode.js";
 import type { PriceStatus } from "../ingest/prices.js";
+import { buildIntel, type IntelJson } from "./intel.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
 import type { Pnl } from "../state/pnl.js";
@@ -117,6 +118,8 @@ export interface MonitorData {
   recentDeploys(limit: number): Record<string, unknown>[];
   recentCompetitors(limit: number): Record<string, unknown>[];
   vault(): VaultJson;
+  /** Derived strategy intelligence over the last `windowRounds` rounds. */
+  intel(windowRounds: number): IntelJson;
   health(): Promise<HealthJson>;
 }
 
@@ -147,6 +150,8 @@ export interface MonitorContext {
   vaultPools: () => VaultPoolsJson | null;
   /** Live price of a raw hashrate unit, as fed to the deploy EV. */
   hashrateValue: () => VaultJson["hashrateValue"];
+  /** Fire offset in force, for the "which rivals fire after us" split. */
+  fireOffsetSlots: () => number;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -299,6 +304,13 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
           "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
         ),
       };
+    },
+
+    intel(windowRounds) {
+      return buildIntel(ctx.db, {
+        windowRounds: Math.min(Math.max(1, windowRounds), 5000),
+        fireOffsetSlots: ctx.fireOffsetSlots(),
+      });
     },
 
     async health(): Promise<HealthJson> {

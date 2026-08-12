@@ -98,6 +98,8 @@ export class MonitorApi {
                 return send(200, data.recentCompetitors(limit));
               case "/api/vault":
                 return send(200, data.vault());
+              case "/api/intel":
+                return send(200, data.intel(Number(url.searchParams.get("window") ?? 500)));
               default:
                 return send(404, { error: "not found" });
             }

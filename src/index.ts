@@ -225,6 +225,7 @@ export class Orchestrator {
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
       vaultPools: () => this.vaultPoolCache,
+      fireOffsetSlots: () => this.currentFireOffset(),
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =

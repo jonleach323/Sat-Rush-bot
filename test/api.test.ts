@@ -45,6 +45,30 @@ const fakeData: MonitorData = {
     hashrateValue: { usdPerRawUnit: 0, source: "none" as const },
     recent: [{ kind: "epoch", iteration_id: 293, tickets: 5, claimed: 0 }],
   }),
+  intel: (windowRounds: number) => ({
+    windowRounds,
+    field: {
+      rounds: 100,
+      deploys: 3300,
+      distinctRivals: 33,
+      avgDeploysPerRound: 33,
+      automationShare: 0.9,
+      fullBoardShare: 0.85,
+      avgRivalStakeUsd: 14.2,
+    },
+    uniformity: { samples: 100, medianCov: 0.012, uniformShare: 0.94 },
+    fairness: {
+      samples: 999,
+      counts: new Array(21).fill(47),
+      chiSquare: 7.72,
+      degreesOfFreedom: 20,
+      criticalValue05: 31.41,
+      looksUniform: true,
+    },
+    rivalTiming: { samples: 3300, p10: 2, p50: 18, p90: 44, afterUsShare: 0.11 },
+    calibration: { landed: 98, modeledBps: 368, realizedBps: 552, benchmarkBps: 85 },
+    strike: { rounds: 999, strikes: 1, roundsSinceLast: 990 },
+  }),
   health: async () => ({
     ingestFresh: true,
     ingestSlotAgeMs: 100,
@@ -106,6 +130,24 @@ describe("MonitorApi — auth", () => {
     const body = (await res.json()) as { epoch: { ticketsBought: number }; hashrate: number };
     expect(body.epoch.ticketsBought).toBe(5);
     expect(body.hashrate).toBe(1795);
+  });
+
+  it("serves intel, defaulting and honouring the window param", async () => {
+    const def = (await (await fetch(`${base}/api/intel`, auth)).json()) as {
+      windowRounds: number;
+      field: { distinctRivals: number };
+    };
+    expect(def.windowRounds).toBe(500);
+    expect(def.field.distinctRivals).toBe(33);
+
+    const windowed = (await (
+      await fetch(`${base}/api/intel?window=50`, auth)
+    ).json()) as { windowRounds: number };
+    expect(windowed.windowRounds).toBe(50);
+  });
+
+  it("intel requires a token like every other /api route", async () => {
+    expect((await fetch(`${base}/api/intel`)).status).toBe(401);
   });
 });
 
