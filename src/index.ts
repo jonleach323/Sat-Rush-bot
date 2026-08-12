@@ -79,7 +79,7 @@ import { MonitorApi } from "./ops/api.js";
 import { createMonitorData, type MonitorData, type VaultPoolsJson } from "./ops/monitor.js";
 import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
-import { Pnl, utcDate } from "./state/pnl.js";
+import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
@@ -221,7 +221,6 @@ export class Orchestrator {
     const connection = new Connection(cfg.RPC_HTTP_URL, "processed");
     const payer = loadKeypair(cfg.KEYPAIR_PATH);
     const db = new StateDb(cfg.DB_PATH);
-    const pnl = new Pnl(db);
 
     const state = await bootstrapGameState(connection, {
       minerAuthority: payer.publicKey,
@@ -229,6 +228,14 @@ export class Orchestrator {
     });
     if (!state.satrushConfig) throw new Error("satrush_config missing on chain");
     const fees = feeModelFromConfig(state.satrushConfig);
+    // Fee bps read LIVE from chain (they are updatable on-chain), so the daily
+    // fee column tracks reality instead of a devnet-era constant.
+    const pnl = new Pnl(db, {
+      deployFeeBps: () =>
+        state.satrushConfig
+          ? feeModelFromConfig(state.satrushConfig).deployFeeBps
+          : DEFAULT_DEPLOY_FEE_BPS,
+    });
     const ixCtx: InstructionContext = {
       usdMint: state.satrushConfig.usd_mint,
       btcMint: state.satrushConfig.btc_mint,

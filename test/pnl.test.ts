@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { BN } from "../src/adapter/idl.js";
 import type { Miner, SatsVault } from "../src/adapter/idl.js";
@@ -122,6 +123,83 @@ describe("Pnl", () => {
     expect(v.btcBaseUnits).toBe(500_000n); // 50k shares × 10
     // 0.005 BTC × $100k = $500 → 500_000_000 base units + $2
     expect(v.totalUsd).toBe(502_000_000n);
+    db.close();
+  });
+});
+
+describe("Pnl — UTC-midnight carryover (audit finding #5)", () => {
+  it("attributes a settlement to the day its DEPLOY was made", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "satrush-mid-")), "t.db");
+    const db = new StateDb(path);
+    const pnl = new Pnl(db);
+    const raw = new Database(path);
+    const setTime = (table: string, sig: string, ts: string) =>
+      raw.prepare(`UPDATE ${table} SET created_at = ? WHERE sig = ?`).run(ts, sig);
+    // A round deployed at 23:59:55 on day 1 that settles at 00:00:05 on day 2.
+    // Filtering settlements by their own timestamp would credit day 2 with a
+    // return it never paid for, masking real losses against the daily cap.
+    db.recordMyDeploy({
+      roundId: 900, mask: 1, amount: usdToBase(100), evExpected: null,
+      firedSlot: 1, sig: "late-night", status: "landed",
+    });
+    setTime("my_deploys", "late-night", "2026-08-01 23:59:55");
+    db.recordSettlement({
+      roundId: 900, winningStake: 0n, wonUsd: usdToBase(40),
+      wonShares: 0n, hashrateEarned: 0n, sig: "late-settle",
+    });
+    setTime("settlements", "late-settle", "2026-08-02 00:00:05");
+
+    // Day 1 owns both the cost and the return.
+    expect(pnl.deployedToday("2026-08-01")).toBe(usdToBase(100));
+    expect(pnl.returnedToday("2026-08-01")).toBe(usdToBase(40));
+    expect(pnl.realizedLossToday("2026-08-01")).toBe(usdToBase(60));
+
+    // Day 2 gets no phantom credit — so the loss cap can't be inflated by it.
+    expect(pnl.returnedToday("2026-08-02")).toBe(0n);
+    expect(pnl.realizedLossToday("2026-08-02")).toBe(0n);
+    raw.close();
+    db.close();
+  });
+
+  it("falls back to the settlement's own date when no deploy row exists", () => {
+    const { db, pnl } = setup();
+    db.recordSettlement({
+      roundId: 901, winningStake: 0n, wonUsd: usdToBase(7),
+      wonShares: 0n, hashrateEarned: 0n, sig: "orphan",
+    });
+    expect(pnl.returnedToday()).toBe(usdToBase(7)); // not silently dropped
+    db.close();
+  });
+});
+
+describe("Pnl — fee attribution (audit finding #6)", () => {
+  it("uses the live on-chain deploy bps, not a hardcoded 800", () => {
+    const db = new StateDb(join(mkdtempSync(join(tmpdir(), "satrush-fee-")), "t.db"));
+    let bps = 800;
+    const pnl = new Pnl(db, { deployFeeBps: () => bps });
+    seedDeploy(db, 10, 100, null, "landed");
+
+    pnl.refreshDaily();
+    const read = () =>
+      BigInt(
+        (db.queryOne<{ fees_paid: string }>("SELECT fees_paid FROM pnl_daily")?.fees_paid) ?? "0",
+      );
+    expect(read()).toBe(usdToBase(8)); // 800 bps of $100
+
+    bps = 1200; // chain config updated
+    pnl.refreshDaily();
+    expect(read()).toBe(usdToBase(12));
+    db.close();
+  });
+
+  it("falls back to the devnet default before the chain config loads", () => {
+    const db = new StateDb(join(mkdtempSync(join(tmpdir(), "satrush-fee2-")), "t.db"));
+    const pnl = new Pnl(db); // no deps
+    seedDeploy(db, 11, 100, null, "landed");
+    pnl.refreshDaily();
+    expect(
+      BigInt(db.queryOne<{ fees_paid: string }>("SELECT fees_paid FROM pnl_daily")!.fees_paid),
+    ).toBe(usdToBase(8));
     db.close();
   });
 });

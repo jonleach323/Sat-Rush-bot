@@ -24,8 +24,28 @@ export interface RoundReconciliation {
   realizedUsd: bigint;
 }
 
+/** Devnet-measured deploy legs (strike+epoch+one_btc+protocol) — the fallback
+ * used only before the on-chain SatrushConfig has been read. */
+export const DEFAULT_DEPLOY_FEE_BPS = 800;
+
+export interface PnlDeps {
+  /** Live deploy-fee bps from the on-chain SatrushConfig. */
+  deployFeeBps?: () => number;
+}
+
 export class Pnl {
-  constructor(private readonly db: StateDb) {}
+  constructor(
+    private readonly db: StateDb,
+    private readonly deps: PnlDeps = {},
+  ) {}
+
+  /** Deploy-fee bps to attribute, from chain when available. */
+  private deployFeeBps(): number {
+    const bps = this.deps.deployFeeBps?.();
+    return Number.isFinite(bps) && (bps as number) >= 0
+      ? (bps as number)
+      : DEFAULT_DEPLOY_FEE_BPS;
+  }
 
   /** Gross USD deployed today (fired/landed/dry excluded: dry costs nothing). */
   deployedToday(date = utcDate()): bigint {
@@ -37,10 +57,29 @@ export class Pnl {
     return toBig(row?.total ?? "0");
   }
 
+  /**
+   * USD returned for deploys made on `date`, attributed to the DEPLOY's day
+   * rather than the settlement's.
+   *
+   * Rounds are ~70s, so a deploy at 23:59:5x settles into the next UTC day.
+   * Filtering settlements by their own timestamp splits a round across two days:
+   * the cost lands on day 1 and the return on day 2. That makes day 2 open with
+   * a phantom credit, so realizedLossToday() under-reports and the daily loss
+   * cap silently permits an overshoot equal to the carryover. (Same
+   * midnight-boundary class of bug as the false wallet-drift halt.)
+   *
+   * Settlements with no matching deploy row fall back to their own date so
+   * nothing is silently dropped from every day.
+   */
   returnedToday(date = utcDate()): bigint {
     const row = this.db.queryOne<{ total: string | null }>(
-      `SELECT COALESCE(SUM(CAST(won_usd AS INTEGER)), 0) AS total
-       FROM settlements WHERE date(created_at) = ?`,
+      `SELECT COALESCE(SUM(CAST(s.won_usd AS INTEGER)), 0) AS total
+       FROM settlements s
+       WHERE COALESCE(
+               (SELECT date(MIN(d.created_at)) FROM my_deploys d
+                 WHERE d.round_id = s.round_id AND d.status IN ('fired','landed')),
+               date(s.created_at)
+             ) = ?`,
       date,
     );
     return toBig(row?.total ?? "0");
@@ -83,9 +122,10 @@ export class Pnl {
   }
 
   /**
-   * Recompute and persist today's pnl_daily row. fees_paid is the deploy-leg
-   * estimate (800 bps of gross — see docs/devnet-findings.md); exact per-leg
-   * accounting can replace it once fee sweeps are attributed per deploy.
+   * Recompute and persist today's pnl_daily row. fees_paid applies the LIVE
+   * deploy-leg bps read from the on-chain SatrushConfig (falling back to the
+   * devnet-measured 800 only before that config has loaded) — hardcoding 800
+   * would silently misreport the fee column if mainnet legs differ.
    */
   refreshDaily(date = utcDate()): void {
     const deployed = this.deployedToday(date);
@@ -94,7 +134,7 @@ export class Pnl {
       deployed,
       returned,
       net: returned - deployed,
-      feesPaid: (deployed * 800n) / 10_000n,
+      feesPaid: (deployed * BigInt(Math.round(this.deployFeeBps()))) / 10_000n,
     });
   }
 
