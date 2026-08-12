@@ -421,17 +421,35 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.5),
     ),
-    /** Enter the epoch draw only within this many slots of the window closing
-     * (buy late, after the field's hashrate is committed). */
+    /** Absolute FLOOR for the epoch entry window, in slots. Mainnet iterations
+     * run for hours, so the fraction below is what actually sets the window;
+     * this floor only matters on short (devnet) iterations. The old default of
+     * 10 slots (~4s) against a multi-hour iteration was narrower than the 5s
+     * poll interval — the window was simply stepped over and the vault never
+     * entered. */
     VAULT_EPOCH_LATE_SLOTS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(10),
+      z.coerce.number().int().positive().default(600),
+    ),
+    /** Fraction of the epoch iteration treated as the "late" entry window.
+     * 0.02 of a ~3.5h iteration ≈ 4 minutes — dozens of poll ticks, while the
+     * field's hashrate is already committed. */
+    VAULT_EPOCH_LATE_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.02),
     ),
     /** Enter the 1-BTC draw only once the vault is at least this full (bps of the
      * trigger threshold) — near-trigger, so the entrant field is visible. */
     VAULT_ONE_BTC_MIN_FILL_BPS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(0).max(10_000).default(8000),
+    ),
+    /** BTC that triggers the 1-BTC draw. The program hardcodes 1 BTC and the
+     * IDL exposes no constant for it, so it lives here — a config edit is the
+     * escape hatch if the game ever changes the threshold. */
+    VAULT_ONE_BTC_TARGET_BTC: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().positive().default(1),
     ),
     /** Self-crank draws (trigger + epoch winner selection) when the owner's
      * crank is absent, so our winnings become claimable. Claiming always runs;

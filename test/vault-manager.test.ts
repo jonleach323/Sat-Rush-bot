@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   VaultManager,
   epochEntryReady,
+  epochLateWindowSlots,
   oneBtcEntryReady,
+  oneBtcFillBps,
   type EpochReadState,
   type OneBtcReadState,
   type VaultManagerOpts,
@@ -20,14 +22,30 @@ const epoch = (over: Partial<EpochReadState> = {}): EpochReadState => ({
   ...over,
 });
 
+const ONE_BTC = 100_000_000; // 1 BTC at 8dp — the program's draw trigger
+
 const oneBtc = (over: Partial<OneBtcReadState> = {}): OneBtcReadState => ({
   iterationId: 19,
   open: true,
   totalTickets: 0,
   poolValueUsd: 100_000,
-  btcAmount: 1_400_000,
-  reservedBtc: 1_500_000,
+  prizeBtc: 93_000_000, // 0.93 BTC accrued
+  targetBtc: ONE_BTC,
   ...over,
+});
+
+describe("epochLateWindowSlots", () => {
+  it("scales with the iteration so a multi-hour window is not 4 seconds wide", () => {
+    // A ~3.5h mainnet iteration at 2% ≈ 637 slots (~4 min), not the 10-slot floor.
+    expect(epochLateWindowSlots(31_875, 10, 0.02)).toBe(638);
+  });
+  it("falls back to the absolute floor on short iterations", () => {
+    expect(epochLateWindowSlots(1000, 600, 0.02)).toBe(600); // 20 scaled < 600 floor
+  });
+  it("tolerates degenerate inputs", () => {
+    expect(epochLateWindowSlots(0, 600, 0.02)).toBe(600);
+    expect(epochLateWindowSlots(-5, 600, -1)).toBe(600);
+  });
 });
 
 describe("epochEntryReady", () => {
@@ -36,21 +54,42 @@ describe("epochEntryReady", () => {
     expect(epochEntryReady(epoch(), 1995, 10)).toBe(true); // 5 slots left
     expect(epochEntryReady(epoch(), 1990, 10)).toBe(true); // exactly 10 left
     expect(epochEntryReady(epoch(), 1900, 10)).toBe(false); // 100 left — too early
-    expect(epochEntryReady(epoch(), 2001, 10)).toBe(false); // past close
+  });
+  it("still enters past nominal close while the iteration is Open", () => {
+    // The window closing only makes the draw ELIGIBLE; until someone cranks it
+    // tickets still count, and the field is maximally visible.
+    expect(epochEntryReady(epoch(), 2001, 10)).toBe(true);
+    expect(epochEntryReady(epoch(), 9999, 10)).toBe(true);
   });
   it("false when the iteration is not open", () => {
     expect(epochEntryReady(epoch({ open: false }), 1995, 10)).toBe(false);
+    expect(epochEntryReady(epoch({ open: false }), 2001, 10)).toBe(false);
+  });
+});
+
+describe("oneBtcFillBps", () => {
+  it("measures fill against the draw target, not the unclaimed escrow", () => {
+    expect(oneBtcFillBps(60_500_000, ONE_BTC)).toBe(6050); // 0.605 BTC → 60.5%
+    expect(oneBtcFillBps(ONE_BTC, ONE_BTC)).toBe(10_000);
+  });
+  it("returns 0 rather than dividing by an unknown target", () => {
+    expect(oneBtcFillBps(60_500_000, 0)).toBe(0);
   });
 });
 
 describe("oneBtcEntryReady", () => {
   it("true once filled past the threshold", () => {
-    expect(oneBtcEntryReady(oneBtc(), 8000)).toBe(true); // 1.4M/1.5M ≈ 93%
-    expect(oneBtcEntryReady(oneBtc({ btcAmount: 100_000 }), 8000)).toBe(false); // ~7%
+    expect(oneBtcEntryReady(oneBtc(), 8000)).toBe(true); // 0.93 BTC → 93%
+    expect(oneBtcEntryReady(oneBtc({ prizeBtc: 60_500_000 }), 8000)).toBe(false); // 60.5%
   });
-  it("false when closed or trigger unknown", () => {
+  it("false when closed or the target is unknown", () => {
     expect(oneBtcEntryReady(oneBtc({ open: false }), 8000)).toBe(false);
-    expect(oneBtcEntryReady(oneBtc({ reservedBtc: 0 }), 8000)).toBe(false);
+    expect(oneBtcEntryReady(oneBtc({ targetBtc: 0 }), 8000)).toBe(false);
+  });
+  it("a zero unclaimed-escrow balance no longer blocks entry", () => {
+    // Regression: fill used to be prizeBtc/reserved_btc_amount, and that escrow
+    // is 0 while the vault accumulates — so this path never opened.
+    expect(oneBtcEntryReady(oneBtc({ prizeBtc: ONE_BTC }), 8000)).toBe(true);
   });
 });
 
@@ -66,6 +105,7 @@ function makeManager(state: VaultReadState, over: Partial<VaultManagerOpts> = {}
     engine,
     readState: async () => state,
     epochLateSlots: 10,
+    epochLateFraction: 0,
     oneBtcMinFillBps: 8000,
     pollMs: 1000,
     killSwitchEngaged: () => false,

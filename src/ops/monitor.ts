@@ -100,6 +100,12 @@ export interface VaultJson {
   };
   /** Live on-chain pool state; null until the vault manager's first poll. */
   pools: VaultPoolsJson | null;
+  /**
+   * What a raw hashrate unit is worth right now, and where that came from.
+   * `derived` = priced off live vault pools; `config` = operator override;
+   * `none` = no open vault, so earned hashrate is currently credited at zero.
+   */
+  hashrateValue: { usdPerRawUnit: number; source: "derived" | "config" | "none" };
   recent: Record<string, unknown>[];
 }
 
@@ -139,6 +145,8 @@ export interface MonitorContext {
   ticketPriceHashrate: number;
   /** Latest on-chain vault pool state, cached by the vault manager poll. */
   vaultPools: () => VaultPoolsJson | null;
+  /** Live price of a raw hashrate unit, as fed to the deploy EV. */
+  hashrateValue: () => VaultJson["hashrateValue"];
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -286,6 +294,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         oneBtc: { ticketsBought: o.tickets, iterationsPlayed: o.iters, iterationsClaimed: o.claimed },
         economics: economics(),
         pools: ctx.vaultPools(),
+        hashrateValue: ctx.hashrateValue(),
         recent: ctx.db.query(
           "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
         ),

@@ -30,10 +30,15 @@ export interface OneBtcReadState {
   open: boolean;
   totalTickets: number;
   poolValueUsd: number;
-  /** Current accumulated BTC (base units). */
-  btcAmount: number;
-  /** BTC needed to trigger a draw (base units). */
-  reservedBtc: number;
+  /**
+   * Prize actually up for grabs (base units): the vault's accrued BTC minus
+   * anything already reserved for a prior winner who has not yet claimed.
+   * NOT OneBtcVault.reserved_btc_amount — that field is the unclaimed-prize
+   * escrow, which is 0 while a round is accumulating.
+   */
+  prizeBtc: number;
+  /** BTC that triggers the draw (base units) — the program's 1 BTC threshold. */
+  targetBtc: number;
 }
 
 export interface VaultReadState {
@@ -42,24 +47,57 @@ export interface VaultReadState {
   oneBtc: OneBtcReadState | null;
 }
 
-/** Epoch entry window: open AND within `lateSlots` of the window closing. */
+/**
+ * How wide the epoch entry window should be, in slots.
+ *
+ * An absolute slot count alone is a trap: mainnet iterations run for hours
+ * (tens of thousands of slots), so a fixed 10-slot window is ~4 seconds wide
+ * and a 5s poll simply steps over it — the vault never enters at all. Scale
+ * with the iteration instead, and keep the absolute value as a floor so short
+ * (devnet) iterations still get a usable window.
+ */
+export function epochLateWindowSlots(
+  iterationDurationSlots: number,
+  floorSlots: number,
+  fraction: number,
+): number {
+  const scaled = Math.ceil(Math.max(0, iterationDurationSlots) * Math.max(0, fraction));
+  return Math.max(floorSlots, scaled);
+}
+
+/**
+ * Epoch entry window: open AND within `lateSlots` of the window closing.
+ *
+ * Past-due-but-still-Open counts. The window closing only makes the iteration
+ * *eligible* for a draw; until someone cranks it, it stays Open and tickets
+ * still count — and that is the single most informed moment to buy, because
+ * the field is fully committed. Requiring slotsRemaining >= 0 threw that away.
+ */
 export function epochEntryReady(e: EpochReadState, slot: number, lateSlots: number): boolean {
   if (!e.open) return false;
   const closeSlot = e.lastTriggerSlot + e.iterationDurationSlots;
-  const slotsRemaining = closeSlot - slot;
-  return slotsRemaining >= 0 && slotsRemaining <= lateSlots;
+  return closeSlot - slot <= lateSlots;
+}
+
+/** Vault fill toward the draw trigger, in bps. 0 when the target is unknown. */
+export function oneBtcFillBps(prizeBtc: number, targetBtc: number): number {
+  if (!(targetBtc > 0)) return 0;
+  return Math.round((prizeBtc / targetBtc) * 10_000);
 }
 
 /** 1-BTC entry: open AND filled to at least `minFillBps` of the trigger. */
 export function oneBtcEntryReady(o: OneBtcReadState, minFillBps: number): boolean {
-  if (!o.open || o.reservedBtc <= 0) return false;
-  return (o.btcAmount / o.reservedBtc) * 10_000 >= minFillBps;
+  if (!o.open || o.targetBtc <= 0) return false;
+  return oneBtcFillBps(o.prizeBtc, o.targetBtc) >= minFillBps;
 }
 
 export interface VaultManagerOpts {
   engine: VaultEngine;
   readState: () => Promise<VaultReadState>;
+  /** Absolute floor for the epoch entry window (see epochLateWindowSlots). */
   epochLateSlots: number;
+  /** Fraction of the iteration to treat as "late" — the real driver on mainnet. */
+  epochLateFraction: number;
   oneBtcMinFillBps: number;
   pollMs: number;
   killSwitchEngaged: () => boolean;
@@ -96,7 +134,18 @@ export class VaultManager {
       return;
     }
 
-    if (state.epoch && epochEntryReady(state.epoch, state.slot, this.opts.epochLateSlots)) {
+    if (
+      state.epoch &&
+      epochEntryReady(
+        state.epoch,
+        state.slot,
+        epochLateWindowSlots(
+          state.epoch.iterationDurationSlots,
+          this.opts.epochLateSlots,
+          this.opts.epochLateFraction,
+        ),
+      )
+    ) {
       await this.evaluate("epoch", state.epoch);
     }
     if (state.oneBtc && oneBtcEntryReady(state.oneBtc, this.opts.oneBtcMinFillBps)) {

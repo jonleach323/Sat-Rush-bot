@@ -49,7 +49,7 @@ import {
   satsVaultPda,
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
-import { VaultManager, type VaultReadState } from "./exec/vault-manager.js";
+import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
 import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
 import {
   epochAction,
@@ -225,6 +225,12 @@ export class Orchestrator {
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
       vaultPools: () => this.vaultPoolCache,
+      hashrateValue: () => {
+        const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
+        const source =
+          cfg.HASHRATE_VALUE_USD > 0 ? "config" : usdPerRawUnit > 0 ? "derived" : "none";
+        return { usdPerRawUnit, source };
+      },
     });
   }
 
@@ -622,11 +628,38 @@ export class Orchestrator {
       semantics: this.cfg.STAKE_SEMANTICS,
       hashrate: {
         streak: this.state.miner?.current_streak_count ?? 1,
-        valueUsdPerRawUnit: this.cfg.HASHRATE_VALUE_USD,
+        valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
         multiplier: this.strikeBonusMultiplier(),
       },
       strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /**
+   * What one RAW hashrate unit is worth in USD, right now.
+   *
+   * Hashrate has exactly one sink: vault tickets. So its marginal value is the
+   * best marginal ticket EV currently on offer, divided by the raw units a
+   * ticket costs. Deriving it live instead of reading a constant is what makes
+   * the deploy-side hashrate credit work at all — HASHRATE_VALUE_USD defaults
+   * to 0, so every deploy has been priced as though the hashrate it earns were
+   * worthless.
+   *
+   * Only OPEN vaults count: value we cannot currently enter is not value. An
+   * explicitly configured HASHRATE_VALUE_USD wins, so the operator can always
+   * override the derivation; 0 (the default) means "derive it".
+   */
+  private hashrateValueUsdPerRawUnit(): number {
+    if (this.cfg.HASHRATE_VALUE_USD > 0) return this.cfg.HASHRATE_VALUE_USD;
+    if (!this.cfg.VAULT_STRATEGY_ENABLED) return 0;
+    const pools = this.vaultPoolCache;
+    if (!pools) return 0;
+    const perTicket = Math.max(
+      pools.epoch?.open ? pools.epoch.ticketEvUsd : 0,
+      pools.oneBtc?.open ? pools.oneBtc.ticketEvUsd : 0,
+    );
+    if (!(perTicket > 0)) return 0;
+    return perTicket / this.cfg.VAULT_HASHRATE_PER_TICKET;
   }
 
   /** Current post-Sat-Strike hashrate promo multiplier (1 outside the window). */
@@ -1081,6 +1114,9 @@ export class Orchestrator {
     const iterationDurationSlots = Number(
       this.state.satrushConfig!.epoch_vault_iteration_duration.toString(),
     );
+    const oneBtcTargetBase = Math.round(
+      this.cfg.VAULT_ONE_BTC_TARGET_BTC * 10 ** btcDecimals,
+    );
     const num = (v: { toString(): string }) => Number(v.toString());
 
     const engine = new VaultEngine({
@@ -1154,14 +1190,18 @@ export class Orchestrator {
         );
         if (itInfo) {
           const it = decodeAccount<OneBtcVaultIteration>("OneBtcVaultIteration", itInfo.data);
+          // The prize is the ACCRUED balance, less anything already escrowed for
+          // a prior winner who hasn't claimed. reserved_btc_amount alone is that
+          // escrow — 0 while a round accumulates — so using it as the prize made
+          // ticket EV identically 0 and the bot never entered this vault at all.
+          const prizeBtc = Math.max(0, num(obv.btc_amount) - num(obv.reserved_btc_amount));
           oneBtc = {
             iterationId: obv.iteration_id,
             open: "Open" in it.state,
             totalTickets: num(it.total_tickets),
-            // prize ≈ the reserve paid to the winner at the trigger
-            poolValueUsd: btcBaseToUsd(num(obv.reserved_btc_amount), btcDecimals, btcUsd()),
-            btcAmount: num(obv.btc_amount),
-            reservedBtc: num(obv.reserved_btc_amount),
+            poolValueUsd: btcBaseToUsd(prizeBtc, btcDecimals, btcUsd()),
+            prizeBtc,
+            targetBtc: oneBtcTargetBase,
           };
         }
       }
@@ -1201,10 +1241,7 @@ export class Orchestrator {
           open: oneBtc.open,
           totalTickets: oneBtc.totalTickets,
           prizeUsd: oneBtc.poolValueUsd,
-          fillBps:
-            oneBtc.reservedBtc > 0
-              ? Math.round((oneBtc.btcAmount / oneBtc.reservedBtc) * 10_000)
-              : 0,
+          fillBps: oneBtcFillBps(oneBtc.prizeBtc, oneBtc.targetBtc),
           ticketEvUsd: ticketEv("one_btc", oneBtc.poolValueUsd, oneBtc.totalTickets, 0),
         },
       };
@@ -1215,6 +1252,7 @@ export class Orchestrator {
       engine,
       readState,
       epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
+      epochLateFraction: this.cfg.VAULT_EPOCH_LATE_FRACTION,
       oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,
       pollMs: 5_000,
       killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
