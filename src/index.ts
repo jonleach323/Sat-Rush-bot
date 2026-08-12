@@ -188,6 +188,7 @@ export class Orchestrator {
       {
         solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
         usdcFloorBaseUnits: usdToBase(cfg.MAX_PER_ROUND_USD),
+        slotLagThreshold: cfg.SLOT_LAG_ALERT_SLOTS,
       },
     );
 
@@ -213,6 +214,14 @@ export class Orchestrator {
       },
       btcUsdEstimate: () => this.prices.btcUsd(),
       priceStatus: () => this.prices.status(),
+      slotLag: () => {
+        const s = this.health.lastSlotLag();
+        const fresh = s !== null && Date.now() - s.atMs <= cfg.SNAPSHOT_LAG_MAX_AGE_MS;
+        return {
+          lagSlots: fresh ? s.lagSlots : null,
+          blocking: fresh && s.lagSlots > cfg.MAX_SNAPSHOT_LAG_SLOTS,
+        };
+      },
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
       vaultPools: () => this.vaultPoolCache,
@@ -786,6 +795,26 @@ export class Orchestrator {
     if (this.botState !== "ARMED" || this.fireInFlight || this.roundId === null) return;
     if (this.source.stale()) {
       this.skipOnce("stale_ingest", { ageMs: this.source.lastUpdateAgeMs("slots") });
+      return;
+    }
+    // Lagging-but-alive stream. stale() only catches SILENCE; a stream still
+    // delivering on time from N slots behind head passes it. slotsToCutoff() is
+    // derived from that lagged slot, so we would believe the round has N more
+    // slots of life and fire into a closed one — paying fee + tip for a 6005,
+    // off a board we are mispricing. Fails open on a missing/old measurement:
+    // that means the reference RPC is unreachable, which stale() already
+    // covers, and failing closed would park the bot indefinitely.
+    const lag = this.health.lastSlotLag();
+    if (
+      lag !== null &&
+      Date.now() - lag.atMs <= this.cfg.SNAPSHOT_LAG_MAX_AGE_MS &&
+      lag.lagSlots > this.cfg.MAX_SNAPSHOT_LAG_SLOTS
+    ) {
+      this.skipOnce("snapshot_lagging", {
+        lagSlots: lag.lagSlots,
+        max: this.cfg.MAX_SNAPSHOT_LAG_SLOTS,
+        measuredAgeMs: Date.now() - lag.atMs,
+      });
       return;
     }
     if (this.paused) {

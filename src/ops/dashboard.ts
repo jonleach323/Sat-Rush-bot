@@ -180,8 +180,15 @@ function render(s, rounds, deploys, comp, health, vault, pnl) {
   pill("round", "round "+(s.round.id??"?")+" · "+(s.round.state??"—")+" · cutoff "+(s.round.slotsToCutoff??"—"), "accent");
   el("kill").style.display = s.killSwitch?"":"none";
   el("paused").style.display = s.paused?"":"none";
-  const ing = el("ingest"); ing.className="pill "+(s.ingest.fresh?"ok":"bad");
-  ing.innerHTML = '<span class="dot '+(s.ingest.fresh?"ok":"bad")+'"></span>'+(s.ingest.fresh?"ingest live":"STALE "+s.ingest.slotAgeMs+"ms");
+  // A lagging stream is NOT a stale one: it keeps arriving on time from behind
+  // head, so it looks healthy while blocking fires. Show it as its own state.
+  const lagging = s.ingest.lagBlocking;
+  const ingOk = s.ingest.fresh && !lagging;
+  const ing = el("ingest"); ing.className="pill "+(ingOk?"ok":lagging?"warn":"bad");
+  ing.innerHTML = '<span class="dot '+(ingOk?"ok":"bad")+'"></span>'+(
+    !s.ingest.fresh ? "STALE "+s.ingest.slotAgeMs+"ms"
+    : lagging ? "LAGGING "+s.ingest.lagSlots+" slots — not firing"
+    : "ingest live"+(s.ingest.lagSlots!=null?" · lag "+s.ingest.lagSlots:""));
 
   const net = s.pnl.todayNetUsd;
   el("hero").innerHTML = [

@@ -17,7 +17,15 @@ export interface StatusJson {
   mode: string;
   paused: boolean;
   killSwitch: boolean;
-  ingest: { fresh: boolean; slotAgeMs: number; source: string };
+  ingest: {
+    fresh: boolean;
+    slotAgeMs: number;
+    source: string;
+    /** Snapshot-vs-head lag in slots; null if not measured recently. */
+    lagSlots: number | null;
+    /** True when lag alone is blocking fires (stream alive but behind). */
+    lagBlocking: boolean;
+  };
   round: {
     id: number | null;
     state: string | null;
@@ -124,6 +132,8 @@ export interface MonitorContext {
   btcUsdEstimate: () => number;
   /** Full oracle status (both symbols + live flags) for the status payload. */
   priceStatus: () => PriceStatus;
+  /** Snapshot-vs-head lag, and whether it is currently gating fires. */
+  slotLag: () => { lagSlots: number | null; blocking: boolean };
   vaultEnabled: boolean;
   /** Raw hashrate units per vault ticket — converts tickets bought into spend. */
   ticketPriceHashrate: number;
@@ -158,6 +168,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
       const miner = ctx.state.miner;
       const mine = myTilesThisRound(roundId);
       const dailyLoss = ctx.pnl.realizedLossToday();
+      const lag = ctx.slotLag();
       return {
         ts: new Date().toISOString(),
         mode: ctx.mode,
@@ -167,6 +178,8 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
           fresh: !ctx.source.stale(),
           slotAgeMs: Math.round(ctx.source.lastUpdateAgeMs("slots")),
           source: ctx.ingestSourceName,
+          lagSlots: lag.lagSlots,
+          lagBlocking: lag.blocking,
         },
         round: {
           id: roundId,

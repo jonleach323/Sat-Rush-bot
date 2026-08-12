@@ -41,14 +41,30 @@ export interface HealthMonitorOptions {
   now?: (() => number) | undefined;
 }
 
+/** Most recent snapshot-vs-head lag sample, with when it was taken. */
+export interface SlotLagSample {
+  lagSlots: number;
+  atMs: number;
+}
+
 export class HealthMonitor {
   private readonly lastAlerted = new Map<HealthIssueKey, number>();
   private timer: NodeJS.Timeout | null = null;
+  private slotLag: SlotLagSample | null = null;
 
   constructor(
     private readonly deps: HealthDeps,
     private readonly opts: HealthMonitorOptions,
   ) {}
+
+  /**
+   * Last measured snapshot lag, or null if never measured / the reference RPC
+   * is unreachable. Read by the fire path: measuring on demand would cost an
+   * RPC round-trip in the hot path, which is itself worth slots.
+   */
+  lastSlotLag(): SlotLagSample | null {
+    return this.slotLag;
+  }
 
   /** Run all checks; alert (debounced) on each active issue. */
   async check(): Promise<HealthIssue[]> {
@@ -61,9 +77,11 @@ export class HealthMonitor {
       });
     }
 
+    const now = this.opts.now ?? Date.now;
     try {
       const rpcSlot = await this.deps.rpcSlot();
       const lag = rpcSlot - this.deps.snapshotSlot();
+      this.slotLag = { lagSlots: lag, atMs: now() };
       const threshold = this.opts.slotLagThreshold ?? 30;
       if (lag > threshold) {
         issues.push({
@@ -72,7 +90,9 @@ export class HealthMonitor {
         });
       }
     } catch {
-      /* RPC check failure is itself covered by staleness */
+      // Reference RPC unreachable — drop the sample rather than let the fire
+      // gate act on a stale one. Stream death is covered by staleness.
+      this.slotLag = null;
     }
 
     try {
@@ -106,7 +126,6 @@ export class HealthMonitor {
       issues.push({ key: "db_write_error", message: `DB write failure: ${dbError}` });
     }
 
-    const now = this.opts.now ?? Date.now;
     const debounce = this.opts.debounceMs ?? 5 * 60_000;
     for (const issue of issues) {
       const last = this.lastAlerted.get(issue.key);

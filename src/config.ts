@@ -277,6 +277,33 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().positive().default(1500),
     ),
+    /** Alert when the snapshot trails chain head by more than this many slots.
+     * Warning only — see MAX_SNAPSHOT_LAG_SLOTS for the firing gate. */
+    SLOT_LAG_ALERT_SLOTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(30),
+    ),
+    /** Refuse to fire when the snapshot trails chain head by more than this.
+     * STALENESS_MS only catches a stream that goes QUIET; a stream that keeps
+     * delivering on time but N slots behind head reads as perfectly fresh. That
+     * is the dangerous case: slotsToCutoff() is computed from the lagged slot,
+     * so the bot believes it has N more slots than it does and fires into an
+     * already-closed round — paying priority fee and Jito tip for a 6005, on a
+     * board it is mispricing anyway. Rounds are ~50 slots and healthy lag is
+     * 0-2, so 10 leaves wide headroom for measurement noise while still
+     * catching a real degradation. */
+    MAX_SNAPSHOT_LAG_SLOTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(10),
+    ),
+    /** How stale a lag measurement may be before the gate ignores it (ms). The
+     * gate fails OPEN past this: a missing measurement means the reference RPC
+     * is unreachable, which stream staleness already covers, and blocking on it
+     * would silently park the bot forever. */
+    SNAPSHOT_LAG_MAX_AGE_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(30_000),
+    ),
 
     /** Self-settle our deployments after reveal (rent refund to the cranker). */
     SELF_SETTLE: boolFromEnv(true),

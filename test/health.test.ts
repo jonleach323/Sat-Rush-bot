@@ -94,6 +94,52 @@ describe("HealthMonitor", () => {
     expect(alerts).toHaveLength(2);
   });
 
+  // The fire gate reads lastSlotLag() instead of measuring on demand, so these
+  // are what stand between a lagging-but-alive stream and a 6005.
+  describe("lastSlotLag", () => {
+    it("is null before the first measurement", () => {
+      const { deps } = makeDeps();
+      expect(new HealthMonitor(deps, { solFloorLamports: 0 }).lastSlotLag()).toBeNull();
+    });
+
+    it("records the lag and its timestamp on every check, below threshold too", async () => {
+      let t = 5_000;
+      const { deps } = makeDeps({ rpcSlot: async () => 1038 });
+      const monitor = new HealthMonitor(deps, { solFloorLamports: 0, now: () => t });
+      await monitor.check();
+      expect(monitor.lastSlotLag()).toEqual({ lagSlots: 38, atMs: 5_000 });
+
+      // A healthy lag must still refresh the sample, or the gate would act on
+      // an old bad reading long after recovery.
+      t = 15_000;
+      deps.rpcSlot = async () => 1001;
+      await monitor.check();
+      expect(monitor.lastSlotLag()).toEqual({ lagSlots: 1, atMs: 15_000 });
+    });
+
+    it("drops the sample when the reference RPC is unreachable", async () => {
+      const { deps } = makeDeps({ rpcSlot: async () => 1038 });
+      const monitor = new HealthMonitor(deps, { solFloorLamports: 0 });
+      await monitor.check();
+      expect(monitor.lastSlotLag()?.lagSlots).toBe(38);
+
+      deps.rpcSlot = async () => {
+        throw new Error("rpc down");
+      };
+      await monitor.check();
+      // Null, not the stale 38 — the gate fails open rather than on old data.
+      expect(monitor.lastSlotLag()).toBeNull();
+    });
+
+    it("records a negative lag when the snapshot is ahead of the reference", async () => {
+      // Normal at 'processed': the stream can legitimately lead a polled RPC.
+      const { deps } = makeDeps({ rpcSlot: async () => 998 });
+      const monitor = new HealthMonitor(deps, { solFloorLamports: 0 });
+      await monitor.check();
+      expect(monitor.lastSlotLag()?.lagSlots).toBe(-2);
+    });
+  });
+
   it("survives RPC failures without alert storms", async () => {
     const { deps, alerts } = makeDeps({
       rpcSlot: async () => {

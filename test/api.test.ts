@@ -8,7 +8,7 @@ const fakeData: MonitorData = {
     mode: "dry",
     paused: false,
     killSwitch: false,
-    ingest: { fresh: true, slotAgeMs: 100, source: "ws-rpc" },
+    ingest: { fresh: true, slotAgeMs: 100, source: "ws-rpc", lagSlots: 1, lagBlocking: false },
     round: { id: 42, state: "Active", slotsToCutoff: 30, currentSlot: 1000 },
     board: { tileStakesUsd: new Array(21).fill(0), totalUsd: 0, strikePoolUsd: 5 },
     me: { streak: 3, tiles: [0, 1], stakeUsd: 2 },
