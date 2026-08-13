@@ -217,9 +217,13 @@ export class Orchestrator {
       slotLag: () => {
         const s = this.health.lastSlotLag();
         const fresh = s !== null && Date.now() - s.atMs <= cfg.SNAPSHOT_LAG_MAX_AGE_MS;
+        const budget = Math.min(
+          cfg.MAX_SNAPSHOT_LAG_SLOTS,
+          Math.max(1, this.currentFireOffset() - 1),
+        );
         return {
           lagSlots: fresh ? s.lagSlots : null,
-          blocking: fresh && s.lagSlots > cfg.MAX_SNAPSHOT_LAG_SLOTS,
+          blocking: fresh && s.lagSlots > budget,
         };
       },
       vaultEnabled: cfg.VAULT_STRATEGY_ENABLED,
@@ -806,6 +810,19 @@ export class Orchestrator {
       return;
     }
 
+    // Keep the pre-signed candidates warm off the SLOT tick, not just off
+    // occupancy updates. On a quiet round — the field commits at open and
+    // nothing moves after — no occupancy update ever arrives, so the candidate
+    // built at round open is the one we fire 150 slots later. That is exactly
+    // the Solana blockhash lifetime, which is how a hot candidate turns into
+    // blockhash_expired at the moment it matters.
+    if (
+      (this.botState === "ROUND_OPEN" || this.botState === "ARMED") &&
+      this.candidates.needsBlockhashRefresh()
+    ) {
+      void this.refreshCandidates("blockhash_aging");
+    }
+
     if (this.botState === "ROUND_OPEN") {
       const cutoff = this.state.slotsToCutoff();
       if (cutoff !== null && cutoff <= this.currentFireOffset()) {
@@ -834,19 +851,30 @@ export class Orchestrator {
     // Lagging-but-alive stream. stale() only catches SILENCE; a stream still
     // delivering on time from N slots behind head passes it. slotsToCutoff() is
     // derived from that lagged slot, so we would believe the round has N more
-    // slots of life and fire into a closed one — paying fee + tip for a 6005,
-    // off a board we are mispricing. Fails open on a missing/old measurement:
-    // that means the reference RPC is unreachable, which stale() already
-    // covers, and failing closed would park the bot indefinitely.
+    // slots of life and fire into a closed one — paying the priority fee for a
+    // 6005, off a board we are mispricing. Fails open on a missing/old
+    // measurement: that means the reference RPC is unreachable, which stale()
+    // already covers, and failing closed would park the bot indefinitely.
+    //
+    // The tolerance is tied to the FIRE OFFSET, not to a fixed constant. We
+    // fire `offset` slots before the cutoff, so any lag at or above the offset
+    // means the round is already over by the time we believe we are early —
+    // a flat threshold wider than the offset (the config value) would wave
+    // through exactly the lag that guarantees a miss.
     const lag = this.health.lastSlotLag();
+    const lagBudget = Math.min(
+      this.cfg.MAX_SNAPSHOT_LAG_SLOTS,
+      Math.max(1, this.currentFireOffset() - 1),
+    );
     if (
       lag !== null &&
       Date.now() - lag.atMs <= this.cfg.SNAPSHOT_LAG_MAX_AGE_MS &&
-      lag.lagSlots > this.cfg.MAX_SNAPSHOT_LAG_SLOTS
+      lag.lagSlots > lagBudget
     ) {
       this.skipOnce("snapshot_lagging", {
         lagSlots: lag.lagSlots,
-        max: this.cfg.MAX_SNAPSHOT_LAG_SLOTS,
+        budget: lagBudget,
+        fireOffset: this.currentFireOffset(),
         measuredAgeMs: Date.now() - lag.atMs,
       });
       return;

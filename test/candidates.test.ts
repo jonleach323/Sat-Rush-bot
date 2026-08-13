@@ -159,6 +159,56 @@ describe("CandidateSet", () => {
     expect(rebuilt[0]!.blockhash).not.toBe("");
   });
 
+  // Mainnet rounds are 150 slots and a Solana blockhash expires after exactly
+  // 150 blocks. On a quiet round no occupancy update arrives, so nothing calls
+  // refresh() and the candidate built at open is fired at the expiry boundary.
+  // The slot tick uses this to drive the rebuild instead.
+  describe("needsBlockhashRefresh", () => {
+    it("is false while the cached blockhash is inside its reuse window", async () => {
+      const { conn } = mockConnection();
+      let t = 0;
+      const set = new CandidateSet({
+        connection: conn,
+        payer: Keypair.generate(),
+        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+        feeEstimator,
+        computeUnitLimit: 400_000,
+        blockhashMaxAgeMs: 15_000,
+        now: () => t,
+      });
+      await set.refresh(1, chaseCtx(), selCfg());
+      expect(set.needsBlockhashRefresh()).toBe(false);
+      t += 14_999;
+      expect(set.needsBlockhashRefresh()).toBe(false);
+    });
+
+    it("goes true once the blockhash ages out, and clears after a refresh", async () => {
+      const { conn, blockhashCalls } = mockConnection();
+      let t = 0;
+      const set = new CandidateSet({
+        connection: conn,
+        payer: Keypair.generate(),
+        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+        feeEstimator,
+        computeUnitLimit: 400_000,
+        blockhashMaxAgeMs: 15_000,
+        now: () => t,
+      });
+      await set.refresh(1, chaseCtx(), selCfg());
+      t += 15_001;
+      expect(set.needsBlockhashRefresh()).toBe(true);
+
+      await set.refresh(1, chaseCtx(), selCfg());
+      expect(blockhashCalls()).toBe(2); // actually re-fetched and re-signed
+      expect(set.needsBlockhashRefresh()).toBe(false);
+    });
+
+    it("is false before anything is built — nothing to keep warm", () => {
+      const { conn } = mockConnection();
+      expect(candidateSet(conn).needsBlockhashRefresh()).toBe(false);
+    });
+  });
+
   it("clears on round rotation", async () => {
     const { conn } = mockConnection();
     const set = candidateSet(conn);

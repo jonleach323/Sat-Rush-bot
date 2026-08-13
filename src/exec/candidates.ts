@@ -129,6 +129,23 @@ export class CandidateSet {
   }
 
   /**
+   * True when the cached blockhash has aged past its reuse window, so the next
+   * refresh() will fetch a new one and re-sign.
+   *
+   * Callers need this because refresh() is otherwise driven by occupancy
+   * updates, and a quiet board produces none: mainnet rounds are 150 slots and
+   * a Solana blockhash expires after exactly 150 blocks, so a candidate built
+   * at round open and held to the cutoff is right at the expiry boundary. The
+   * slot tick has to drive the rebuild when the field doesn't.
+   */
+  needsBlockhashRefresh(nowMs?: number): boolean {
+    if (!this.cachedBlockhash) return this.candidates.length > 0;
+    const now = nowMs ?? (this.opts.now ?? Date.now)();
+    const maxAge = this.opts.blockhashMaxAgeMs ?? BLOCKHASH_MAX_AGE_MS;
+    return now - this.cachedBlockhash.fetchedAtMs > maxAge;
+  }
+
+  /**
    * Recompute selections and rebuild signed transactions. Reuses the cached
    * blockhash until it ages past 15s (a fresh fetch re-signs everything).
    */
