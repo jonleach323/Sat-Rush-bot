@@ -9,7 +9,13 @@
  * (slot tick, account update, transaction event). There are no polling
  * loops — the slot stream IS the tick.
  */
-import { Connection, Keypair, PublicKey, type TransactionInstruction } from "@solana/web3.js";
+import {
+  AddressLookupTableAccount,
+  Connection,
+  Keypair,
+  PublicKey,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import bs58 from "bs58";
 import type {
   EpochVault,
@@ -846,6 +852,11 @@ export class Orchestrator {
    * crank can check its reserve without adding an RPC call to the race. */
   private lastKnownLamports: number | null = null;
 
+  /** Settle-crank lookup table, fetched once at boot and refreshed lazily.
+   * Null when unconfigured or unfetchable — the crank still works, it just
+   * packs fewer settles per transaction. */
+  private settleAlt: AddressLookupTableAccount | null = null;
+
   private strikePoolBeforeReveal = 0n;
 
   /** Deployments seen this round, so the settle plan is ready the instant the
@@ -1376,6 +1387,24 @@ export class Orchestrator {
     const targets = this.settleRegistry.targets(roundId);
     if (targets.length === 0) return;
 
+    // Fetch the table once; a miss is not fatal, it only costs batch size.
+    if (this.settleAlt === null && this.cfg.SETTLE_ALT_ADDRESS) {
+      try {
+        const res = await this.connection.getAddressLookupTable(
+          new PublicKey(this.cfg.SETTLE_ALT_ADDRESS),
+        );
+        if (res.value) {
+          this.settleAlt = res.value;
+          this.log.info(
+            { alt: this.cfg.SETTLE_ALT_ADDRESS, addresses: res.value.state.addresses.length },
+            "settle lookup table loaded",
+          );
+        }
+      } catch (err) {
+        this.log.warn({ err: String(err) }, "settle lookup table unavailable — packing fewer per tx");
+      }
+    }
+
     const rentSol = this.cfg.SETTLE_RENT_SOL_ESTIMATE;
     const fee = this.feeEstimator.currentMicroLamportsPerCu();
     const txCostSol = (5_000 + (fee * this.cfg.DEPLOY_CU_LIMIT) / 1e6) / 1e9;
@@ -1410,6 +1439,7 @@ export class Orchestrator {
           computeUnitLimit: Math.min(1_400_000, limits.cuPerSettle * batch.length),
           priorityFeeMicroLamports: fee,
           blockhash: hot,
+          lookupTables: this.settleAlt ? [this.settleAlt] : undefined,
         });
         return this.sender.fire(
           {

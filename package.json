@@ -33,7 +33,8 @@
     "sats-drift": "tsx scripts/sats-drift.ts",
     "settle-rent": "tsx scripts/settle-rent.ts",
     "tile-bias": "tsx scripts/tile-bias.ts",
-    "farming-verdict": "tsx scripts/farming-verdict.ts"
+    "farming-verdict": "tsx scripts/farming-verdict.ts",
+    "create-alt": "tsx scripts/create-alt.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

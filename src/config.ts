@@ -545,6 +545,15 @@ const schema = z
      * ~0.137 SOL/day at current deployment counts. A couple of SOL is
      * therefore a week of total failure, and the floor exists to stop a fee
      * spike or a long losing streak eating the balance the sniper needs. */
+    /** Address lookup table for the settle crank. Empty = none.
+     *
+     * Create with `pnpm create-alt --commit`. Every account it covers costs one
+     * byte in the message rather than thirty-two, and message size is what caps
+     * batch size — so this is what moves packing from ~8 settles per
+     * transaction toward ~25. Re-run the script when the field turns over:
+     * coverage decays as authorities come and go, and an uncovered one silently
+     * costs 4x the bytes. */
+    SETTLE_ALT_ADDRESS: optionalPubkey,
     SETTLE_CRANK_MIN_SOL: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).default(0.5),
