@@ -508,6 +508,35 @@ const schema = z
      * into a board that did not justify it. The streak reset is real, it is
      * just not worth buying at the price of the rounds needed to keep it. Turn
      * on only if the epoch channel gets materially richer than it is today. */
+    /** Settle OTHER players' deployments for the rent bounty.
+     *
+     * settle_deploy_public is permissionless and pays its rent to whoever
+     * cranks — measured at +0.001730 SOL net per deployment, ~116 SOL/day
+     * across the field — and deployment_settle_grace_duration is 0, so it is a
+     * first-to-land race the moment a round resolves.
+     *
+     * OFF by default. It is legitimate (the program pays a bounty for work the
+     * game needs done, and unsettled deployments never pay their owners out),
+     * but the crank currently collecting it is the operator's own, so turning
+     * this on is a decision about that relationship as much as about revenue.
+     * SELF_SETTLE, which only reclaims our own, is separate and unaffected. */
+    SETTLE_CRANK_ENABLED: boolFromEnv(false),
+    /** Settles packed per transaction.
+     *
+     * A collision bound, not a protocol one: a deployment a rival closed first
+     * fails its whole batch, so a lost 20-pack wastes twenty chances where four
+     * 5-packs lose one. The incumbent packs 2.86; the compute budget allows far
+     * more than either. */
+    SETTLE_CRANK_MAX_PER_TX: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1).max(24).default(8),
+    ),
+    /** Rent reclaimed per settled deployment, SOL. Measured from balance
+     * deltas on live settles; used only to gate a batch against its fee. */
+    SETTLE_RENT_SOL_ESTIMATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().positive().default(0.00173),
+    ),
     STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),
     /** Confidence haircut on the streak option value (0–1).
      *
