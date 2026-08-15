@@ -182,7 +182,10 @@ export class Orchestrator {
         snapshotSlot: () => this.state.currentSlot,
         rpcSlot: () => this.connection.getSlot("processed"),
         solBalanceLamports: () =>
-          this.connection.getBalance(this.payer.publicKey, "processed"),
+          this.connection.getBalance(this.payer.publicKey, "processed").then((v) => {
+            this.lastKnownLamports = v;
+            return v;
+          }),
         usdcBalanceBaseUnits: async () => {
           const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
           const ata = getAssociatedTokenAddressSync(
@@ -215,7 +218,10 @@ export class Orchestrator {
       dailyLossCapBase: usdToBase(cfg.DAILY_LOSS_CAP_USD),
       myAuthority: this.payer.publicKey.toBase58(),
       solBalanceLamports: () =>
-        this.connection.getBalance(this.payer.publicKey, "processed"),
+        this.connection.getBalance(this.payer.publicKey, "processed").then((v) => {
+          this.lastKnownLamports = v;
+          return v;
+        }),
       usdcBalanceBaseUnits: async () => {
         const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
         const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
@@ -836,6 +842,10 @@ export class Orchestrator {
   /** Strike pool as of the last slot tick — the payout base, sampled before the
    * reveal consumes it. Without this the measurement above has nothing to
    * divide by, because the Board is already drained by the time we see it. */
+  /** Last observed SOL balance, cached from the health/monitor reads so the
+   * crank can check its reserve without adding an RPC call to the race. */
+  private lastKnownLamports: number | null = null;
+
   private strikePoolBeforeReveal = 0n;
 
   /** Deployments seen this round, so the settle plan is ready the instant the
@@ -1352,6 +1362,17 @@ export class Orchestrator {
   private async rentCrank(roundId: number): Promise<void> {
     if (!this.cfg.SETTLE_CRANK_ENABLED || this.cfg.EXECUTION_MODE === "dry") return;
     if (this.bankroll.killSwitchEngaged()) return;
+    // Never let cranking starve the deploy path. The crank pays for itself out
+    // of the same transaction, so this only bites during a fee spike or a long
+    // losing streak — exactly when the sniper still needs to be able to fire.
+    const lamports = this.lastKnownLamports;
+    if (lamports !== null && lamports / 1e9 < this.cfg.SETTLE_CRANK_MIN_SOL) {
+      this.log.warn(
+        { solBalance: (lamports / 1e9).toFixed(4), floor: this.cfg.SETTLE_CRANK_MIN_SOL },
+        "rent crank paused — SOL below reserve",
+      );
+      return;
+    }
     const targets = this.settleRegistry.targets(roundId);
     if (targets.length === 0) return;
 

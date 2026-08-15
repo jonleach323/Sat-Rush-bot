@@ -532,6 +532,23 @@ const schema = z
      * fails its whole batch, so a lost 20-pack wastes twenty chances where four
      * 5-packs lose one. The incumbent packs 2.86; the compute budget allows far
      * more than either. */
+    /** SOL the crank must leave untouched, so it can never starve the deploy
+     * path of fees.
+     *
+     * Sizing: the crank is self-funding — every settle transaction measured
+     * came back net POSITIVE (min +0.001832 SOL, median +0.001836 per
+     * deployment, zero negatives across 238 transactions), so there is no
+     * hidden ATA-creation cost and no gap between paying and being paid; the
+     * rent arrives in the same transaction as the fee.
+     *
+     * The only real drain is losing every race, which costs fees alone at
+     * ~0.137 SOL/day at current deployment counts. A couple of SOL is
+     * therefore a week of total failure, and the floor exists to stop a fee
+     * spike or a long losing streak eating the balance the sniper needs. */
+    SETTLE_CRANK_MIN_SOL: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).default(0.5),
+    ),
     SETTLE_CRANK_MAX_PER_TX: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(1).max(24).default(8),
