@@ -26,7 +26,8 @@
     "accrual-ev": "tsx scripts/accrual-ev.ts",
     "measure-volume": "tsx scripts/measure-volume.ts",
     "dedup-effect": "tsx scripts/dedup-effect.ts",
-    "epoch-history": "tsx scripts/epoch-history.ts"
+    "epoch-history": "tsx scripts/epoch-history.ts",
+    "sybil-curve": "tsx scripts/sybil-curve.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
