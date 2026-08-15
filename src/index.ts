@@ -549,6 +549,8 @@ export class Orchestrator {
     if (this.skipLogged.has(scoped)) return;
     this.skipLogged.add(scoped);
     this.log.info({ roundId: this.roundId, reason: key, ...detail }, "fire skipped");
+    // Persisted too: a log line cannot answer "why has it not fired all day".
+    if (this.roundId !== null) this.db.recordSkip(this.roundId, key, detail);
   }
 
   private async refreshCandidates(trigger: string): Promise<void> {
@@ -636,9 +638,39 @@ export class Orchestrator {
         streak: this.state.miner?.current_streak_count ?? 1,
         valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
         multiplier: this.strikeBonusMultiplier(),
+        maxRawUnitsPerRound: this.monetisableRawPerRound(),
       },
       strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /**
+   * Raw hashrate units a single round's deploy can actually be converted into
+   * vault tickets — the ceiling on what the hashrate credit may claim.
+   *
+   * Hashrate is only worth its market price to the extent we can spend it, and
+   * spending is bounded by VAULT_MAX_TICKETS per iteration. Spread over an
+   * iteration's rounds that is a couple of raw units per round on mainnet,
+   * against the ~1,400 a modest deploy earns — so the uncapped credit
+   * overstates by roughly two orders of magnitude. Left uncapped it tells the
+   * selector to deploy the per-round maximum every round, which at any real
+   * size would have us earning several times the entire field's hashrate and
+   * collapsing the very price the credit is based on.
+   *
+   * Returns 0 when vaults are off (hashrate then has no sink at all).
+   */
+  private monetisableRawPerRound(): number {
+    if (!this.cfg.VAULT_STRATEGY_ENABLED) return 0;
+    const duration = Number(
+      this.state.satrushConfig?.epoch_vault_iteration_duration?.toString() ?? 0,
+    );
+    const roundDuration = this.state.board?.round_duration ?? 0;
+    if (!(duration > 0) || !(roundDuration > 0)) return 0;
+    const roundsPerIteration = duration / roundDuration;
+    // Both vaults draw on the same hashrate balance; epoch is the one that
+    // reliably recurs, so its cadence sets the conversion rate.
+    const perIteration = this.cfg.VAULT_MAX_TICKETS * this.cfg.VAULT_HASHRATE_PER_TICKET;
+    return perIteration / roundsPerIteration;
   }
 
   /**

@@ -50,6 +50,44 @@ export interface HashrateValuation {
   valueUsdPerRawUnit: number;
   /** Promo multiplier on earned hashrate (2 during the post-Strike window). */
   multiplier: number;
+  /**
+   * Raw units this round's deploy can actually be MONETISED into, i.e. converted
+   * to vault tickets before the hashrate goes stale. Undefined = uncapped.
+   *
+   * This bound is load-bearing, not a nicety. valueUsdPerRawUnit is a
+   * price-taker price: it is the pool divided by the tickets other people
+   * bought, and it only holds while we are small enough not to move it. Earned
+   * hashrate is worth that price only to the extent we can convert it — and
+   * conversion is capped by VAULT_MAX_TICKETS per iteration, which on mainnet
+   * works out to a couple of raw units per round against the ~1,400 a modest
+   * deploy earns. Crediting uncapped turns a ~600x-overstated rebate into
+   * "deploy the maximum every round", which at scale would have us earning
+   * several times the entire field's hashrate — impossible, and the price
+   * would collapse long before that.
+   */
+  maxRawUnitsPerRound?: number | undefined;
+}
+
+/**
+ * USD value of the hashrate a gross deploy earns, capped at what we can convert.
+ *
+ * Returns USD (not a fraction) because the cap makes the relationship non-linear
+ * in deploy size: below the cap the value grows with the deploy, above it the
+ * marginal dollar earns hashrate we cannot spend and is therefore worth zero.
+ * Water-filling relies on that concavity to stop at the right size.
+ */
+export function hashrateRebateUsd(
+  v: HashrateValuation,
+  tilesCovered: number,
+  grossUsd: number,
+): number {
+  if (!(grossUsd > 0)) return 0;
+  if (v.valueUsdPerRawUnit === 0) return 0;
+  const rawPerUsd = hashrateRawPerUsd(v.streak, tilesCovered) * v.multiplier;
+  const earned = rawPerUsd * grossUsd;
+  const cap = v.maxRawUnitsPerRound;
+  const realisable = cap === undefined ? earned : Math.min(earned, Math.max(0, cap));
+  return realisable * v.valueUsdPerRawUnit;
 }
 
 /**

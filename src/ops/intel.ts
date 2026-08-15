@@ -116,6 +116,8 @@ export interface IntelJson {
     strikes: number;
     roundsSinceLast: number | null;
   };
+  /** Why rounds went unplayed, most common first — the "why isn't it firing" answer. */
+  skips: { reason: string; count: number }[];
 }
 
 /** Nearest-rank percentile over an ascending-sorted array. */
@@ -316,6 +318,12 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
      FROM rounds`,
   ) ?? { rounds: 0, strikes: 0, lastStrike: null };
 
+  const skips = db.query<{ reason: string; count: number }>(
+    `SELECT reason, COUNT(*) AS count FROM skips WHERE round_id > ?
+     GROUP BY reason ORDER BY count DESC LIMIT 12`,
+    since,
+  );
+
   return {
     windowRounds: window,
     field,
@@ -323,6 +331,7 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
     fairness,
     rivalTiming,
     calibration,
+    skips,
     strike: {
       rounds: s.rounds,
       strikes: s.strikes,

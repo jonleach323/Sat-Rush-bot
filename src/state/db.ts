@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS competitor_deploys (
   UNIQUE(round_id, authority)
 );
 CREATE INDEX IF NOT EXISTS idx_competitor_round ON competitor_deploys(round_id);
+-- Why a round was NOT played. Skip reasons only ever went to the log, so
+-- "the bot has been silent for 2,000 rounds" was not answerable from data —
+-- exactly the question an operator asks first. One row per round per reason.
+CREATE TABLE IF NOT EXISTS skips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  round_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(round_id, reason)
+);
+CREATE INDEX IF NOT EXISTS idx_skips_round ON skips(round_id);
 CREATE TABLE IF NOT EXISTS pnl_daily (
   date TEXT PRIMARY KEY,
   deployed TEXT NOT NULL DEFAULT '0',
@@ -239,6 +251,18 @@ export class StateDb {
            VALUES (?, ?, ?, ?)`,
         )
         .run(roundId, slot, JSON.stringify(stakes.map(String)), source),
+    );
+  }
+
+  /** Record why a round was skipped; idempotent per (round, reason). */
+  recordSkip(roundId: number, reason: string, detail: Record<string, unknown>): void {
+    this.write(() =>
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO skips (round_id, reason, detail_json)
+           VALUES (?, ?, ?)`,
+        )
+        .run(roundId, reason, JSON.stringify(detail).slice(0, 2000)),
     );
   }
 

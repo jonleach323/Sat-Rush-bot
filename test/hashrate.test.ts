@@ -3,6 +3,7 @@ import {
   hashrateRawPerUsd,
   hashrateRebateFraction,
   REWARD_MAX_STREAK,
+  hashrateRebateUsd,
   strikeBonusMultiplier,
 } from "../src/strategy/hashrate.js";
 
@@ -150,5 +151,44 @@ describe("strikeBonusMultiplier", () => {
         strikeBonusMultiplier({ ...base, lastStrikeAtMs: 0, nowMs: 1000, roundsSinceStrike: 5, windowRounds: 0 }),
       ).toBe(2); // fell through to the wall clock, which says hot
     });
+  });
+});
+
+// The conversion cap is what stops a price-taker price being applied to a
+// deploy size that would move the price. Without it the credit runs ~600x hot.
+describe("hashrateRebateUsd — conversion cap", () => {
+  const v = { streak: 100, valueUsdPerRawUnit: 0.000918, multiplier: 1 };
+
+  it("is linear in deploy size while under the cap", () => {
+    const un = { ...v, maxRawUnitsPerRound: undefined };
+    // streak 100 over 21 tiles = 101 raw/$.
+    expect(hashrateRebateUsd(un, 21, 10)).toBeCloseTo(101 * 10 * 0.000918, 9);
+    expect(hashrateRebateUsd(un, 21, 20)).toBeCloseTo(101 * 20 * 0.000918, 9);
+  });
+
+  it("stops growing once the deploy earns more than we can convert", () => {
+    const capped = { ...v, maxRawUnitsPerRound: 2.31 };
+    const small = hashrateRebateUsd(capped, 21, 0.01); // 1.01 raw — under cap
+    const huge = hashrateRebateUsd(capped, 21, 2000); // 202,000 raw — way over
+    expect(small).toBeCloseTo(1.01 * 0.000918, 9);
+    expect(huge).toBeCloseTo(2.31 * 0.000918, 9);
+    // The marginal dollar past the cap earns nothing.
+    expect(hashrateRebateUsd(capped, 21, 4000)).toBeCloseTo(huge, 12);
+  });
+
+  it("the cap is what collapses the $2,000 credit to near zero", () => {
+    const uncapped = hashrateRebateUsd({ ...v, maxRawUnitsPerRound: undefined }, 21, 2000);
+    const capped = hashrateRebateUsd({ ...v, maxRawUnitsPerRound: 2.31 }, 21, 2000);
+    expect(uncapped).toBeGreaterThan(180); // ~$185 of imaginary rebate
+    expect(capped).toBeLessThan(0.01);
+  });
+
+  it("treats a zero cap as no monetisable hashrate", () => {
+    expect(hashrateRebateUsd({ ...v, maxRawUnitsPerRound: 0 }, 21, 2000)).toBe(0);
+  });
+
+  it("still respects a zero unit price and non-positive deploys", () => {
+    expect(hashrateRebateUsd({ ...v, valueUsdPerRawUnit: 0 }, 21, 100)).toBe(0);
+    expect(hashrateRebateUsd(v, 21, 0)).toBe(0);
   });
 });

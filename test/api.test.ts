@@ -74,6 +74,7 @@ const fakeData: MonitorData = {
       realizedBps: 552,
       benchmarkBps: 85,
     },
+    skips: [{ reason: "no_candidate", count: 402 }],
     strike: { rounds: 999, strikes: 1, roundsSinceLast: 990 },
   }),
   health: async () => ({

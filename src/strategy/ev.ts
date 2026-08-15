@@ -34,7 +34,7 @@
  */
 import type { SatrushConfig } from "../adapter/idl.js";
 import { maskToTiles } from "../adapter/mask.js";
-import { hashrateRebateFraction, type HashrateValuation } from "./hashrate.js";
+import { hashrateRebateUsd, type HashrateValuation } from "./hashrate.js";
 
 export const TILES_COUNT = 21;
 const P_WIN = 1 / TILES_COUNT;
@@ -138,9 +138,15 @@ export function netFactor(fees: FeeModel): number {
  */
 function rebateBase(ctx: EvContext, cost: number, tilesCovered: number): number {
   if (cost <= 0 || tilesCovered <= 0) return 0;
-  let fraction = ctx.hashrateRebateFraction ?? 0;
-  if (ctx.hashrate) fraction += hashrateRebateFraction(ctx.hashrate, tilesCovered);
-  return fraction * cost;
+  let rebate = (ctx.hashrateRebateFraction ?? 0) * cost;
+  if (ctx.hashrate) {
+    // Capped, so this is USD-shaped rather than a flat fraction of cost: past
+    // the conversion cap the marginal dollar earns hashrate we cannot spend.
+    // cost is in base units and hashrateRebateUsd wants gross USD, so scale in
+    // and back out — the 1e6 cancels when the cap is not binding.
+    rebate += hashrateRebateUsd(ctx.hashrate, tilesCovered, cost / 1e6) * 1e6;
+  }
+  return rebate;
 }
 
 /**

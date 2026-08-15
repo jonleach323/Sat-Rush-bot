@@ -394,7 +394,10 @@ function renderIntel(intel, vault) {
 
   const f = intel.field || {};
   const u = intel.uniformity || {};
-  el("fieldsub").textContent = "last "+intel.windowRounds+" rounds · "+f.rounds+" with data";
+  const sk = intel.skips || [];
+  const skTotal = sk.reduce((a,x)=>a+x.count,0);
+  el("fieldsub").textContent = "last "+intel.windowRounds+" rounds · "+f.rounds+" with data"
+    + (skTotal ? " · "+skTotal+" rounds skipped: "+sk.slice(0,3).map(x=>x.reason+" ("+x.count+")").join(", ") : "");
   el("field").innerHTML = [
     ["Distinct rivals", f.distinctRivals??0, "", f.deploys+" deploys seen"],
     ["Deploys / round", (f.avgDeploysPerRound||0).toFixed(1), "", "avg stake "+usd(f.avgRivalStakeUsd||0)],

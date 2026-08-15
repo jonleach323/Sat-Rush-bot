@@ -129,6 +129,7 @@ const intel = () => ({
     realizedBps: 552,
     benchmarkBps: 85,
   },
+  skips: [{ reason: "no_candidate", count: 402 }],
   strike: { rounds: 999, strikes: 1, roundsSinceLast: 990 },
 });
 
@@ -286,6 +287,7 @@ describe("dashboard render", () => {
         realizedBps: null,
         benchmarkBps: 85,
       },
+      skips: [],
       strike: { rounds: 0, strikes: 0, roundsSinceLast: null },
     };
     expect(() =>
