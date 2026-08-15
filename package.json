@@ -25,7 +25,8 @@
     "wait:launch": "tsx scripts/wait-for-mainnet.ts",
     "accrual-ev": "tsx scripts/accrual-ev.ts",
     "measure-volume": "tsx scripts/measure-volume.ts",
-    "dedup-effect": "tsx scripts/dedup-effect.ts"
+    "dedup-effect": "tsx scripts/dedup-effect.ts",
+    "epoch-history": "tsx scripts/epoch-history.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

@@ -55,8 +55,12 @@ const observedTotal = observed.reduce((a, b) => a + b, 0);
 // Project the field to the iteration's close, preserving its CONCENTRATION —
 // the shape is what drives dedup, so scaling every entry by the same factor is
 // the right way to extrapolate it.
-const PROJECTED_FIELD = 475_872;
-const POOL_USD = 63_898;
+// MEASURED, from EpochDrawTriggered on the last completed iteration (4) — no
+// projection. Earlier revisions of this script extrapolated the live iteration
+// from ~7% elapsed and got 475,872 tickets against a $63,898 pool; the actual
+// close was 806,582 tickets against a $46,553 pool. Both errors flattered us.
+const PROJECTED_FIELD = 806_582;
+const POOL_USD = 46_553;
 const scale = PROJECTED_FIELD / observedTotal;
 const field = observed.map((t) => t * scale);
 const fieldTotal = field.reduce((a, b) => a + b, 0);
@@ -106,7 +110,7 @@ const linearFraction = (mine: number): number =>
   EPOCH_PAYOUT_FRACTION * (mine / (mine + fieldTotal));
 
 console.log("  tickets     share   linear $   dedup $    ratio   linear net   dedup net");
-const grid = [5_000, 14_180, 28_361, 50_000, 70_902, 100_000, 141_804, 200_000, 300_000];
+const grid = [500, 1_000, 1_418, 2_000, 2_836, 4_000, 5_672, 8_000, 14_180, 28_361, 50_000];
 const rows = grid.map((mine) => {
   const share = mine / (mine + fieldTotal);
   const lin = linearFraction(mine) * POOL_USD;
