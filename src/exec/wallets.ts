@@ -1,0 +1,195 @@
+/**
+ * The wallet set — one orchestrator driving N signers.
+ *
+ * Epoch rewards dedup by wallet, so a holding split across several wallets
+ * captures more of the pool than the same holding in one. Hashrate cannot be
+ * moved between wallets (it lives in a per-authority Miner PDA), so each wallet
+ * has to earn its own: its own deploys, its own streak, its own tickets.
+ *
+ * Deliberately ONE orchestrator rather than N bot processes. The alternative
+ * multiplies the gRPC subscription and RPC load by N, fragments the kill
+ * switch, and — the part that actually matters — makes the risk limits
+ * per-process, so MAX_PER_ROUND and DAILY_LOSS_CAP would each be enforced N
+ * times over and the real exposure would be N× what the operator configured.
+ * Those limits are load-bearing, so they stay aggregate and live here.
+ *
+ * Never logs or serialises secret keys; only public keys leave this module.
+ */
+import { Keypair, PublicKey } from "@solana/web3.js";
+import { loadKeypair } from "./tx.js";
+
+export interface WalletState {
+  keypair: Keypair;
+  /** Cached Miner PDA fields; null until the first read. */
+  streak: number;
+  hashrate: number;
+  /** Epoch tickets held in the current iteration. */
+  tickets: number;
+  /** USDC available, base units. */
+  usdcBase: bigint;
+  /** SOL available, lamports. */
+  lamports: number;
+  /** Set when the wallet cannot act this round (unfunded, failed, disabled). */
+  disabledReason: string | null;
+}
+
+export interface WalletAllocation {
+  wallet: WalletState;
+  /** Gross USDC to deploy this round, base units. */
+  grossBase: bigint;
+}
+
+/** A wallet is only useful if it can pay rent+fees and meet the deploy floor. */
+export interface FundingFloor {
+  minDeployBase: bigint;
+  /** Lamports a wallet must retain to sign a round's transactions. */
+  minLamports: number;
+}
+
+export class WalletSet {
+  private readonly wallets: WalletState[];
+
+  private constructor(keypairs: Keypair[]) {
+    this.wallets = keypairs.map((keypair) => ({
+      keypair,
+      streak: 1,
+      hashrate: 0,
+      tickets: 0,
+      usdcBase: 0n,
+      lamports: 0,
+      disabledReason: null,
+    }));
+  }
+
+  /**
+   * Load from explicit paths, else fall back to the single configured keypair.
+   * Duplicate paths are rejected: the same signer twice is not two wallets, and
+   * silently deduping would make the fleet quietly smaller than configured
+   * while the risk maths still divided by N.
+   */
+  static load(paths: readonly string[], fallbackPath: string): WalletSet {
+    const list = paths.length > 0 ? paths : [fallbackPath];
+    const seen = new Set<string>();
+    const keypairs: Keypair[] = [];
+    for (const p of list) {
+      const kp = loadKeypair(p);
+      const id = kp.publicKey.toBase58();
+      if (seen.has(id)) {
+        throw new Error(`duplicate wallet in set: ${id} (check WALLET_PATHS)`);
+      }
+      seen.add(id);
+      keypairs.push(kp);
+    }
+    return new WalletSet(keypairs);
+  }
+
+  get size(): number {
+    return this.wallets.length;
+  }
+
+  all(): readonly WalletState[] {
+    return this.wallets;
+  }
+
+  /** The first wallet — the one that pays for fleet-wide cranks and claims. */
+  primary(): WalletState {
+    const first = this.wallets[0];
+    if (!first) throw new Error("wallet set is empty");
+    return first;
+  }
+
+  pubkeys(): PublicKey[] {
+    return this.wallets.map((w) => w.keypair.publicKey);
+  }
+
+  byPubkey(key: string): WalletState | undefined {
+    return this.wallets.find((w) => w.keypair.publicKey.toBase58() === key);
+  }
+
+  /** Wallets that can act this round. */
+  eligible(floor: FundingFloor): WalletState[] {
+    return this.wallets.filter(
+      (w) =>
+        w.disabledReason === null &&
+        w.usdcBase >= floor.minDeployBase &&
+        w.lamports >= floor.minLamports,
+    );
+  }
+
+  /**
+   * Split a round's TOTAL budget across eligible wallets.
+   *
+   * The total is the aggregate cap, never per wallet — that is the whole reason
+   * the fleet lives behind one orchestrator. Wallets that cannot be given at
+   * least the on-chain minimum are dropped rather than sent a doomed
+   * transaction, and the budget is re-divided over those that remain, so a
+   * partially-funded fleet still deploys the full budget instead of silently
+   * shrinking it.
+   *
+   * Equal split, not proportional: every wallet needs its own streak alive, and
+   * a wallet's streak does not care how much it deployed, only that it did.
+   */
+  allocate(totalGrossBase: bigint, floor: FundingFloor): WalletAllocation[] {
+    if (totalGrossBase <= 0n) return [];
+    let pool = this.eligible(floor);
+    if (pool.length === 0) return [];
+
+    // Drop the wallets that cannot clear the floor at an equal share, then
+    // re-divide; repeat until the split is feasible for everyone left.
+    let share = totalGrossBase / BigInt(pool.length);
+    while (pool.length > 1 && share < floor.minDeployBase) {
+      pool = pool.slice(0, Number(totalGrossBase / floor.minDeployBase));
+      if (pool.length === 0) return [];
+      share = totalGrossBase / BigInt(pool.length);
+    }
+    if (share < floor.minDeployBase) return [];
+
+    const out: WalletAllocation[] = [];
+    let remaining = totalGrossBase;
+    for (let i = 0; i < pool.length; i++) {
+      const w = pool[i] as WalletState;
+      // Give the remainder to the last wallet so the fleet deploys the whole
+      // budget rather than losing the integer-division dust every round.
+      const grossBase = i === pool.length - 1 ? remaining : share;
+      const capped = grossBase > w.usdcBase ? w.usdcBase : grossBase;
+      if (capped < floor.minDeployBase) continue;
+      out.push({ wallet: w, grossBase: capped });
+      remaining -= capped;
+    }
+    return out;
+  }
+
+  /** Aggregate balances, for risk reporting. */
+  totals(): { usdcBase: bigint; lamports: number; tickets: number; hashrate: number } {
+    return this.wallets.reduce(
+      (acc, w) => ({
+        usdcBase: acc.usdcBase + w.usdcBase,
+        lamports: acc.lamports + w.lamports,
+        tickets: acc.tickets + w.tickets,
+        hashrate: acc.hashrate + w.hashrate,
+      }),
+      { usdcBase: 0n, lamports: 0, tickets: 0, hashrate: 0 },
+    );
+  }
+
+  /** Public snapshot for the dashboard — never includes secret material. */
+  snapshot(): {
+    pubkey: string;
+    streak: number;
+    hashrate: number;
+    tickets: number;
+    usdc: number;
+    sol: number;
+    disabled: string | null;
+  }[] {
+    return this.wallets.map((w) => ({
+      pubkey: w.keypair.publicKey.toBase58(),
+      streak: w.streak,
+      hashrate: w.hashrate,
+      tickets: w.tickets,
+      usdc: Number(w.usdcBase) / 1e6,
+      sol: w.lamports / 1e9,
+      disabled: w.disabledReason,
+    }));
+  }
+}

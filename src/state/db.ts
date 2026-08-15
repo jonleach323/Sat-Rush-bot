@@ -187,6 +187,11 @@ export class StateDb {
     if (!cols.some((c) => c.name === "streak")) {
       this.db.exec(`ALTER TABLE my_deploys ADD COLUMN streak INTEGER`);
     }
+    if (!cols.some((c) => c.name === "wallet")) {
+      // Per-wallet attribution. Without it a fleet's rows are indistinguishable,
+      // so per-wallet streak reconstruction and P&L both silently merge.
+      this.db.exec(`ALTER TABLE my_deploys ADD COLUMN wallet TEXT`);
+    }
   }
 
   /** Last write failure (message), for the health monitor. */

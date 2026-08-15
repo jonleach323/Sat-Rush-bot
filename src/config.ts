@@ -467,6 +467,31 @@ const schema = z
      * declines cents of parimutuel toll at the cost of the accrual rate every
      * future round depends on — the failure mode that kept this bot silent for
      * 2,100 consecutive rounds. Off = the old board-only behaviour. */
+    /** Extra signer keypair paths, comma-separated. Empty = single-wallet
+     * (KEYPAIR_PATH only), which is the default and leaves behaviour unchanged.
+     *
+     * Epoch rewards dedup by wallet, so a holding spread across several wallets
+     * captures more of the pool than the same holding in one. Hashrate is NOT
+     * transferable — it lives in a per-authority Miner PDA — so every wallet
+     * here earns its own streak and its own tickets, and the fleet therefore
+     * costs N x the volume, not N x the keypairs. Measured marginal gain falls
+     * off fast: 6 wallets capture ~74% of the total available, the 7th is worth
+     * ~$83/iteration and the 33rd about $5.
+     *
+     * MAX_PER_ROUND_USD and DAILY_LOSS_CAP_USD stay AGGREGATE across the set —
+     * they are split between wallets, never applied per wallet. */
+    WALLET_PATHS: z.preprocess(
+      (v) =>
+        typeof v === "string" && v.trim() !== ""
+          ? v.split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined,
+      z.array(z.string()).default([]),
+    ),
+    /** Lamports a wallet must retain to be considered fundable for a round. */
+    WALLET_MIN_LAMPORTS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().nonnegative().default(5_000_000),
+    ),
     STREAK_OPTION_VALUE_ENABLED: boolFromEnv(true),
     /** Confidence haircut on the streak option value (0–1).
      *
