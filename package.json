@@ -27,7 +27,9 @@
     "measure-volume": "tsx scripts/measure-volume.ts",
     "dedup-effect": "tsx scripts/dedup-effect.ts",
     "epoch-history": "tsx scripts/epoch-history.ts",
-    "sybil-curve": "tsx scripts/sybil-curve.ts"
+    "sybil-curve": "tsx scripts/sybil-curve.ts",
+    "strategy-compare": "tsx scripts/strategy-compare.ts",
+    "epoch-concentration": "tsx scripts/epoch-concentration.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
