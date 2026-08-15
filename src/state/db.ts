@@ -385,6 +385,57 @@ export class StateDb {
   }
 
   /** Record what a vault claim actually paid (token-balance deltas). */
+  /**
+   * Did farming clear its cost, for one completed epoch iteration?
+   *
+   * This is the evidence the HASHRATE_DEPLOY_CREDIT_ENABLED gate is waiting
+   * on, and it is deliberately backward-looking: it compares what an epoch
+   * claim ACTUALLY paid against the board result of the deploys made while
+   * that iteration was open. Every mistake in this project's history came from
+   * projecting one side of that comparison mid-iteration, so this refuses to
+   * do arithmetic on an iteration that has not paid out yet.
+   *
+   * Board result is settlements less deploys — the realised thing, not the
+   * modelled one. Shares are returned separately rather than valued here,
+   * because their price moves and the caller has the live vault ratio.
+   */
+  farmingVerdict(iterationId: number, fromRound: number, toRound: number): {
+    claimed: boolean;
+    epochUsd: bigint;
+    epochBtc: bigint;
+    deployedUsd: bigint;
+    wonUsd: bigint;
+    wonShares: bigint;
+    deploys: number;
+  } {
+    const claim = this.queryOne<{ usd_base: string; btc_base: string }>(
+      `SELECT usd_base, btc_base FROM vault_claims WHERE kind = 'epoch' AND iteration_id = ?`,
+      iterationId,
+    );
+    const spent = this.queryOne<{ n: number; amt: string | null }>(
+      `SELECT COUNT(*) AS n, CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS TEXT) AS amt
+         FROM my_deploys WHERE round_id BETWEEN ? AND ? AND status = 'landed'`,
+      fromRound,
+      toRound,
+    );
+    const won = this.queryOne<{ usd: string | null; shares: string | null }>(
+      `SELECT CAST(COALESCE(SUM(CAST(won_usd AS INTEGER)), 0) AS TEXT) AS usd,
+              CAST(COALESCE(SUM(CAST(won_shares AS INTEGER)), 0) AS TEXT) AS shares
+         FROM settlements WHERE round_id BETWEEN ? AND ?`,
+      fromRound,
+      toRound,
+    );
+    return {
+      claimed: claim !== undefined,
+      epochUsd: BigInt(claim?.usd_base ?? "0"),
+      epochBtc: BigInt(claim?.btc_base ?? "0"),
+      deployedUsd: BigInt(spent?.amt ?? "0"),
+      wonUsd: BigInt(won?.usd ?? "0"),
+      wonShares: BigInt(won?.shares ?? "0"),
+      deploys: spent?.n ?? 0,
+    };
+  }
+
   recordVaultClaim(c: {
     kind: "epoch" | "one_btc";
     iterationId: number;
