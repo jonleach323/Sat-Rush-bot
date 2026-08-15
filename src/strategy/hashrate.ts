@@ -21,10 +21,19 @@
  *
  * A promo multiplier (currently 2× for 4h after each Sat Strike) scales R.
  *
- * NOT credited here: the deferred bonus (unclaimed_hashrate_bps, 35% of R) is
- * real but locked until `claim_sats`, which costs the 10% sats-vault claim fee.
- * Leaving it out keeps the estimate conservative — the safe direction when this
- * feeds Kelly sizing.
+ * MEASURED, and not what this file assumed. PublicDeploySettled carries both
+ * `hashrate_earned` and `unclaimed_hashrate_earned`; over 1,875 settles their
+ * ratio is 0.179 (per-event median 0.173). That is neither 0.538 (which a
+ * 65/35 split of one pool would give) nor 0.35 (a flat bonus on top), so
+ * unclaimed_hashrate_bps does not apply to R the way the old comment here
+ * claimed. `claim_sats` does release it — SatsClaimed reports claimed_hashrate.
+ *
+ * UNRESOLVED, and it decides the farming question: whether `hashrate_earned`
+ * is the full formula output or already net of something. At 0.65 of R a
+ * ticket costs $0.1088; at 1.0 it costs $0.0707; at 1.179 (claiming the
+ * deferred part) $0.0599 — against a measured ticket value of ~$0.069. So the
+ * same mechanic reads as -37% or +15% depending on an interpretation nobody
+ * has confirmed. Do not size epoch farming off this until it is settled.
  */
 import { TILES_COUNT } from "./ev.js";
 
