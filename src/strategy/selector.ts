@@ -104,6 +104,53 @@ function pickRandom<T>(items: T[], rng: () => number): T {
   return items[Math.min(items.length - 1, Math.floor(rng() * items.length))] as T;
 }
 
+/**
+ * Structural tile bias, measured over 400 rounds: automations run fixed masks
+ * and cover the high tiles least (t20 94.0% of deploys against ~100% for the
+ * low ones), so those tiles carry consistently less stake — t20 averages 4.506%
+ * of round stake against the 4.762% a fair board gives.
+ *
+ * Deliberately used ONLY to break ties, never to steer allocation. The effect
+ * is about 5% on stake, and a strategy of always deploying the cheapest tile
+ * measured -4.24% of volume over the same window — better than a blanket's
+ * -6.4%, but with 1/21 odds that difference is smaller than a single win, so
+ * it is noise. Breaking an otherwise-even tie toward the cheap end costs
+ * nothing and needs no significance: when two tiles are equal on EV, one of
+ * them is reliably a little emptier.
+ *
+ * Ordered cheapest-first. Re-measure with `pnpm tile-bias` if the field's
+ * automation mix changes — this is a property of who is playing, not of the
+ * program, and it will move.
+ */
+const STRUCTURAL_TILE_ORDER: readonly number[] = [20, 19, 17, 0, 4, 18, 12, 1, 2, 3, 5, 6, 7, 9, 14, 15, 16, 10, 13, 11, 8];
+const TILE_RANK: readonly number[] = (() => {
+  const rank = new Array<number>(TILES_COUNT).fill(TILES_COUNT);
+  STRUCTURAL_TILE_ORDER.forEach((tile, i) => {
+    if (tile >= 0 && tile < TILES_COUNT) rank[tile] = i;
+  });
+  return rank;
+})();
+
+/**
+ * Break a tie toward the structurally emptier tile, keeping randomisation
+ * among equally-ranked ones. The randomisation matters: deterministic tile
+ * choice is what lets rivals collide with us on purpose, which is why
+ * pickRandom exists at all — this narrows the pool it draws from rather than
+ * replacing it.
+ *
+ * Used by water-filling only, where candidates are already equal on marginal
+ * EV and the set is small. k_emptiest deliberately keeps the unbiased draw:
+ * spreading across the K emptiest IS its anti-collision design, and trading
+ * that for a 5% stake tilt would be a bad swap.
+ */
+function pickBiased(candidates: number[], rng: () => number): number {
+  if (candidates.length <= 1) return pickRandom(candidates, rng);
+  let best = TILES_COUNT;
+  for (const t of candidates) best = Math.min(best, TILE_RANK[t] ?? TILES_COUNT);
+  const tied = candidates.filter((t) => (TILE_RANK[t] ?? TILES_COUNT) === best);
+  return pickRandom(tied, rng);
+}
+
 export function selectAllocation(ctx: EvContext, cfg: SelectorConfig): Selection {
   validate(cfg);
   return cfg.strategy === "k_emptiest"
@@ -154,7 +201,7 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
     }
     lastBestMarginal = bestEv;
     if (candidates.length === 0 || !predicate(bestEv)) return null;
-    return pickRandom(candidates, rng);
+    return pickBiased(candidates, rng);
   };
 
   // Greedy: allocate quanta while the best marginal EV is positive.
@@ -233,6 +280,10 @@ function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
     if (sa !== sb) return sa < sb ? -1 : 1;
     return a - b;
   });
+  // NOT pickBiased: randomising across the K emptiest is k_emptiest's explicit
+  // anti-collision property, and narrowing it to favour a structurally cheap
+  // tile makes our choice predictable to copycats. A ~5% stake tilt is not
+  // worth becoming easy to sit on.
   const tile = pickRandom(byStake.slice(0, cfg.kEmptiest), rng);
 
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
