@@ -787,6 +787,11 @@ export class Orchestrator {
    * rounds left in the iteration. Returns 0 when vaults are off (hashrate then
    * has no sink at all) or the field is not yet legible.
    */
+  /** Strike pool as of the last slot tick — the payout base, sampled before the
+   * reveal consumes it. Without this the measurement above has nothing to
+   * divide by, because the Board is already drained by the time we see it. */
+  private strikePoolBeforeReveal = 0n;
+
   private monetisableRawPerRound(): number {
     const e = this.epochTicketEconomics();
     if (!e) return 0;
@@ -1023,6 +1028,10 @@ export class Orchestrator {
 
   /** The single slot-tick check — every transition hangs off ingest events. */
   private onSlotTick(): void {
+    // Sample the strike pool before any reveal can drain it — this is the
+    // denominator for the payout-fraction measurement in onRevealed().
+    const pool = this.state.strikePoolUsd();
+    if (pool > 0n) this.strikePoolBeforeReveal = pool;
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;
@@ -1962,9 +1971,32 @@ export class Orchestrator {
     // site banner — so the EV model can size up for the whole window.
     if (reveal.is_strike_triggered) {
       this.lastStrikeAtMs = Date.now();
+      // MEASURE the payout fraction instead of trusting a constant. It has been
+      // claimed as 0.9333 (this repo's old default, unsourced), 1.0 (the
+      // project's EV reference) and 0.70 (the operator) — and the Board exposes
+      // no payable/retained split, only one pool. But the pool we sampled just
+      // before the reveal and the bonus the event reports are both exact, so a
+      // single observed Strike settles it. One line in the log per Strike; the
+      // constant should be replaced by this the first time it is seen.
+      const poolBefore = Number(this.strikePoolBeforeReveal) / 1e6;
+      const paid = Number(reveal.strike_bonus_usd.toString()) / 1e6;
+      if (poolBefore > 0 && paid > 0) {
+        this.log.warn(
+          {
+            roundId: reveal.round_id,
+            poolBeforeUsd: poolBefore.toFixed(2),
+            paidUsd: paid.toFixed(2),
+            measuredFraction: (paid / poolBefore).toFixed(4),
+            configuredFraction: this.cfg.STRIKE_PAYOUT_FRACTION,
+          },
+          "STRIKE PAYOUT FRACTION MEASURED — update STRIKE_PAYOUT_FRACTION",
+        );
+      }
       this.alert(
-        `⚡ Sat Strike round ${reveal.round_id} — ${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate ` +
-          `for ${this.cfg.STRIKE_BONUS_WINDOW_MINUTES}min`,
+        `⚡ Sat Strike round ${reveal.round_id} — paid $${paid.toFixed(2)} of a ` +
+          `$${poolBefore.toFixed(2)} pool (${(poolBefore > 0 ? paid / poolBefore : 0).toFixed(3)}× ` +
+          `vs ${this.cfg.STRIKE_PAYOUT_FRACTION} configured) · ` +
+          `${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate for ${this.cfg.STRIKE_BONUS_WINDOW_MINUTES}min`,
       );
     }
     this.db.recordRound({
