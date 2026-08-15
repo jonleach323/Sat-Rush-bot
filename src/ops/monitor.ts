@@ -113,6 +113,19 @@ export interface VaultJson {
    * `none` = no open vault, so earned hashrate is currently credited at zero.
    */
   hashrateValue: { usdPerRawUnit: number; source: "derived" | "config" | "none" };
+  /**
+   * Settle-rent cranking. `landed`/`lost` count DEPLOYMENTS, not transactions,
+   * because a batch shares one fate — winRate is therefore the share of the
+   * bounty actually captured, which is the number worth tuning against.
+   */
+  crank: {
+    enabled: boolean;
+    landed: number;
+    lost: number;
+    winRate: number;
+    solEarned: number;
+    perTx: number;
+  };
   recent: Record<string, unknown>[];
 }
 
@@ -156,6 +169,7 @@ export interface MonitorContext {
   vaultPools: () => VaultPoolsJson | null;
   /** Live price of a raw hashrate unit, as fed to the deploy EV. */
   hashrateValue: () => VaultJson["hashrateValue"];
+  crank: () => VaultJson["crank"];
   /** Fire offset in force, for the "which rivals fire after us" split. */
   fireOffsetSlots: () => number;
   /** USD value of ONE sats-vault BTC share, net of the claim fee. 0 if unknown. */
@@ -309,6 +323,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         economics: economics(),
         pools: ctx.vaultPools(),
         hashrateValue: ctx.hashrateValue(),
+        crank: ctx.crank(),
         recent: ctx.db.query(
           "SELECT kind, iteration_id, tickets, ticket_pubkey, claimed, sig, created_at FROM vault_tickets ORDER BY id DESC LIMIT 15",
         ),

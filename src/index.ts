@@ -240,6 +240,18 @@ export class Orchestrator {
       vaultPools: () => this.vaultPoolCache,
       fireOffsetSlots: () => this.currentFireOffset(),
       shareValueUsd: () => this.satsShareValueUsd(),
+      crank: () => {
+        const { landed, lost, solEarned } = this.crankStats;
+        const seen = landed + lost;
+        return {
+          enabled: cfg.SETTLE_CRANK_ENABLED,
+          landed,
+          lost,
+          winRate: seen > 0 ? landed / seen : 0,
+          solEarned,
+          perTx: cfg.SETTLE_CRANK_MAX_PER_TX,
+        };
+      },
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -802,6 +814,11 @@ export class Orchestrator {
    * round resolves. Discovering them afterwards is the race, already lost. */
   private readonly settleRegistry = new SettleRegistry();
 
+  /** Cumulative settle-rent race record, counted in DEPLOYMENTS not
+   * transactions — a batch shares one fate, so deployments is what the win
+   * rate must be measured in. */
+  private crankStats = { landed: 0, lost: 0, solEarned: 0 };
+
   private monetisableRawPerRound(): number {
     const e = this.epochTicketEconomics();
     if (!e) return 0;
@@ -1331,6 +1348,9 @@ export class Orchestrator {
       if (r.status === "fulfilled" && r.value?.outcome === "landed") landed += size;
       else lost += size;
     });
+    this.crankStats.landed += landed;
+    this.crankStats.lost += lost;
+    this.crankStats.solEarned += landed * rentSol;
     if (landed > 0 || lost > 0) {
       this.log.info(
         {
