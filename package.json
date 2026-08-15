@@ -29,7 +29,8 @@
     "epoch-history": "tsx scripts/epoch-history.ts",
     "sybil-curve": "tsx scripts/sybil-curve.ts",
     "strategy-compare": "tsx scripts/strategy-compare.ts",
-    "epoch-concentration": "tsx scripts/epoch-concentration.ts"
+    "epoch-concentration": "tsx scripts/epoch-concentration.ts",
+    "sats-drift": "tsx scripts/sats-drift.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
