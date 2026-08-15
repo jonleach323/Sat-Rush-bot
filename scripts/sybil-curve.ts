@@ -22,6 +22,7 @@
  *
  *   pnpm sybil-curve [total-tickets]
  */
+import { createRequire } from "node:module";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import { loadConfig } from "../src/config.js";
@@ -53,7 +54,26 @@ for (const { account } of accounts) {
 }
 const live = (byIteration.get(Math.max(...byIteration.keys())) ?? []).sort((a, b) => b - a);
 const liveTotal = live.reduce((a, b) => a + b, 0);
-const field = live.map((t) => (t * FIELD_TICKETS) / liveTotal);
+
+// Prefer the MEASURED distribution of a completed iteration over the live
+// iteration's partial shape. Early in an iteration only the big buyers have
+// entered, so scaling that shape to a full total badly overstates
+// concentration — measured, iteration 4 had 157 wallets and a 46.8% top-5,
+// against the 37 wallets and 77.4% top-5 the scaled live shape implied.
+function loadMeasuredField(): number[] | null {
+  try {
+    const readFileSync = createRequire(import.meta.url)("node:fs").readFileSync as (p: string, e: string) => string;
+    const raw = JSON.parse(readFileSync("data/epoch-iteration-4.json", "utf8")) as {
+      blocks: number[];
+    };
+    return raw.blocks?.length ? raw.blocks : null;
+  } catch {
+    return null;
+  }
+}
+const measured = loadMeasuredField();
+const field = measured ?? live.map((t) => (t * FIELD_TICKETS) / liveTotal);
+if (measured) console.log("using MEASURED iteration-4 distribution (157 wallets)");
 const fieldTotal = field.reduce((a, b) => a + b, 0);
 
 /**
