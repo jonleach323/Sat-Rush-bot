@@ -515,12 +515,17 @@ const schema = z
      * across the field — and deployment_settle_grace_duration is 0, so it is a
      * first-to-land race the moment a round resolves.
      *
-     * OFF by default. It is legitimate (the program pays a bounty for work the
-     * game needs done, and unsettled deployments never pay their owners out),
-     * but the crank currently collecting it is the operator's own, so turning
-     * this on is a decision about that relationship as much as about revenue.
-     * SELF_SETTLE, which only reclaims our own, is separate and unaffected. */
-    SETTLE_CRANK_ENABLED: boolFromEnv(false),
+     * ON. It is legitimate on its own terms — the program pays a bounty for
+     * work the game needs done, and unsettled deployments never pay their
+     * owners out — and the operator, whose crank currently collects it, has
+     * been asked directly and has no objection. SELF_SETTLE, which only
+     * reclaims our own, is separate and unaffected.
+     *
+     * Losing a race costs only the transaction fee, and the margin is ~99.7%
+     * (0.00173 SOL against ~0.000015), so a low win rate is still strongly
+     * profitable. Watch the win rate in the "rent crank resolved" log line
+     * before tuning SETTLE_CRANK_MAX_PER_TX. */
+    SETTLE_CRANK_ENABLED: boolFromEnv(true),
     /** Settles packed per transaction.
      *
      * A collision bound, not a protocol one: a deployment a rival closed first
