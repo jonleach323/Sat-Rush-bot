@@ -162,6 +162,17 @@ export class GameState {
   }
 
   /** Strike jackpot USD side: swapped + pending amounts (base units). */
+  /**
+   * The Sat Strike pool as it stands on chain — the FULL amount, of which the
+   * operator has confirmed only 70% is delivered on trigger (see
+   * STRIKE_PAYOUT_FRACTION; the remaining 30% splits between a rolling reserve
+   * and straight rollover, deliberately, to seed the next pool).
+   *
+   * OPEN: this sums the armed pool and the pending accrual. If pending is
+   * queued for a LATER round rather than included in the next trigger, the sum
+   * overstates this round's strike EV and only strike_usd_amount belongs here.
+   * Unresolved — ask the operator before relying on the strike leg for sizing.
+   */
   strikePoolUsd(): bigint {
     if (!this.board) return 0n;
     return toBig(this.board.strike_usd_amount) + toBig(this.board.strike_pending_usd_amount);
