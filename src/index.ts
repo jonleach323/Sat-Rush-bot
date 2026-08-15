@@ -819,6 +819,16 @@ export class Orchestrator {
    * rate must be measured in. */
   private crankStats = { landed: 0, lost: 0, solEarned: 0 };
 
+  /**
+   * A blockhash kept warm off the slot tick, so the rent crank does not spend
+   * an RPC round-trip fetching one on the critical path. Settling is a
+   * first-to-land race decided in milliseconds; a getLatestBlockhash between
+   * seeing the reveal and signing is the difference between winning the round
+   * and paying a fee to lose it.
+   */
+  private hotBlockhash: { blockhash: string; lastValidBlockHeight: number; atSlot: number } | null =
+    null;
+
   private monetisableRawPerRound(): number {
     const e = this.epochTicketEconomics();
     if (!e) return 0;
@@ -1059,6 +1069,22 @@ export class Orchestrator {
     // denominator for the payout-fraction measurement in onRevealed().
     const pool = this.state.strikePoolUsd();
     if (pool > 0n) this.strikePoolBeforeReveal = pool;
+    // Keep a blockhash warm for the settle race. Refreshed well inside the
+    // ~150-slot lifetime so it is never close to expiry when a round resolves.
+    if (
+      this.cfg.SETTLE_CRANK_ENABLED &&
+      (this.hotBlockhash === null || this.state.currentSlot - this.hotBlockhash.atSlot >= 30)
+    ) {
+      const atSlot = this.state.currentSlot;
+      void this.connection
+        .getLatestBlockhash("confirmed")
+        .then((bh) => {
+          this.hotBlockhash = { ...bh, atSlot };
+        })
+        .catch(() => {
+          // Keep the previous one; assembleTx will fetch if it is missing.
+        });
+    }
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;
@@ -1322,12 +1348,19 @@ export class Orchestrator {
             roundId,
           }),
         );
+        // Only reuse the cached hash while it is comfortably fresh; a stale one
+        // costs the whole batch, which is worse than the round-trip it saves.
+        const hot =
+          this.hotBlockhash && this.state.currentSlot - this.hotBlockhash.atSlot < 100
+            ? { blockhash: this.hotBlockhash.blockhash, lastValidBlockHeight: this.hotBlockhash.lastValidBlockHeight }
+            : undefined;
         const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
           payer: this.payer,
           instructions: ixs,
           // Budget for the whole batch, not one settle.
           computeUnitLimit: Math.min(1_400_000, limits.cuPerSettle * batch.length),
           priorityFeeMicroLamports: fee,
+          blockhash: hot,
         });
         return this.sender.fire(
           {
