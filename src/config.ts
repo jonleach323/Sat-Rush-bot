@@ -460,6 +460,36 @@ const schema = z
       z.coerce.number().int().positive().default(250),
     ),
     /** Fraction of the wallet's claimable hashrate the vault strategy may spend. */
+    /** Credit a deploy with the option value of keeping the streak alive.
+     *
+     * Hashrate accrues at (streak + 21/n) per USD and ONE missed round resets
+     * the streak to 1. Judging each round on its board EV alone therefore
+     * declines cents of parimutuel toll at the cost of the accrual rate every
+     * future round depends on — the failure mode that kept this bot silent for
+     * 2,100 consecutive rounds. Off = the old board-only behaviour. */
+    STREAK_OPTION_VALUE_ENABLED: boolFromEnv(true),
+    /** Confidence haircut on the streak option value (0–1).
+     *
+     * The loss is real but projected: it assumes we keep deploying at this rate
+     * and that the vaults keep pricing hashrate near today's margin. The
+     * haircut stops a large modelled term from steamrolling a decision about
+     * real money. 1 = credit it in full. */
+    STREAK_OPTION_DISCOUNT: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.5),
+    ),
+    /** Ceiling on our share of a vault's projected final ticket count.
+     *
+     * Replaces the old basis for the deploy-side hashrate credit, which capped
+     * it by VAULT_MAX_TICKETS — our OWN risk knob. That was circular: the model
+     * concluded hashrate was near-worthless because we had configured ourselves
+     * not to spend it, and so credited 0.57% of what a deploy actually earns.
+     * The binding constraint is economic, not configured: past some share our
+     * own tickets dilute the price we are valuing them at. */
+    VAULT_MAX_SHARE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(1).default(0.25),
+    ),
     VAULT_HASHRATE_FRACTION: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.5),

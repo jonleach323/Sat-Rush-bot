@@ -22,7 +22,9 @@
     "start": "node dist/index.js",
     "switch:devnet": "bash scripts/switch-cluster.sh devnet",
     "switch:mainnet": "bash scripts/switch-cluster.sh mainnet",
-    "wait:launch": "tsx scripts/wait-for-mainnet.ts"
+    "wait:launch": "tsx scripts/wait-for-mainnet.ts",
+    "accrual-ev": "tsx scripts/accrual-ev.ts",
+    "measure-volume": "tsx scripts/measure-volume.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

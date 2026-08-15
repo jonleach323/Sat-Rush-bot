@@ -50,6 +50,7 @@ import {
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
+import { streakOptionValueUsd } from "./strategy/streak.js";
 import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
 import {
   epochAction,
@@ -648,7 +649,31 @@ export class Orchestrator {
         maxRawUnitsPerRound: this.monetisableRawPerRound(),
       },
       strikeExpectedPot: this.strikeExpectedPotBase(),
+      presenceCreditBase: this.presenceCreditBase(),
     };
+  }
+
+  /**
+   * Fixed credit (base units) for deploying at all this round: the streak
+   * option value. See strategy/streak.ts — one missed round resets the accrual
+   * counter to 1, and nothing was pricing that.
+   *
+   * Sized against the deploy we would actually make (MAX_PER_ROUND, which is
+   * what the water-filler is bounded by), and inert whenever hashrate has no
+   * priced sink, so this can never conjure a credit out of an unpriceable
+   * asset.
+   */
+  private presenceCreditBase(): number {
+    if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
+    const usd = streakOptionValueUsd({
+      streak: this.state.miner?.current_streak_count ?? 1,
+      deployPerRoundUsd: this.cfg.MAX_PER_ROUND_USD,
+      valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
+      liquidFraction:
+        1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
+      discount: this.cfg.STREAK_OPTION_DISCOUNT,
+    });
+    return usd > 0 ? usd * 1e6 : 0;
   }
 
   /** The program's 1-BTC draw trigger, in BTC base units. */
@@ -700,18 +725,72 @@ export class Orchestrator {
    *
    * Returns 0 when vaults are off (hashrate then has no sink at all).
    */
-  private monetisableRawPerRound(): number {
-    if (!this.cfg.VAULT_STRATEGY_ENABLED) return 0;
-    const duration = Number(
+  /**
+   * Epoch-vault economics for the deploy-side hashrate credit: how many more
+   * tickets we can usefully buy this iteration, and what they are worth EACH on
+   * average once our own dilution is priced in.
+   *
+   * Both halves used to be wrong in the same direction. The quantity was capped
+   * by VAULT_MAX_TICKETS — our own risk knob — so the model concluded hashrate
+   * was worthless because we had configured ourselves not to spend it, and
+   * credited 0.57% of what a deploy actually earns. The price was the marginal
+   * ticket at ZERO holdings, which is only the price of the first ticket; buying
+   * a block at that price overstates it by ~1.7x at a 25% share, because the
+   * per-wallet dedup makes the payoff concave.
+   *
+   * So: bound the quantity economically (VAULT_MAX_SHARE of the projected final
+   * field) and price that block at its AVERAGE value, not its first ticket's.
+   */
+  private epochTicketEconomics(): {
+    capTickets: number;
+    avgTicketUsd: number;
+    roundsRemaining: number;
+  } | null {
+    if (!this.cfg.VAULT_STRATEGY_ENABLED) return null;
+    const epoch = this.vaultPoolCache?.epoch;
+    if (!epoch?.open || !(epoch.poolUsd > 0)) return null;
+    const roundDuration = this.state.board?.round_duration ?? 0;
+    const iterationSlots = Number(
       this.state.satrushConfig?.epoch_vault_iteration_duration?.toString() ?? 0,
     );
-    const roundDuration = this.state.board?.round_duration ?? 0;
-    if (!(duration > 0) || !(roundDuration > 0)) return 0;
-    const roundsPerIteration = duration / roundDuration;
-    // Both vaults draw on the same hashrate balance; epoch is the one that
-    // reliably recurs, so its cadence sets the conversion rate.
-    const perIteration = this.cfg.VAULT_MAX_TICKETS * this.cfg.VAULT_HASHRATE_PER_TICKET;
-    return perIteration / roundsPerIteration;
+    if (!(roundDuration > 0) || !(iterationSlots > 0)) return null;
+
+    // Project the field to the close on the same basis the pool grows on.
+    // Leaving the field at its partial count while the pool is projected forward
+    // is what turned a $10/round answer into a $25/round one on the first pass.
+    const slotsToClose = Math.max(0, epoch.slotsToClose);
+    const elapsed = Math.max(1, iterationSlots - slotsToClose);
+    const others = Math.max(0, epoch.totalTickets - epoch.myTickets);
+    const projectedField = others * (iterationSlots / elapsed);
+
+    const share = this.cfg.VAULT_MAX_SHARE;
+    const capTickets =
+      (share / (1 - share)) * projectedField - epoch.myTickets;
+    if (!(capTickets >= 1)) return null;
+
+    const uplift = this.cfg.EPOCH_DEDUP_UPLIFT;
+    const at = (mine: number): number =>
+      expectedWinningsUsd(mine, projectedField, epoch.poolUsd, "epoch", uplift);
+    const avgTicketUsd = (at(epoch.myTickets + capTickets) - at(epoch.myTickets)) / capTickets;
+    if (!(avgTicketUsd > 0)) return null;
+
+    const roundsRemaining = Math.max(1, slotsToClose / roundDuration);
+    return { capTickets, avgTicketUsd, roundsRemaining };
+  }
+
+  /**
+   * Raw hashrate units a single round's deploy can actually be converted into
+   * vault tickets — the ceiling on what the hashrate credit may claim.
+   *
+   * Now an economic bound rather than a configured one: the tickets still
+   * available under VAULT_MAX_SHARE of the projected field, spread over the
+   * rounds left in the iteration. Returns 0 when vaults are off (hashrate then
+   * has no sink at all) or the field is not yet legible.
+   */
+  private monetisableRawPerRound(): number {
+    const e = this.epochTicketEconomics();
+    if (!e) return 0;
+    return (e.capTickets * this.cfg.VAULT_HASHRATE_PER_TICKET) / e.roundsRemaining;
   }
 
   /**
@@ -751,11 +830,14 @@ export class Orchestrator {
    *
    * - The epoch vault resolves on a fixed ~3-day cadence and has paid out every
    *   iteration, so its marginal ticket EV is realisable value.
-   * - The 1-BTC vault only draws when it fills to 1 BTC. It has never settled,
-   *   and tickets keep accruing the whole way — so its headline per-ticket EV
-   *   is an upper bound on something weeks out, not a price. It is only counted
-   *   once it is near enough to trigger that we would genuinely enter it, which
-   *   is exactly the VAULT_ONE_BTC_MIN_FILL_BPS gate the entry path uses.
+   * - The 1-BTC vault only draws when it fills to 1 BTC. It DOES settle — it is
+   *   on iteration 2, with 0 and 1 already drawn and rent-reclaimed, cycling
+   *   roughly every 6 days at measured volume (an earlier note here claimed it
+   *   had never settled; that was stale). But tickets accrue the whole way, so
+   *   its headline per-ticket EV still prices a claim that pays only at fill,
+   *   against a field that keeps growing. It is counted only once it is near
+   *   enough to trigger that we would genuinely enter it, which is exactly the
+   *   VAULT_ONE_BTC_MIN_FILL_BPS gate the entry path uses.
    *
    * Taking the max over everything open would price hashrate off the vault that
    * pays least often, and this figure credits every deploy — overstating it
@@ -769,7 +851,10 @@ export class Orchestrator {
     if (!this.cfg.VAULT_STRATEGY_ENABLED) return 0;
     const pools = this.vaultPoolCache;
     if (!pools) return 0;
-    const epochEv = pools.epoch?.open ? pools.epoch.ticketEvUsd : 0;
+    // Epoch is priced at the AVERAGE value of the block we could actually buy,
+    // not at the first ticket's marginal value — the payoff is concave in our
+    // share, so the at-zero price is not the price of a block.
+    const epochEv = this.epochTicketEconomics()?.avgTicketUsd ?? 0;
     const oneBtcEv =
       pools.oneBtc?.open && pools.oneBtc.fillBps >= this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS
         ? pools.oneBtc.ticketEvUsd

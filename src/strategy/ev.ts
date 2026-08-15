@@ -96,6 +96,18 @@ export interface EvContext {
    * responds on its own. Added to the pot in the payout term only. Undefined = 0.
    */
   strikeExpectedPot?: number | undefined;
+  /**
+   * Fixed credit (base units) earned by deploying AT ALL this round, regardless
+   * of size — currently the streak option value (see strategy/streak.ts).
+   *
+   * Deliberately not a per-dollar rebate. Being present keeps the accrual
+   * counter alive; that benefit is identical for a minimum and a maximum
+   * deploy, so it must attach to the first unit allocated and to nothing after
+   * it. marginalEv() takes differences, so a constant cancels everywhere except
+   * the 0 → first-quantum step — which is exactly the decision it should move.
+   * Undefined = 0.
+   */
+  presenceCreditBase?: number | undefined;
 }
 
 function validateContext(ctx: EvContext): void {
@@ -112,6 +124,10 @@ function validateContext(ctx: EvContext): void {
   const strike = ctx.strikeExpectedPot;
   if (strike !== undefined && (!Number.isFinite(strike) || strike < 0)) {
     throw new RangeError(`invalid strikeExpectedPot: ${strike}`);
+  }
+  const presence = ctx.presenceCreditBase;
+  if (presence !== undefined && (!Number.isFinite(presence) || presence < 0)) {
+    throw new RangeError(`invalid presenceCreditBase: ${presence}`);
   }
   const { deployFeeBps, satsVaultRoundBps, satsVaultClaimBps } = ctx.fees;
   for (const [name, bps] of [
@@ -196,8 +212,11 @@ export function evOfAllocation(ctx: EvContext, allocGross: bigint[]): number {
     const othersEffective = Number(ctx.predictedStakes[i] ?? 0n);
     expectedPayout += P_WIN * pot * (myEffective / (othersEffective + myEffective));
   }
-  // Hashrate value earned on the gross deploy regardless of outcome.
-  return expectedPayout - cost + rebateBase(ctx, cost, tilesCovered);
+  // Hashrate value earned on the gross deploy regardless of outcome, plus the
+  // fixed presence credit — awarded once for deploying at all, and only when
+  // something is actually staked.
+  const presence = cost > 0 ? (ctx.presenceCreditBase ?? 0) : 0;
+  return expectedPayout - cost + rebateBase(ctx, cost, tilesCovered) + presence;
 }
 
 /**
@@ -245,7 +264,10 @@ export function outcomeReturns(ctx: EvContext, allocGross: bigint[]): number[] {
   const m = ctx.multiplier;
   // Hashrate value is earned in every outcome, so it lifts every return —
   // a losing round returns −(1 − rebate) instead of −1.
-  const rebate = rebateBase(ctx, cost, tilesCovered);
+  // Both the hashrate rebate and the presence credit are earned in every
+  // outcome, so they lift the whole distribution: a losing round returns
+  // -(1 - rebate - presence) rather than -1.
+  const rebate = rebateBase(ctx, cost, tilesCovered) + (ctx.presenceCreditBase ?? 0);
   const returns = new Array<number>(TILES_COUNT).fill(0);
   for (let i = 0; i < TILES_COUNT; i++) {
     const gross = allocGross[i] ?? 0n;
