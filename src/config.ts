@@ -563,6 +563,30 @@ const schema = z
      * take, against the pool that actually closed, exceeds the board cost of
      * the deploys that earned it — not a projection made mid-iteration, which
      * is the specific error made twice in this branch. */
+    /** Ticket count at the last COMPLETE epoch draw, from EpochDrawTriggered.
+     * Anchors the field projection to something that actually happened rather
+     * than to a linear extrapolation of a partly-elapsed iteration — which
+     * under-projected by 41% (475,872 against an 806,582 close), because
+     * ticket buying is back-loaded. Re-measure with `pnpm epoch-history`. */
+    EPOCH_LAST_CLOSE_TICKETS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().positive().default(806_582),
+    ),
+    /** Pool value at that same draw, USD. Used only as the denominator of the
+     * volume ratio, so only its size RELATIVE to the live pool matters. */
+    EPOCH_LAST_CLOSE_POOL_USD: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().positive().default(46_553),
+    ),
+    /** Fraction of the field funded by hashrate banked before the iteration
+     * started, and so insensitive to current volume. Measured idle hashrate
+     * across all miners is ~3x one iteration's draw, so when volume falls the
+     * field does NOT fall with it — this is the floor that stops the
+     * projection assuming rivals vanish along with the pool. */
+    EPOCH_FIELD_BANKED_SHARE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.3),
+    ),
     HASHRATE_DEPLOY_CREDIT_ENABLED: boolFromEnv(false),
     STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),
     /** Confidence haircut on the streak option value (0–1).

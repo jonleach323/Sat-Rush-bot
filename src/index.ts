@@ -51,6 +51,7 @@ import {
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
 import { streakOptionValueUsd } from "./strategy/streak.js";
+import { projectField } from "./strategy/epoch-pool.js";
 import {
   DEFAULT_PACKING,
   SettleRegistry,
@@ -780,13 +781,33 @@ export class Orchestrator {
     );
     if (!(roundDuration > 0) || !(iterationSlots > 0)) return null;
 
-    // Project the field to the close on the same basis the pool grows on.
-    // Leaving the field at its partial count while the pool is projected forward
-    // is what turned a $10/round answer into a $25/round one on the first pass.
+    // Project the field from the last COMPLETE draw, scaled by how this
+    // iteration's pool is tracking against that one, with a floor for banked
+    // hashrate. Extrapolating the live ticket count linearly — the previous
+    // approach — under-projects badly, because buying is back-loaded: at 7%
+    // elapsed it gave 475,872 against an actual close of 806,582.
     const slotsToClose = Math.max(0, epoch.slotsToClose);
     const elapsed = Math.max(1, iterationSlots - slotsToClose);
+    const progress = Math.min(1, elapsed / iterationSlots);
+    // Project the pool from what is banked, net of the carry. A pool is
+    // seeded by the previous iteration's 10% rollover, so treating all of the
+    // banked amount as this iteration's inflow over-projects the close — worst
+    // early in an iteration, when the carry is most of what is there.
+    const carry = 0.1 * this.cfg.EPOCH_LAST_CLOSE_POOL_USD;
+    const inflowSoFar = Math.max(0, epoch.poolUsd - carry);
+    const projectedPool =
+      progress > 0.02 ? epoch.poolUsd + ((1 - progress) / progress) * inflowSoFar : epoch.poolUsd;
+    const volumeRatio = projectedPool / this.cfg.EPOCH_LAST_CLOSE_POOL_USD;
+    const bounds = projectField({
+      lastCloseTickets: this.cfg.EPOCH_LAST_CLOSE_TICKETS,
+      volumeRatio,
+      bankedShare: this.cfg.EPOCH_FIELD_BANKED_SHARE,
+    });
+    // The HIGH bound is the conservative one for us: a bigger field means a
+    // smaller share and a lower price. Never project the field below what is
+    // already committed — rivals cannot un-buy their tickets.
     const others = Math.max(0, epoch.totalTickets - epoch.myTickets);
-    const projectedField = others * (iterationSlots / elapsed);
+    const projectedField = Math.max(others, bounds.high);
 
     const share = this.cfg.VAULT_MAX_SHARE;
     const capTickets =
@@ -795,7 +816,7 @@ export class Orchestrator {
 
     const uplift = this.cfg.EPOCH_DEDUP_UPLIFT;
     const at = (mine: number): number =>
-      expectedWinningsUsd(mine, projectedField, epoch.poolUsd, "epoch", uplift);
+      expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift);
     const avgTicketUsd = (at(epoch.myTickets + capTickets) - at(epoch.myTickets)) / capTickets;
     if (!(avgTicketUsd > 0)) return null;
 
