@@ -4,6 +4,7 @@ import {
   epochEntryReady,
   epochLateWindowSlots,
   oneBtcEntryReady,
+  marginalTicketUsd,
   oneBtcFillBps,
   type EpochReadState,
   type OneBtcReadState,
@@ -177,5 +178,45 @@ describe("1-BTC trigger eligibility", () => {
     expect(eligible(99_999_999)).toBe(false);
     expect(eligible(ONE)).toBe(true);
     expect(eligible(ONE + 1)).toBe(true);
+  });
+});
+
+// Both vaults draw on the same hashrate balance, so evaluation order decides
+// the allocation. Fixed order meant a cheaper epoch ticket could outrank a
+// richer 1-BTC one purely by position in the source.
+describe("vault ordering by ticket value", () => {
+  const bothReady = (over: Partial<VaultReadState> = {}): VaultReadState => ({
+    slot: 1995, // inside the epoch late window
+    epoch: epoch({ totalTickets: 594_398, poolValueUsd: 40_672 }),
+    oneBtc: oneBtc({ totalTickets: 634_564, poolValueUsd: 58_314 }),
+    ...over,
+  });
+
+  it("ranks the richer 1-BTC ticket ahead of the epoch ticket", () => {
+    const s = bothReady();
+    const e = marginalTicketUsd({ kind: "epoch", state: s.epoch! });
+    const o = marginalTicketUsd({ kind: "one_btc", state: s.oneBtc! });
+    // Live values: epoch ~$0.062, 1-BTC ~$0.092.
+    expect(o).toBeGreaterThan(e);
+  });
+
+  it("evaluates the higher-value vault FIRST when both are eligible", async () => {
+    const { mgr, evaluate } = makeManager(bothReady());
+    await mgr.tick();
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(evaluate.mock.calls[0]![0]).toMatchObject({ kind: "one_btc" });
+    expect(evaluate.mock.calls[1]![0]).toMatchObject({ kind: "epoch" });
+  });
+
+  it("flips the order when the epoch pool is the richer one", async () => {
+    const s = bothReady({ epoch: epoch({ totalTickets: 1000, poolValueUsd: 40_672 }) });
+    const { mgr, evaluate } = makeManager(s);
+    await mgr.tick();
+    expect(evaluate.mock.calls[0]![0]).toMatchObject({ kind: "epoch" });
+  });
+
+  it("scores an empty or unpriced vault at zero rather than dividing by it", () => {
+    expect(marginalTicketUsd({ kind: "epoch", state: epoch({ totalTickets: 0 }) })).toBe(0);
+    expect(marginalTicketUsd({ kind: "one_btc", state: oneBtc({ poolValueUsd: 0 }) })).toBe(0);
   });
 });

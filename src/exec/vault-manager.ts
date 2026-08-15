@@ -12,6 +12,7 @@
  * - 1-BTC: enter only once the vault is near its fill trigger, so the entrant
  *   count right before the draw is visible.
  */
+import { expectedWinningsUsd } from "../strategy/vault.js";
 import type { VaultEngine, VaultSnapshot } from "./vault-engine.js";
 
 export interface EpochReadState {
@@ -91,6 +92,22 @@ export function oneBtcEntryReady(o: OneBtcReadState, minFillBps: number): boolea
   return oneBtcFillBps(o.prizeBtc, o.targetBtc) >= minFillBps;
 }
 
+/**
+ * What the NEXT ticket is worth in this vault, used only to rank competing
+ * vaults for a shared hashrate budget. Evaluated at zero holdings, which is the
+ * right basis for ordering: at our share the marginal ticket is essentially the
+ * average one, and any error is identical across vaults so it cannot flip the
+ * comparison.
+ */
+export function marginalTicketUsd(v: {
+  kind: VaultSnapshot["kind"];
+  state: EpochReadState | OneBtcReadState;
+}): number {
+  const { poolValueUsd, totalTickets } = v.state;
+  if (!(poolValueUsd > 0) || !(totalTickets > 0)) return 0;
+  return expectedWinningsUsd(1, totalTickets, poolValueUsd, v.kind);
+}
+
 export interface VaultManagerOpts {
   engine: VaultEngine;
   readState: () => Promise<VaultReadState>;
@@ -134,6 +151,12 @@ export class VaultManager {
       return;
     }
 
+    // Both vaults spend the SAME hashrate balance, so whichever is evaluated
+    // first can consume the whole budget. Evaluating in a fixed order therefore
+    // silently decides the allocation: with epoch hard-coded first, a $0.064
+    // epoch ticket would outrank a $0.092 1-BTC ticket purely by source order.
+    // Rank eligible vaults by what the next ticket is actually worth instead.
+    const eligible: { kind: VaultSnapshot["kind"]; state: EpochReadState | OneBtcReadState }[] = [];
     if (
       state.epoch &&
       epochEntryReady(
@@ -146,11 +169,13 @@ export class VaultManager {
         ),
       )
     ) {
-      await this.evaluate("epoch", state.epoch);
+      eligible.push({ kind: "epoch", state: state.epoch });
     }
     if (state.oneBtc && oneBtcEntryReady(state.oneBtc, this.opts.oneBtcMinFillBps)) {
-      await this.evaluate("one_btc", state.oneBtc);
+      eligible.push({ kind: "one_btc", state: state.oneBtc });
     }
+    eligible.sort((a, b) => marginalTicketUsd(b) - marginalTicketUsd(a));
+    for (const v of eligible) await this.evaluate(v.kind, v.state);
 
     // Claim/crank pass — collect resolved winnings (and crank draws if enabled).
     if (this.opts.postTick) {
