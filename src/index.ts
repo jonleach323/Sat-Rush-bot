@@ -131,6 +131,8 @@ export class Orchestrator {
   /** Wall-clock ms of the most recent Sat Strike, for the post-Strike hashrate
    * bonus window; null until one is observed this process. */
   private lastStrikeAtMs: number | null = null;
+  /** Per-crank failure backoff, so a bad eligibility check cannot spam sends. */
+  private readonly crankBackoff = new Map<string, { failures: number; nextAttemptMs: number }>();
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
@@ -642,6 +644,40 @@ export class Orchestrator {
       },
       strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /** The program's 1-BTC draw trigger, in BTC base units. */
+  private oneBtcTargetBase(): number {
+    return Math.round(this.cfg.VAULT_ONE_BTC_TARGET_BTC * 1e8);
+  }
+
+  /**
+   * Exponential backoff for permissionless cranks.
+   *
+   * A crank runs off a 5s poll, so any predicate that wrongly says "eligible"
+   * becomes a transaction every 5 seconds until someone notices — ~17k failed
+   * sends a day, which is both a real SOL burn and the kind of traffic that
+   * gets an endpoint rate-limited. The eligibility bug that caused this is
+   * fixed, but the blast radius shouldn't depend on the predicate being right:
+   * after each failure the same crank waits twice as long, capped at 30 min,
+   * and any success clears it.
+   */
+  private crankBlocked(key: string): boolean {
+    const s = this.crankBackoff.get(key);
+    return s !== undefined && Date.now() < s.nextAttemptMs;
+  }
+
+  private noteCrankOutcome(key: string, ok: boolean): void {
+    if (ok) {
+      this.crankBackoff.delete(key);
+      return;
+    }
+    const failures = (this.crankBackoff.get(key)?.failures ?? 0) + 1;
+    const delay = Math.min(30 * 60_000, 5_000 * 2 ** Math.min(failures, 10));
+    this.crankBackoff.set(key, { failures, nextAttemptMs: Date.now() + delay });
+    if (failures === 1 || failures % 5 === 0) {
+      this.log.warn({ crank: key, failures, retryInMs: delay }, "crank failing — backing off");
+    }
   }
 
   /**
@@ -1524,10 +1560,13 @@ export class Orchestrator {
     });
 
     if (action === "trigger") {
-      await this.sendVaultIx(
+      const key = `epoch_trigger:${iterationId}`;
+      if (this.crankBlocked(key)) return;
+      const outcome = await this.sendVaultIx(
         buildTriggerEpochDraw(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
         { kind: "vault_epoch_trigger", iterationId },
       );
+      this.noteCrankOutcome(key, outcome === "landed");
     } else if (action === "select") {
       const pages: { pageIndex: number; cumulativeBase: bigint; totalTickets: bigint }[] = [];
       for (let p = 0; p < it.page_count; p++) {
@@ -1545,10 +1584,13 @@ export class Orchestrator {
       }
       const pageIndex = epochWinnerPageIndex(pages, BigInt(it.current_winning_ticket.toString()));
       if (pageIndex >= 0) {
-        await this.sendVaultIx(
+        const key = `epoch_select:${iterationId}`;
+        if (this.crankBlocked(key)) return;
+        const outcome = await this.sendVaultIx(
           buildSelectEpochWinner(this.ixCtx, { authority: this.payer.publicKey, iterationId, pageIndex }),
           { kind: "vault_epoch_select", iterationId, pageIndex },
         );
+        this.noteCrankOutcome(key, outcome === "landed");
       }
     } else if (action === "claim") {
       const outcome = await this.sendVaultClaim(
@@ -1581,10 +1623,17 @@ export class Orchestrator {
     const stateName = Object.keys(it.state)[0] as OneBtcStateName;
     const vInfo = await this.connection.getAccountInfo(oneBtcVaultPda(programId), "processed");
     const v = vInfo ? decodeAccount<OneBtcVault>("OneBtcVault", vInfo.data) : null;
+    // The draw is eligible only once the vault has ACCRUED the 1 BTC trigger.
+    // This used to compare btc_amount against reserved_btc_amount — the
+    // unclaimed-prize escrow, which is 0 while a round accumulates — so it read
+    // as permanently triggerable and cranked a doomed trigger every poll tick.
+    const prizeBtc = v
+      ? Math.max(0, Number(v.btc_amount.toString()) - Number(v.reserved_btc_amount.toString()))
+      : 0;
     const triggerable =
       v !== null &&
       v.iteration_id === iterationId &&
-      Number(v.btc_amount.toString()) >= Number(v.reserved_btc_amount.toString());
+      prizeBtc >= this.oneBtcTargetBase();
 
     let weWon = false;
     let winningTicketAcct: PublicKey | null = null;
@@ -1606,10 +1655,13 @@ export class Orchestrator {
     const action = oneBtcAction({ state: stateName, triggerable, weWon, selfCrank });
 
     if (action === "trigger") {
-      await this.sendVaultIx(
+      const key = `one_btc_trigger:${iterationId}`;
+      if (this.crankBlocked(key)) return;
+      const outcome = await this.sendVaultIx(
         buildTriggerOneBtcDraw(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
         { kind: "vault_one_btc_trigger", iterationId },
       );
+      this.noteCrankOutcome(key, outcome === "landed");
     } else if (action === "claim" && winningTicketAcct) {
       const outcome = await this.sendVaultClaim(
         "one_btc",

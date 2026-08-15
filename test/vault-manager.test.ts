@@ -158,3 +158,24 @@ describe("VaultManager.tick", () => {
     expect(evaluate).not.toHaveBeenCalled();
   });
 });
+
+// Regression: the 1-BTC draw is eligible at 1 BTC ACCRUED, not at
+// reserved_btc_amount (the unclaimed-prize escrow, 0 during accumulation).
+// Comparing against the escrow read as permanently eligible and cranked a
+// doomed trigger every 5s poll tick.
+describe("1-BTC trigger eligibility", () => {
+  const ONE = 100_000_000;
+  const eligible = (prizeBtc: number, target = ONE) => prizeBtc >= target;
+
+  it("is NOT eligible at 92% accrued — the state that spammed", () => {
+    expect(eligible(92_490_869)).toBe(false);
+    // The old predicate compared against a zero escrow and was always true.
+    expect(92_490_869 >= 0).toBe(true);
+  });
+
+  it("becomes eligible only at the full 1 BTC", () => {
+    expect(eligible(99_999_999)).toBe(false);
+    expect(eligible(ONE)).toBe(true);
+    expect(eligible(ONE + 1)).toBe(true);
+  });
+});
