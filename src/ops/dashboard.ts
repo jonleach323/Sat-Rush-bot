@@ -265,7 +265,8 @@ function render(s, rounds, deploys, comp, health, vault, pnl, intel) {
   const net = s.pnl.todayNetUsd;
   el("hero").innerHTML = [
     ["Today net", usd(net), net>=0?"pos":"neg", "deployed "+usd(s.pnl.deployedTodayUsd)+" · returned "+usd(s.pnl.returnedTodayUsd)],
-    ["Unclaimed", usd(s.unclaimed.usd), "accent", s.unclaimed.shares+" vault shares"],
+    ["Unclaimed", usd(s.unclaimed.usd + (s.unclaimed.sharesUsd||0)), "accent",
+      usd(s.unclaimed.usd)+" USDC + "+usd(s.unclaimed.sharesUsd||0)+" in BTC shares (net of claim fee)"],
     ["Board total", usd(s.board.totalUsd), "", (s.round.state||"")+" · "+(s.me.tiles.length?("on "+s.me.tiles.length+" tiles"):"not in round")],
     ["Strike pool", usd(s.board.strikePoolUsd), "accent", "jackpot overlay"],
   ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
@@ -379,7 +380,8 @@ function renderIntel(intel, vault) {
   el("calibration").innerHTML = [
     ["Realized edge", bps(c.realizedBps),
       c.realizedBps==null ? "dim" : c.realizedBps>c.benchmarkBps ? "pos" : "neg",
-      "vs "+bps(c.benchmarkBps)+" passive benchmark"],
+      "USD "+bps(c.realizedUsdBps)+" + BTC shares "+bps(c.realizedSharesBps)
+      +" · vs "+bps(c.benchmarkBps)+" passive benchmark"],
     ["Modeled edge", bps(c.modeledBps), c.modeledBps==null?"dim":"", "what the EV model predicted"],
     ["Model drift", (c.modeledBps!=null&&c.realizedBps!=null) ? bps(c.modeledBps-c.realizedBps) : "—",
       (c.modeledBps!=null&&c.realizedBps!=null&&Math.abs(c.modeledBps-c.realizedBps)>300)?"warn":"dim",

@@ -24,7 +24,9 @@ function raw(): Database.Database {
   return new Database(lastDbPath);
 }
 
-const OPTS = { windowRounds: 500, fireOffsetSlots: 4 };
+// One share ≈ 1.6e-11 BTC at ~$63k, net of the 10% claim fee ≈ $9.3e-7.
+const SHARE_USD = 9.3e-7;
+const OPTS = { windowRounds: 500, fireOffsetSlots: 4, shareValueUsd: SHARE_USD };
 
 function seedRound(db: StateDb, id: number, over: Partial<{ winningTile: number | null; strike: boolean }> = {}) {
   db.recordRound({
@@ -234,7 +236,69 @@ describe("buildIntel", () => {
     const intel = buildIntel(db, OPTS);
     expect(intel.calibration.landed).toBe(1);
     expect(intel.calibration.modeledBps).toBeCloseTo(500, 6);
+    expect(intel.calibration.realizedUsdBps).toBeCloseTo(1000, 6);
+    expect(intel.calibration.realizedSharesBps).toBe(0); // no shares won here
     expect(intel.calibration.realizedBps).toBeCloseTo(1000, 6);
+    db.close();
+  });
+
+  // The sats vault takes ~12% of every deploy and returns it as BTC shares, not
+  // USDC. Omitting that leg is what made a profitable position read as a heavy
+  // loss, so it has to be counted and it has to be counted separately.
+  it("values won BTC shares into realized edge alongside the USD leg", () => {
+    const db = freshDb();
+    seedRound(db, 1);
+    db.recordMyDeploy({
+      roundId: 1,
+      mask: 7,
+      amount: usdToBase(100),
+      evExpected: Number(usdToBase(5)),
+      firedSlot: 146,
+      sig: "mine-1",
+      status: "landed",
+    });
+    // $80 back in USD (−2000 bps) but 16M shares ≈ $14.88 at SHARE_USD.
+    db.recordSettlement({
+      roundId: 1,
+      winningStake: usdToBase(10),
+      wonUsd: usdToBase(80),
+      wonShares: 16_000_000n,
+      hashrateEarned: 0n,
+      sig: "settle-1",
+    });
+
+    const c = buildIntel(db, OPTS).calibration;
+    expect(c.realizedUsdBps).toBeCloseTo(-2000, 6);
+    // 16e6 * 9.3e-7 = $14.88 on a $100 deploy = 1488 bps.
+    expect(c.realizedSharesBps).toBeCloseTo(1488, 3);
+    // USD-only says a heavy loss; the full picture is barely negative.
+    expect(c.realizedBps).toBeCloseTo(-512, 3);
+    db.close();
+  });
+
+  it("degrades the share leg to zero when the vault price is unknown", () => {
+    const db = freshDb();
+    seedRound(db, 1);
+    db.recordMyDeploy({
+      roundId: 1,
+      mask: 7,
+      amount: usdToBase(100),
+      evExpected: 0,
+      firedSlot: 146,
+      sig: "mine-1",
+      status: "landed",
+    });
+    db.recordSettlement({
+      roundId: 1,
+      winningStake: usdToBase(10),
+      wonUsd: usdToBase(80),
+      wonShares: 16_000_000n,
+      hashrateEarned: 0n,
+      sig: "settle-1",
+    });
+    const c = buildIntel(db, { ...OPTS, shareValueUsd: 0 }).calibration;
+    expect(c.realizedSharesBps).toBe(0);
+    expect(c.realizedBps).toBeCloseTo(-2000, 6); // never invents a value
     db.close();
   });
 

@@ -36,7 +36,13 @@ export interface StatusJson {
   board: { tileStakesUsd: number[]; totalUsd: number; strikePoolUsd: number };
   me: { streak: number | null; tiles: number[]; stakeUsd: number };
   pnl: { todayNetUsd: number; deployedTodayUsd: number; returnedTodayUsd: number };
-  unclaimed: { usd: number; shares: string };
+  /**
+   * `sharesUsd` is the BTC-share position valued NET of the claim fee. Roughly
+   * 12% of every deploy comes back this way rather than as USDC, so a P&L that
+   * reports only `usd` understates the position by that much — the single
+   * easiest way to mistake a profitable bot for a losing one.
+   */
+  unclaimed: { usd: number; shares: string; sharesUsd: number };
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
   /** Oracle prices actually in force; `live: false` means a fallback is in use. */
   prices: PriceStatus;
@@ -152,6 +158,8 @@ export interface MonitorContext {
   hashrateValue: () => VaultJson["hashrateValue"];
   /** Fire offset in force, for the "which rivals fire after us" split. */
   fireOffsetSlots: () => number;
+  /** USD value of ONE sats-vault BTC share, net of the claim fee. 0 if unknown. */
+  shareValueUsd: () => number;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -218,6 +226,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         unclaimed: {
           usd: baseToUsd(big(miner?.unclaimed_usd_amount)),
           shares: big(miner?.unclaimed_btc_shares).toString(),
+          sharesUsd: Number(big(miner?.unclaimed_btc_shares)) * ctx.shareValueUsd(),
         },
         caps: {
           maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
@@ -310,6 +319,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
       return buildIntel(ctx.db, {
         windowRounds: Math.min(Math.max(1, windowRounds), 5000),
         fireOffsetSlots: ctx.fireOffsetSlots(),
+        shareValueUsd: ctx.shareValueUsd(),
       });
     },
 

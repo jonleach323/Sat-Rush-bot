@@ -93,7 +93,21 @@ export interface IntelJson {
     landed: number;
     /** Mean modeled edge, bps of gross deploy. */
     modeledBps: number | null;
-    /** Realized edge over the same deploys, bps. */
+    /**
+     * Realized edge counting ONLY the USD leg — what settlements paid in USDC.
+     * On its own this is a misleading number: roughly 12% of every deploy is
+     * routed to the sats vault and returned as BTC shares, never as USD, so
+     * USD-only accounting shows a structural loss on a profitable position.
+     * Kept because it is what actually hit the wallet.
+     */
+    realizedUsdBps: number | null;
+    /** BTC shares won over the same deploys, valued at the live BTC price. */
+    realizedSharesBps: number | null;
+    /**
+     * Total realized edge, USD leg + BTC-share leg. THIS is the figure
+     * comparable to modeledBps, because the EV model credits the sats-vault
+     * leg back (net of the claim fee) rather than treating it as a cost.
+     */
     realizedBps: number | null;
     benchmarkBps: number;
   };
@@ -139,6 +153,12 @@ export interface IntelOptions {
   windowRounds: number;
   /** Our current fire offset, for the "who fires after us" split. */
   fireOffsetSlots: number;
+  /**
+   * USD value of one sats-vault BTC share, NET of the claim fee — i.e. what a
+   * share is actually worth if realised. 0 when the vault state is unknown,
+   * which degrades the share leg to zero rather than inventing a value.
+   */
+  shareValueUsd: number;
 }
 
 export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
@@ -261,21 +281,30 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
     modeled: number | null;
     deployed: number | null;
     won: number | null;
+    shares: number | null;
   }>(
     `SELECT COUNT(*) AS n,
             AVG(d.ev_expected / CAST(d.amount AS REAL)) AS modeled,
             SUM(CAST(d.amount AS REAL)) AS deployed,
-            SUM(CAST(s.won_usd AS REAL)) AS won
+            SUM(CAST(s.won_usd AS REAL)) AS won,
+            SUM(CAST(s.won_shares AS REAL)) AS shares
      FROM my_deploys d JOIN settlements s ON s.round_id = d.round_id
      WHERE d.status = 'landed' AND CAST(d.amount AS REAL) > 0`,
-  ) ?? { n: 0, modeled: null, deployed: null, won: null };
+  ) ?? { n: 0, modeled: null, deployed: null, won: null, shares: null };
+
+  const deployed = cal.deployed && cal.deployed > 0 ? cal.deployed : null;
+  // Base units → USD for the deployed/won legs; shares are a raw count.
+  const usdBps = deployed != null && cal.won != null
+    ? ((cal.won - deployed) / deployed) * 10_000
+    : null;
+  const sharesUsdBase = (cal.shares ?? 0) * opts.shareValueUsd * 1e6;
+  const sharesBps = deployed != null ? (sharesUsdBase / deployed) * 10_000 : null;
   const calibration = {
     landed: cal.n,
     modeledBps: cal.modeled != null ? cal.modeled * 10_000 : null,
-    realizedBps:
-      cal.deployed && cal.deployed > 0 && cal.won != null
-        ? ((cal.won - cal.deployed) / cal.deployed) * 10_000
-        : null,
+    realizedUsdBps: usdBps,
+    realizedSharesBps: sharesBps,
+    realizedBps: usdBps != null ? usdBps + (sharesBps ?? 0) : null,
     benchmarkBps: PASSIVE_BENCHMARK_BPS,
   };
 

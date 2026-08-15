@@ -230,6 +230,7 @@ export class Orchestrator {
       ticketPriceHashrate: cfg.VAULT_HASHRATE_PER_TICKET,
       vaultPools: () => this.vaultPoolCache,
       fireOffsetSlots: () => this.currentFireOffset(),
+      shareValueUsd: () => this.satsShareValueUsd(),
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -638,6 +639,29 @@ export class Orchestrator {
       },
       strikeExpectedPot: this.strikeExpectedPotBase(),
     };
+  }
+
+  /**
+   * USD value of ONE sats-vault BTC share, net of the claim fee.
+   *
+   * The sats vault takes ~12% of every deploy and returns it as BTC shares, not
+   * USDC. Settlements record won_shares, but nothing valued them, so both the
+   * P&L and the realized-edge metric silently omitted the single largest
+   * return leg — enough to make a profitable position read as a heavy loss.
+   *
+   * Net of sats_vault_claim_fee_bps because that is what the shares are
+   * actually worth to us; gross would overstate a position we can only realise
+   * by paying the exit fee.
+   */
+  private satsShareValueUsd(): number {
+    const vault = this.state.satsVault;
+    if (!vault) return 0;
+    const shares = Number(vault.btc_shares.toString());
+    const btc = Number(vault.btc_amount.toString());
+    if (!(shares > 0) || !(btc > 0)) return 0;
+    const claimFeeBps = this.state.satrushConfig?.sats_vault_claim_fee_bps ?? 0;
+    const net = 1 - claimFeeBps / 10_000;
+    return (btc / shares / 1e8) * this.prices.btcUsd() * net;
   }
 
   /**

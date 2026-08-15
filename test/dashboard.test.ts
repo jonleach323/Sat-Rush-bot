@@ -95,7 +95,7 @@ const status = () => ({
   },
   me: { streak: 30, tiles: [0, 1, 2], stakeUsd: 12 },
   pnl: { todayNetUsd: -7.5, deployedTodayUsd: 199, returnedTodayUsd: 191.5 },
-  unclaimed: { usd: 8.1, shares: "141384" },
+  unclaimed: { usd: 8.1, shares: "141384", sharesUsd: 866.9 },
   caps: { maxPerRoundUsd: 1000, dailyLossCapUsd: 1000, dailyLossLeftUsd: 992.5 },
   prices: { btc: { usd: 63748.13, live: true }, sol: { usd: 76.34, live: true } },
 });
@@ -121,7 +121,14 @@ const intel = () => ({
     looksUniform: true,
   },
   rivalTiming: { samples: 16_500, p10: 2, p50: 18, p90: 44, afterUsShare: 0.11 },
-  calibration: { landed: 98, modeledBps: 368, realizedBps: 552, benchmarkBps: 85 },
+  calibration: {
+    landed: 98,
+    modeledBps: 368,
+    realizedUsdBps: -824,
+    realizedSharesBps: 1376,
+    realizedBps: 552,
+    benchmarkBps: 85,
+  },
   strike: { rounds: 999, strikes: 1, roundsSinceLast: 990 },
 });
 
@@ -227,7 +234,7 @@ describe("dashboard render", () => {
     const { render, els } = loadDashboard();
     const i = intel();
     i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1 }; // edge exists
-    i.calibration = { landed: 98, modeledBps: 368, realizedBps: 20, benchmarkBps: 85 };
+    i.calibration = { landed: 98, modeledBps: 368, realizedUsdBps: -900, realizedSharesBps: 920, realizedBps: 20, benchmarkBps: 85 };
     render(status(), rounds(), deploys(), comp(), health(), vault(), pnl(), i);
     const v = els.get("verdict")!.innerHTML;
     expect(v).toContain("below benchmark");
@@ -238,7 +245,7 @@ describe("dashboard render", () => {
     const { render, els } = loadDashboard();
     const i = intel();
     i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1 };
-    i.calibration = { landed: 98, modeledBps: 2500, realizedBps: 100, benchmarkBps: 85 };
+    i.calibration = { landed: 98, modeledBps: 2500, realizedUsdBps: -800, realizedSharesBps: 900, realizedBps: 100, benchmarkBps: 85 };
     render(status(), rounds(), deploys(), comp(), health(), vault(), pnl(), i);
     expect(els.get("verdict")!.innerHTML).toContain("optimistic");
   });
@@ -271,7 +278,14 @@ describe("dashboard render", () => {
       uniformity: { samples: 0, medianCov: null, uniformShare: null },
       fairness: null,
       rivalTiming: null,
-      calibration: { landed: 0, modeledBps: null, realizedBps: null, benchmarkBps: 85 },
+      calibration: {
+        landed: 0,
+        modeledBps: null,
+        realizedUsdBps: null,
+        realizedSharesBps: null,
+        realizedBps: null,
+        benchmarkBps: 85,
+      },
       strike: { rounds: 0, strikes: 0, roundsSinceLast: null },
     };
     expect(() =>
