@@ -196,3 +196,41 @@ if (wins.length > 0) {
     console.log(`    most frequent: ${repeat.slice(0, 5).map(([k, c]) => `${k.slice(0, 6)}… x${c}`).join(", ")}`);
   }
 }
+
+// ── is the field STATIC? (it is not) ─────────────────────────────────────────
+//
+// Every sizing number in this project treats the field as a fixed block we buy
+// against — a price-taker assumption. The draw history says that is wrong in a
+// specific, predictable way: the field's hashrate-per-dollar is still climbing
+// as streaks mature, so our edge ratio is decaying on a schedule.
+//
+// Field volume is backed out of the pool rather than the (rent-reclaimed) round
+// accounts: inflow_n = pool_n − 0.1·pool_{n−1}, since 10% of each pool rolls
+// over, and volume = inflow / epoch_fee_bps.
+if (draws.length >= 2) {
+  const EPOCH_BPS = 232;
+  const BTC_USD = 62_995; // rough; only scales the volume estimate, not the trend
+  const sorted = [...draws].sort((a, b) => a.iteration - b.iteration);
+  console.log("\n═══ the field is not static — hashrate rate by iteration ═══");
+  console.log("  iter   pool value   est. inflow   est. volume    tickets   field raw/$   our ρ");
+  let prevPool = 0;
+  for (const d of sorted) {
+    const poolValue = d.poolUsd + d.poolBtc * BTC_USD;
+    const inflow = poolValue - 0.1 * prevPool;
+    const volume = inflow / (EPOCH_BPS / 10_000);
+    const rawPerDollar = volume > 0 ? (d.tickets * 100) / volume : 0;
+    // Ours: streak 100, blanket, 65% liquid.
+    const ours = 101 * 0.65;
+    console.log(
+      `  ${String(d.iteration).padStart(4)}   ${usd(poolValue).padStart(10)}   ` +
+        `${usd(inflow).padStart(11)}   ${usd(volume).padStart(11)}   ` +
+        `${d.tickets.toLocaleString().padStart(9)}   ${rawPerDollar.toFixed(1).padStart(11)}   ` +
+        `${(ours / Math.max(0.1, rawPerDollar)).toFixed(2).padStart(5)}x`,
+    );
+    prevPool = poolValue;
+  }
+  console.log("\n  The field started near streak 1 and is still compounding toward the");
+  console.log("  REWARD_MAX_STREAK ceiling (101 raw/$ blanket, 65.7 liquid). Our advantage");
+  console.log("  is a head start on a counter everyone else is also climbing — it decays to");
+  console.log("  1.0x as the field matures, and nothing in the sizing model prices that.");
+}
