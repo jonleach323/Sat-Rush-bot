@@ -104,7 +104,7 @@ for (let i = 0; i < sigs.length; i += 25) {
     // the program exposes an event-authority PDA, which is the tell. Scanning
     // only `Program data:` lines finds nothing and looks like missing history.
     const keys = tx.transaction.message.getAccountKeys({
-      accountKeysFromLookups: tx.meta?.loadedAddresses ?? undefined,
+      accountKeysFromLookups: tx.meta?.loadedAddresses ?? null,
     });
     for (const inner of tx.meta?.innerInstructions ?? []) {
       for (const ix of inner.instructions) {
