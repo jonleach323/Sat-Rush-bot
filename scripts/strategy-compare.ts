@@ -228,10 +228,10 @@ function realised(stakes: number[], alloc: bigint[], winner: number): number {
 // epoch channel to the farming variants only — as the first cut did — hid it.
 //
 // Strike is credited as a flat +274 bps of gross to deploying strategies
-// (294 bps leg x the 0.9333 payout fraction). An approximation: the real thing
+// (294 bps leg x the 0.70 payout fraction). An approximation: the real thing
 // is a ~1/1440 jackpot to the winning tile, so it is lumpy, but its expectation
 // is stake-keyed and identical for every strategy per dollar deployed.
-const STRIKE_RECOVERY = 0.0274;
+const STRIKE_RECOVERY = 0.0206;  // 294 bps leg x 0.70 payout (operator-stated)
 const MIN_BASE = BigInt(num(conf.min_deploy_usd_amount));
 
 interface Strategy {
