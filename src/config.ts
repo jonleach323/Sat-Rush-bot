@@ -426,10 +426,18 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().positive().default(100),
     ),
-    /** Max tickets to hold in a single vault iteration (risk bound). */
+    /** Max tickets to hold in a single vault iteration (risk bound).
+     *
+     * Sized to spend the hashrate we actually hold rather than to throttle it.
+     * Hashrate is a byproduct with exactly one sink, and its ticket price is
+     * propped up by five wallets sitting on 82% of all unspent hashrate — if
+     * any of them converts, ticket EV drops ~77% overnight. Unspent hashrate is
+     * therefore a depreciating asset, and a cap below our balance just forfeits
+     * value. Still a bound: it caps exposure per iteration, and the spend is
+     * separately limited by VAULT_HASHRATE_FRACTION and the balance itself. */
     VAULT_MAX_TICKETS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(100),
+      z.coerce.number().int().positive().default(250),
     ),
     /** Fraction of the wallet's claimable hashrate the vault strategy may spend. */
     VAULT_HASHRATE_FRACTION: z.preprocess(
