@@ -660,12 +660,19 @@ export class Orchestrator {
       fees: this.fees,
       multiplier: 1, // streak multiplier curve is open question 5 — 1 until measured
       semantics: this.cfg.STAKE_SEMANTICS,
-      hashrate: {
-        streak: this.state.miner?.current_streak_count ?? 1,
-        valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
-        multiplier: this.strikeBonusMultiplier(),
-        maxRawUnitsPerRound: this.monetisableRawPerRound(),
-      },
+      // Omitted entirely when the deploy-side credit is gated off, so a round
+      // is judged on the board alone. Spending hashrate we already hold is a
+      // separate path (VAULT_STRATEGY_ENABLED) and keeps running.
+      ...(this.cfg.HASHRATE_DEPLOY_CREDIT_ENABLED
+        ? {
+            hashrate: {
+              streak: this.state.miner?.current_streak_count ?? 1,
+              valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
+              multiplier: this.strikeBonusMultiplier(),
+              maxRawUnitsPerRound: this.monetisableRawPerRound(),
+            },
+          }
+        : {}),
       strikeExpectedPot: this.strikeExpectedPotBase(),
       presenceCreditBase: this.presenceCreditBase(),
     };

@@ -542,6 +542,28 @@ const schema = z
       emptyToUndef,
       z.coerce.number().positive().default(0.00173),
     ),
+    /** Let the hashrate a deploy earns subsidise that deploy's cost.
+     *
+     * OFF until epoch farming is PROVEN +EV, which it is not. The distinction
+     * this gates is the one that matters:
+     *
+     *   - Spending hashrate we ALREADY hold on vault tickets is sunk-cost and
+     *     free at the margin. That runs through VAULT_STRATEGY_ENABLED and is
+     *     unaffected by this flag — keep it on.
+     *   - Deploying IN ORDER TO earn hashrate is the farming strategy. That is
+     *     what this credit funds, by rebating deploy cost and so making
+     *     marginal rounds look playable that the board alone would decline.
+     *
+     * The evidence is not there. The measured +$35.81/day for farm-21 was
+     * priced against a $46,553 pool from iteration 4; volume then fell ~4.7x,
+     * which supports a pool nearer $12,000, and the margin was thinner than
+     * that swing. The honest current range straddles zero.
+     *
+     * The bar for turning this on: a full iteration where the measured epoch
+     * take, against the pool that actually closed, exceeds the board cost of
+     * the deploys that earned it — not a projection made mid-iteration, which
+     * is the specific error made twice in this branch. */
+    HASHRATE_DEPLOY_CREDIT_ENABLED: boolFromEnv(false),
     STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),
     /** Confidence haircut on the streak option value (0–1).
      *
