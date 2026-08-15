@@ -93,4 +93,57 @@ describe("strikeBonusMultiplier", () => {
       strikeBonusMultiplier({ lastStrikeAtMs: 0, nowMs: 0, windowMs: 0, multiplier: 2 }),
     ).toBe(1);
   });
+
+  // The board's strike_last_trigger_round_id persists across restarts; the
+  // observed-event clock does not. Chain state must win.
+  describe("round-based window (from board state)", () => {
+    const R = { windowRounds: 240 }; // 4h of 60s rounds
+
+    it("is 2x inside the round window even with no observed Strike", () => {
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 0 }),
+      ).toBe(2);
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 239 }),
+      ).toBe(2);
+    });
+
+    it("lapses at the round boundary", () => {
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 240 }),
+      ).toBe(1);
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 2453 }),
+      ).toBe(1);
+    });
+
+    it("overrides a stale observed-event clock in both directions", () => {
+      // Event clock says hot, chain says the window lapsed → chain wins.
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: 0, nowMs: 0, roundsSinceStrike: 500 }),
+      ).toBe(1);
+      // Event clock says cold (missed the reveal), chain says hot → chain wins.
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 9e9, roundsSinceStrike: 5 }),
+      ).toBe(2);
+    });
+
+    it("falls back to the wall clock when board state is unavailable", () => {
+      expect(
+        strikeBonusMultiplier({
+          ...base,
+          lastStrikeAtMs: 0,
+          nowMs: 1000,
+          roundsSinceStrike: null,
+          windowRounds: null,
+        }),
+      ).toBe(2);
+    });
+
+    it("ignores a nonsensical round window rather than trusting it", () => {
+      expect(
+        strikeBonusMultiplier({ ...base, lastStrikeAtMs: 0, nowMs: 1000, roundsSinceStrike: 5, windowRounds: 0 }),
+      ).toBe(2); // fell through to the wall clock, which says hot
+    });
+  });
 });

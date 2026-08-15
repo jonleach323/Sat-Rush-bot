@@ -95,7 +95,7 @@ import {
   type RoundWindow,
 } from "./strategy/competitors.js";
 import type { SelectorConfig } from "./strategy/selector.js";
-import { usdToBase } from "./units.js";
+import { SLOT_SECONDS, usdToBase } from "./units.js";
 
 export type BotState =
   | "BOOT"
@@ -650,30 +650,67 @@ export class Orchestrator {
    * to 0, so every deploy has been priced as though the hashrate it earns were
    * worthless.
    *
-   * Only OPEN vaults count: value we cannot currently enter is not value. An
-   * explicitly configured HASHRATE_VALUE_USD wins, so the operator can always
-   * override the derivation; 0 (the default) means "derive it".
+   * Only value we could actually ACT on counts, which is stricter than "open":
+   *
+   * - The epoch vault resolves on a fixed ~3-day cadence and has paid out every
+   *   iteration, so its marginal ticket EV is realisable value.
+   * - The 1-BTC vault only draws when it fills to 1 BTC. It has never settled,
+   *   and tickets keep accruing the whole way — so its headline per-ticket EV
+   *   is an upper bound on something weeks out, not a price. It is only counted
+   *   once it is near enough to trigger that we would genuinely enter it, which
+   *   is exactly the VAULT_ONE_BTC_MIN_FILL_BPS gate the entry path uses.
+   *
+   * Taking the max over everything open would price hashrate off the vault that
+   * pays least often, and this figure credits every deploy — overstating it
+   * makes the bot over-deploy on a promise it cannot collect.
+   *
+   * An explicitly configured HASHRATE_VALUE_USD wins, so the operator can
+   * always override the derivation; 0 (the default) means "derive it".
    */
   private hashrateValueUsdPerRawUnit(): number {
     if (this.cfg.HASHRATE_VALUE_USD > 0) return this.cfg.HASHRATE_VALUE_USD;
     if (!this.cfg.VAULT_STRATEGY_ENABLED) return 0;
     const pools = this.vaultPoolCache;
     if (!pools) return 0;
-    const perTicket = Math.max(
-      pools.epoch?.open ? pools.epoch.ticketEvUsd : 0,
-      pools.oneBtc?.open ? pools.oneBtc.ticketEvUsd : 0,
-    );
+    const epochEv = pools.epoch?.open ? pools.epoch.ticketEvUsd : 0;
+    const oneBtcEv =
+      pools.oneBtc?.open && pools.oneBtc.fillBps >= this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS
+        ? pools.oneBtc.ticketEvUsd
+        : 0;
+    const perTicket = Math.max(epochEv, oneBtcEv);
     if (!(perTicket > 0)) return 0;
     return perTicket / this.cfg.VAULT_HASHRATE_PER_TICKET;
   }
 
-  /** Current post-Sat-Strike hashrate promo multiplier (1 outside the window). */
+  /**
+   * Current post-Sat-Strike hashrate promo multiplier (1 outside the window).
+   *
+   * Measured in ROUNDS off the board's persistent strike_last_trigger_round_id
+   * where possible, so the window survives a restart; the observed-event clock
+   * is only the fallback. The configured window is in minutes, converted using
+   * the board's own round_duration (150 slots ≈ 60s on mainnet) rather than an
+   * assumed round length.
+   */
   private strikeBonusMultiplier(): number {
+    const board = this.state.board;
+    let roundsSinceStrike: number | null = null;
+    let windowRounds: number | null = null;
+    if (board) {
+      const lastTrigger = board.strike_last_trigger_round_id;
+      const duration = board.round_duration;
+      if (lastTrigger > 0 && duration > 0) {
+        roundsSinceStrike = board.round_id - lastTrigger;
+        const roundSeconds = duration * SLOT_SECONDS;
+        windowRounds = Math.round((this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60) / roundSeconds);
+      }
+    }
     return strikeBonusMultiplier({
       lastStrikeAtMs: this.lastStrikeAtMs,
       nowMs: Date.now(),
       windowMs: this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000,
       multiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER,
+      roundsSinceStrike,
+      windowRounds,
     });
   }
 

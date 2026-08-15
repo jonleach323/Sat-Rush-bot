@@ -86,10 +86,33 @@ export function strikeBonusMultiplier(opts: {
   nowMs: number;
   windowMs: number;
   multiplier: number;
+  /**
+   * Rounds since the Strike, read from the Board's persistent
+   * strike_last_trigger_round_id, and how many rounds the window covers.
+   *
+   * Chain state is preferred over the observed event: lastStrikeAtMs is only
+   * set when we witness the RoundRevealed, so a restart (or any downtime)
+   * inside an active window silently drops the 2× and the bot under-credits
+   * every deploy until the next Strike. The board remembers regardless.
+   */
+  roundsSinceStrike?: number | null;
+  windowRounds?: number | null;
 }): number {
   const { lastStrikeAtMs, nowMs, windowMs, multiplier } = opts;
+  if (!(multiplier > 0)) return 1;
+
+  const { roundsSinceStrike, windowRounds } = opts;
+  if (
+    roundsSinceStrike != null &&
+    windowRounds != null &&
+    Number.isFinite(roundsSinceStrike) &&
+    windowRounds > 0
+  ) {
+    return roundsSinceStrike >= 0 && roundsSinceStrike < windowRounds ? multiplier : 1;
+  }
+
   if (lastStrikeAtMs === null) return 1;
-  if (!(windowMs > 0) || !(multiplier > 0)) return 1;
+  if (!(windowMs > 0)) return 1;
   const elapsed = nowMs - lastStrikeAtMs;
   return elapsed >= 0 && elapsed < windowMs ? multiplier : 1;
 }

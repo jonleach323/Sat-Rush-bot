@@ -432,11 +432,15 @@ const schema = z
       z.coerce.number().int().positive().default(600),
     ),
     /** Fraction of the epoch iteration treated as the "late" entry window.
-     * 0.02 of a ~3.5h iteration ≈ 4 minutes — dozens of poll ticks, while the
-     * field's hashrate is already committed. */
+     * Mainnet iterations are 648_000 slots — THREE DAYS, verified against the
+     * public API's iteration history — so this multiplier is large and wants a
+     * small value: 0.001 ≈ 648 slots ≈ 4 minutes, which is ~50 poll ticks and
+     * still the last 0.1% of the cycle. Buying later is strictly better here:
+     * every ticket bought after ours dilutes us, so the last safe moment
+     * minimises post-purchase dilution as well as maximising information. */
     VAULT_EPOCH_LATE_FRACTION: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.02),
+      z.coerce.number().min(0).max(1).default(0.001),
     ),
     /** Enter the 1-BTC draw only once the vault is at least this full (bps of the
      * trigger threshold) — near-trigger, so the entrant field is visible. */

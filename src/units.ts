@@ -12,3 +12,10 @@ export function usdToBase(usd: number): bigint {
 export function baseToUsd(base: bigint): number {
   return Number(base) / Number(USD_BASE);
 }
+
+/**
+ * Nominal Solana slot time. Solana targets 400ms; real slots run slightly
+ * longer under load and skipped slots stretch wall-clock further, so treat any
+ * slots→seconds conversion as an estimate and never as a deadline.
+ */
+export const SLOT_SECONDS = 0.4;
