@@ -68,25 +68,45 @@ describe("hard validation", () => {
     expect(() => validateRoundShape(bad)).toThrow(HaltError);
   });
 
-  it("monotonicity guard: stakes may only grow within a round", () => {
-    const guard = new RoundMonotonicityGuard();
+  it("monotonicity guard: absorbs a fork rollback instead of halting", () => {
+    // Observed live (round 15661, tile 0, -$0.448): we subscribe at `processed`,
+    // which is pre-consensus, so a deploy can land on a fork that is then
+    // abandoned. The smaller value is the truth, not corruption.
+    const seen: unknown[] = [];
+    const guard = new RoundMonotonicityGuard((r) => seen.push(r));
     const s1 = zeros();
-    s1[4] = 1_000_000;
+    s1[4] = 27_523_642;
     guard.check(makeRound(7, s1));
     const s2 = [...s1];
-    s2[4] = 2_000_000;
+    s2[4] = 40_000_000;
     guard.check(makeRound(7, s2)); // growth ok
     const s3 = [...s2];
-    s3[4] = 500_000;
-    expect(() => guard.check(makeRound(7, s3))).toThrow(/stake decreased/);
+    s3[4] = 27_075_398; // one small deploy unwound
+    expect(guard.check(makeRound(7, s3))).toBe(true); // applied, not thrown
+    expect(guard.rollbacks()).toBe(1);
+    expect(seen).toEqual([
+      { roundId: 7, tile: 4, droppedBase: "12924602", slot: undefined },
+    ]);
+    // Baseline moved DOWN, so the same value again is not a second rollback.
+    expect(guard.check(makeRound(7, s3))).toBe(true);
+    expect(guard.rollbacks()).toBe(1);
   });
 
-  it("monotonicity guard: deploy_count may not shrink", () => {
+  it("monotonicity guard: a shrinking deploy_count is a rollback, not a halt", () => {
     const guard = new RoundMonotonicityGuard();
     guard.check(makeRound(8, zeros(), [...zeros().slice(1), 3]));
-    expect(() => guard.check(makeRound(8, zeros(), zeros()))).toThrow(
-      /deploy_count decreased/,
-    );
+    expect(guard.check(makeRound(8, zeros(), zeros()))).toBe(true);
+    expect(guard.rollbacks()).toBe(1);
+  });
+
+  it("monotonicity guard: STILL halts when the board collapses", () => {
+    // A fork unwinds a couple of slots. Losing over half the board cannot come
+    // from that — it is a decode or layout failure, and that must stop the bot.
+    const guard = new RoundMonotonicityGuard();
+    const full = zeros().map(() => 30_000_000);
+    guard.check(makeRound(12, full));
+    const gutted = zeros().map(() => 1_000_000);
+    expect(() => guard.check(makeRound(12, gutted))).toThrow(/collapsed/);
   });
 
   it("monotonicity guard: ignores a stale (older-slot) replay instead of halting", () => {
@@ -107,14 +127,16 @@ describe("hard validation", () => {
     expect(guard.check(makeRound(5809, more), 1001)).toBe(true);
   });
 
-  it("monotonicity guard: still halts on a decrease at a NEWER slot", () => {
+  it("monotonicity guard: a decrease at a NEWER slot is a rollback, not a halt", () => {
     const guard = new RoundMonotonicityGuard();
     const s1 = zeros();
     s1[2] = 9_000_000;
+    s1[3] = 9_000_000;
     guard.check(makeRound(11, s1), 500);
-    const s2 = zeros();
-    s2[2] = 1_000_000;
-    expect(() => guard.check(makeRound(11, s2), 501)).toThrow(/stake decreased/);
+    const s2 = [...s1];
+    s2[2] = 8_000_000; // one tile unwinds; board total stays healthy
+    expect(guard.check(makeRound(11, s2), 501)).toBe(true);
+    expect(guard.rollbacks()).toBe(1);
   });
 
   it("monotonicity guard: a new round id resets the baseline", () => {

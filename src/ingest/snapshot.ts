@@ -23,6 +23,7 @@ import {
 import {
   HaltError,
   RoundMonotonicityGuard,
+  type RoundRollback,
   TILES_COUNT,
   classifyAccount,
   decodeAccountOrHalt,
@@ -53,12 +54,21 @@ export class GameState {
   hiddenPoolEstimate = 0n;
 
   private readonly rounds = new Map<number, Round>();
-  private readonly guard = new RoundMonotonicityGuard();
+  private readonly guard: RoundMonotonicityGuard;
 
   constructor(
     /** Only this wallet's Miner PDA may populate `miner`. */
     private readonly minerAddress: PublicKey | null = null,
-  ) {}
+    /** Notified when a fork rollback is absorbed (visibility, not an error). */
+    onRollback?: (r: RoundRollback) => void,
+  ) {
+    this.guard = new RoundMonotonicityGuard(onRollback);
+  }
+
+  /** Fork rollbacks absorbed since start — expected to be small but non-zero. */
+  rollbacks(): number {
+    return this.guard.rollbacks();
+  }
 
   applySlot(slot: number): void {
     if (slot > this.currentSlot) this.currentSlot = slot;
@@ -168,6 +178,8 @@ export class GameState {
 export interface BootstrapOptions {
   minerAuthority?: PublicKey | undefined;
   programId?: PublicKey | undefined;
+  /** Notified when a fork rollback is absorbed rather than halted on. */
+  onRollback?: ((r: RoundRollback) => void) | undefined;
 }
 
 /**
@@ -183,7 +195,7 @@ export async function bootstrapGameState(
   const minerAddress = opts.minerAuthority
     ? minerPda(opts.minerAuthority, programId)
     : null;
-  const state = new GameState(minerAddress);
+  const state = new GameState(minerAddress, opts.onRollback);
 
   const staticKeys = [
     satrushConfigPda(programId),

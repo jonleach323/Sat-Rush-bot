@@ -38,16 +38,34 @@ describe("chaos: malformed / adversarial account data → HALT", () => {
     expect(() => state.applyAccount(pk, truncated)).toThrow(HaltError);
   });
 
-  it("tile stake DECREASING within a round throws HaltError", async () => {
+  it("a BOARD COLLAPSE within a round throws HaltError", async () => {
+    // A small decrease is a fork rollback and is absorbed (see ingest tests).
+    // Losing most of the board cannot come from unwinding a couple of slots, so
+    // it still halts as a decode/layout failure.
     const state = new GameState();
     const s1 = zeros(); s1[4] = 5_000_000;
-    const s2 = zeros(); s2[4] = 1_000_000; // decreased — impossible
+    const s2 = zeros(); s2[4] = 1_000_000; // 80% of the board gone
     const [buf1, buf2] = await Promise.all([
       accountsCoder.encode("Round", makeRound(7, s1)),
       accountsCoder.encode("Round", makeRound(7, s2)),
     ]);
     state.applyAccount(pk, buf1);
-    expect(() => state.applyAccount(pk, buf2)).toThrow(/decreased/);
+    expect(() => state.applyAccount(pk, buf2)).toThrow(/collapsed/);
+  });
+
+  it("a small fork rollback is absorbed, NOT halted", async () => {
+    const rollbacks: unknown[] = [];
+    const state = new GameState(null, (r) => rollbacks.push(r));
+    const s1 = zeros().map(() => 27_523_642);
+    const s2 = [...s1]; s2[0] = 27_075_398; // the live case: -$0.448 on one tile
+    const [buf1, buf2] = await Promise.all([
+      accountsCoder.encode("Round", makeRound(15661, s1)),
+      accountsCoder.encode("Round", makeRound(15661, s2)),
+    ]);
+    state.applyAccount(pk, buf1);
+    expect(() => state.applyAccount(pk, buf2)).not.toThrow();
+    expect(state.rollbacks()).toBe(1);
+    expect(rollbacks).toHaveLength(1);
   });
 
   it("a valid Round is accepted (control)", async () => {

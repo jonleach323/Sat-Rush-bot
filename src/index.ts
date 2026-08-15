@@ -249,6 +249,11 @@ export class Orchestrator {
     const db = new StateDb(cfg.DB_PATH);
 
     const state = await bootstrapGameState(connection, {
+      onRollback: (r) =>
+        logger.warn(
+          { ...r, droppedUsd: Number(r.droppedBase) / 1e6 },
+          "fork rollback absorbed — board stake moved down at a newer slot",
+        ),
       minerAuthority: payer.publicKey,
       programId,
     });

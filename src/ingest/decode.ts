@@ -86,8 +86,25 @@ interface RoundBaseline {
  * Tracks several round ids at once because current and next round updates
  * interleave around rotation.
  */
+/** A fork rollback: the canonical chain came back with less than we had seen. */
+export interface RoundRollback {
+  roundId: number;
+  tile: number;
+  /** Largest per-tile decrease, in base units. */
+  droppedBase: string;
+  slot?: number | undefined;
+}
+
 export class RoundMonotonicityGuard {
   private readonly baselines = new Map<number, RoundBaseline>();
+  private rollbackCount = 0;
+
+  constructor(private readonly onRollback?: (r: RoundRollback) => void) {}
+
+  /** How many fork rollbacks have been absorbed since start. */
+  rollbacks(): number {
+    return this.rollbackCount;
+  }
 
   /**
    * Validate an update for `round`, observed at `slot` (when known).
@@ -99,10 +116,21 @@ export class RoundMonotonicityGuard {
    * shows smaller stakes. Without slot ordering that reads as a decrease and
    * false-halts the bot. Stale updates are ignored, not treated as corruption.
    *
-   * A decrease at a NEWER slot is still a genuine integrity violation (bad
-   * decode / layout change) and throws. Caveat: a deep fork rollback at
-   * `processed` could also surface that way; it has not been observed, and
-   * halting is the safe response to an unexplained decrease.
+   * A decrease at a NEWER slot is a FORK ROLLBACK, not corruption. We subscribe
+   * at `processed`, which is explicitly pre-consensus: a deploy can land on a
+   * fork that is then abandoned, and the canonical chain legitimately shows a
+   * smaller stake at a later slot. This was observed in production (round
+   * 15661, tile 0, −$0.448 — one small deploy unwound) and halting the bot for
+   * it is a severe overreaction to a normal chain event.
+   *
+   * Rollbacks are therefore accepted: the newer value IS the current truth, so
+   * the baseline moves down and the caller applies it. `onRollback` fires so
+   * the event is still visible.
+   *
+   * Real decode corruption is caught elsewhere and still halts —
+   * validateRoundShape() runs on every check (tile count, negative stakes,
+   * negative counts), and a board total collapsing by more than half cannot
+   * come from unwinding a couple of slots, so that remains a HaltError.
    */
   check(round: Round, slot?: number): boolean {
     validateRoundShape(round);
@@ -121,27 +149,38 @@ export class RoundMonotonicityGuard {
       return false; // stale/out-of-order replay — ignore
     }
     if (prev) {
+      let worstTile = -1;
+      let worstDrop = 0n;
       for (let i = 0; i < TILES_COUNT; i++) {
-        const prevStake = prev.stakes[i] ?? 0n;
-        const nextStake = next.stakes[i] ?? 0n;
-        if (nextStake < prevStake) {
-          throw new HaltError("tile stake decreased within a round", {
+        const drop = (prev.stakes[i] ?? 0n) - (next.stakes[i] ?? 0n);
+        if (drop > worstDrop) {
+          worstDrop = drop;
+          worstTile = i;
+        }
+        if ((next.deployCounts[i] ?? 0) < (prev.deployCounts[i] ?? 0) && worstTile < 0) {
+          worstTile = i; // count unwound even though stake did not
+        }
+      }
+      if (worstTile >= 0) {
+        const sum = (xs: bigint[]): bigint => xs.reduce((a, b) => a + b, 0n);
+        const prevTotal = sum(prev.stakes);
+        const nextTotal = sum(next.stakes);
+        // A fork unwinds a couple of slots of deploys. Losing over half the
+        // board is not that — it is a decode or layout failure.
+        if (prevTotal > 0n && nextTotal * 2n < prevTotal) {
+          throw new HaltError("board stake collapsed within a round", {
             roundId: round.id,
-            tile: i,
-            previous: prevStake.toString(),
-            current: nextStake.toString(),
+            previousTotal: prevTotal.toString(),
+            currentTotal: nextTotal.toString(),
           });
         }
-        const prevCount = prev.deployCounts[i] ?? 0;
-        const nextCount = next.deployCounts[i] ?? 0;
-        if (nextCount < prevCount) {
-          throw new HaltError("tile deploy_count decreased within a round", {
-            roundId: round.id,
-            tile: i,
-            previous: prevCount,
-            current: nextCount,
-          });
-        }
+        this.rollbackCount++;
+        this.onRollback?.({
+          roundId: round.id,
+          tile: worstTile,
+          droppedBase: worstDrop.toString(),
+          slot,
+        });
       }
     }
     this.baselines.set(round.id, next);
