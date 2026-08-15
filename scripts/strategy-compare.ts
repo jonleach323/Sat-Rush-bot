@@ -315,7 +315,7 @@ console.log("  strategy        fires   volume    board$   end streak   tickets/i
 for (const st of STRATEGIES) {
   const a = acc.get(st.name) as Acc;
   const board = a.pnl / 1e6;
-  const rawPerIter = (a.raw / usable.length) * ITER * 0.65;   // 65% liquid
+  const rawPerIter = (a.raw / usable.length) * ITER * 1.246;  // full output + measured bonus
   const tickets = Math.floor(rawPerIter / 100);
   const epoch = tickets > 0 ? epochEv(tickets) : 0;
   const net = board * perDay + (epoch / 3);

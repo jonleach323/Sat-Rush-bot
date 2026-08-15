@@ -86,7 +86,10 @@ const fieldTotal = field.reduce((a, b) => a + b, 0);
 
 // Cost of a ticket in board toll: 6.36% of gross, and gross converts to raw
 // hashrate at 101/$ with 65% liquid → 0.6565 tickets per dollar deployed.
-const TOLL_PER_TICKET = 0.0636 / ((101 * 0.65) / 100);
+// hashrate_earned is the FULL s(m + 21/n) output (operator-confirmed), and
+// unclaimed_hashrate_earned is an ADDITIONAL bonus on top — measured mean
+// 0.246 of it. The old 0.65 haircut treated a bonus as a deduction.
+const TOLL_PER_TICKET = 0.0636 / ((101 * 1.246) / 100);
 
 console.log(`iteration ${iteration}: ${observed.length} wallets, ${observedTotal.toLocaleString()} tickets observed`);
 console.log(`projected to close: ${Math.round(fieldTotal).toLocaleString()} tickets, pool $${POOL_USD.toLocaleString()}`);
