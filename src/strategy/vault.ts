@@ -83,13 +83,16 @@ export const EPOCH_PAYOUT_FRACTION =
  * Not modeled: if participants_count <= 21 every entrant wins something, which
  * is a materially better regime. Refine once recon shows typical participation.
  */
-export function epochWinFraction(p: number): number {
+export function epochWinFraction(p: number, dedupUplift = 1): number {
   const share = Math.max(0, Math.min(1, p));
   let acc = 0;
   for (let i = 0; i < EPOCH_REWARD_CURVE_BPS.length; i++) {
     acc += share * Math.pow(1 - share, i) * ((EPOCH_REWARD_CURVE_BPS[i] ?? 0) / 10_000);
   }
-  return acc;
+  // Whale blocks leaving the pool lift a small holder's odds on later draws;
+  // the sum above deliberately ignores that. Never scale ABOVE the full payout
+  // fraction — the uplift redistributes odds, it cannot mint pool.
+  return Math.min(EPOCH_PAYOUT_FRACTION, acc * Math.max(1, dedupUplift));
 }
 
 export interface VaultTicketContext {
@@ -106,6 +109,8 @@ export interface VaultTicketContext {
   hashrateValueUsd: number;
   /** Hard cap on total tickets we hold in one iteration (risk bound). */
   maxTickets: number;
+  /** Epoch wallet-dedup uplift; 1 = off. Ignored for the 1-BTC vault. */
+  dedupUplift?: number | undefined;
 }
 
 export interface VaultDecision {
@@ -153,6 +158,7 @@ export interface VaultContextInput {
   /** Opportunity value of one hashrate POINT, in USD. */
   hashrateValueUsdPerPoint: number;
   maxTickets: number;
+  dedupUplift?: number | undefined;
 }
 
 /**
@@ -178,6 +184,7 @@ export function buildVaultContext(input: VaultContextInput): VaultTicketContext 
     hashrateAvailable: affordableTickets,
     hashrateValueUsd: input.hashrateValueUsdPerPoint * input.ticketPriceHashrate,
     maxTickets: input.maxTickets,
+    dedupUplift: input.dedupUplift,
   };
 }
 
@@ -193,11 +200,16 @@ export function expectedWinningsUsd(
   othersTickets: number,
   poolValueUsd: number,
   kind: VaultKind = "epoch",
+  dedupUplift = 1,
 ): number {
   const total = myTickets + othersTickets;
   if (total <= 0) return 0;
   const p = myTickets / total;
-  return kind === "epoch" ? epochWinFraction(p) * poolValueUsd : p * poolValueUsd;
+  // Only epoch dedups by wallet; the 1-BTC draw is winner-take-all by ticket
+  // and so is exactly proportional — no uplift applies to it.
+  return kind === "epoch"
+    ? epochWinFraction(p, dedupUplift) * poolValueUsd
+    : p * poolValueUsd;
 }
 
 function validate(ctx: VaultTicketContext): void {
@@ -241,21 +253,13 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
     };
   }
 
-  const base = expectedWinningsUsd(ctx.myTickets, ctx.othersTickets, ctx.poolValueUsd, ctx.kind);
+  const ev = (mine: number): number =>
+    expectedWinningsUsd(mine, ctx.othersTickets, ctx.poolValueUsd, ctx.kind, ctx.dedupUplift);
+  const base = ev(ctx.myTickets);
   let buy = 0;
   while (buy < budget) {
-    const cur = expectedWinningsUsd(
-      ctx.myTickets + buy,
-      ctx.othersTickets,
-      ctx.poolValueUsd,
-      ctx.kind,
-    );
-    const next = expectedWinningsUsd(
-      ctx.myTickets + buy + 1,
-      ctx.othersTickets,
-      ctx.poolValueUsd,
-      ctx.kind,
-    );
+    const cur = ev(ctx.myTickets + buy);
+    const next = ev(ctx.myTickets + buy + 1);
     if (next - cur <= ctx.hashrateValueUsd) break; // marginal ticket not worth it
     buy++;
   }
@@ -269,9 +273,7 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
     };
   }
 
-  const gain =
-    expectedWinningsUsd(ctx.myTickets + buy, ctx.othersTickets, ctx.poolValueUsd, ctx.kind) -
-    base;
+  const gain = ev(ctx.myTickets + buy) - base;
   const evUsd = gain - buy * ctx.hashrateValueUsd;
   const reason = buy === budget ? "cap_reached" : "ok";
   return { tickets: buy, evUsd, winShareAfter: winShare(ctx.myTickets + buy), reason };

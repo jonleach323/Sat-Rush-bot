@@ -1291,6 +1291,7 @@ export class Orchestrator {
       enabled: true, // gate is the manager itself (only started when enabled)
       dry: this.cfg.EXECUTION_MODE === "dry",
       hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
+      epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
       ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
       maxTickets: this.cfg.VAULT_MAX_TICKETS,
       hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
@@ -1387,9 +1388,10 @@ export class Orchestrator {
         mine: number,
       ): number => {
         const others = Math.max(0, total - mine);
+        const up = this.cfg.EPOCH_DEDUP_UPLIFT;
         return (
-          expectedWinningsUsd(mine + 1, others, pool, kind) -
-          expectedWinningsUsd(mine, others, pool, kind)
+          expectedWinningsUsd(mine + 1, others, pool, kind, up) -
+          expectedWinningsUsd(mine, others, pool, kind, up)
         );
       };
       this.vaultPoolCache = {

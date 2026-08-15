@@ -35,6 +35,8 @@ export interface VaultEngineOpts {
   dry: boolean;
   /** Opportunity value of one hashrate POINT, in USD (pickiness floor). */
   hashrateValueUsd: number;
+  /** Epoch dedup uplift (see EPOCH_DEDUP_UPLIFT); 1 = off. */
+  epochDedupUplift?: number | undefined;
   /** Program cost of one ticket in hashrate points (measured devnet = 100). */
   ticketPriceHashrate: number;
   maxTickets: number;
@@ -101,6 +103,7 @@ export class VaultEngine {
         ticketPriceHashrate: this.opts.ticketPriceHashrate,
         hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
         maxTickets: this.opts.maxTickets,
+        dedupUplift: this.opts.epochDedupUplift,
       }),
     );
 

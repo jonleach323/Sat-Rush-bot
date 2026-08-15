@@ -421,6 +421,26 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().positive().default(240),
     ),
+    /** Uplift on epoch ticket EV from wallet-level dedup.
+     *
+     * Epoch winners are deduped by wallet: when a holder is drawn, ALL of its
+     * tickets leave the pool. With the top 10 holding ~71% of tickets, whales
+     * are drawn early and their blocks vanish, so a small holder's odds on
+     * later draws are well above its raw ticket share. epochWinFraction()
+     * models our own once-only constraint but assumes the pool is otherwise
+     * static, which understates EV.
+     *
+     * MEASURED 2026-08-15 against the live distribution (127 participants,
+     * 668,088 tickets, top-10 share 71.5%) by simulating the 21 draws:
+     * true EV / modelled EV = 1.49x at 144 tickets, 1.42x at 500, 1.46x at
+     * 2000 — flat across our size range. 1.45 is the midpoint.
+     *
+     * Re-measure with `pnpm epoch-uplift` if concentration shifts; a flatter
+     * field means less uplift. 1 disables it (the old conservative model). */
+    EPOCH_DEDUP_UPLIFT: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(1).max(5).default(1.45),
+    ),
     /** Hashrate points per vault ticket (measured on devnet = 100). */
     VAULT_HASHRATE_PER_TICKET: z.preprocess(
       emptyToUndef,

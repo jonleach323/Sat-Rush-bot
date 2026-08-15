@@ -278,3 +278,42 @@ describe("selectVaultTickets", () => {
     expect(() => selectVaultTickets(ctx({ hashrateValueUsd: NaN }))).toThrow(RangeError);
   });
 });
+
+// Epoch winners are deduped BY WALLET: a drawn holder's entire block leaves the
+// pool. With tickets concentrated (top 10 held 71.5% live), whales are drawn
+// early and vanish, so a small holder's odds on later draws exceed its raw
+// share. epochWinFraction models our own once-only limit but treats the rest of
+// the pool as static — measured at 1.42-1.49x too low.
+describe("epoch dedup uplift", () => {
+  it("defaults to the old conservative behaviour at uplift 1", () => {
+    expect(epochWinFraction(0.001, 1)).toBeCloseTo(epochWinFraction(0.001), 12);
+  });
+
+  it("scales a small holder's expectation by the uplift", () => {
+    const base = epochWinFraction(0.0002);
+    expect(epochWinFraction(0.0002, 1.45)).toBeCloseTo(base * 1.45, 12);
+  });
+
+  it("never scales past the pool's actual payout fraction", () => {
+    // The uplift redistributes odds between holders; it cannot mint pool.
+    expect(epochWinFraction(0.95, 3)).toBeLessThanOrEqual(EPOCH_PAYOUT_FRACTION);
+    expect(epochWinFraction(1, 5)).toBeCloseTo(EPOCH_PAYOUT_FRACTION, 12);
+  });
+
+  it("treats an uplift below 1 as no uplift", () => {
+    expect(epochWinFraction(0.001, 0.5)).toBeCloseTo(epochWinFraction(0.001), 12);
+  });
+
+  it("leaves the 1-BTC vault alone — it is winner-take-all, not deduped", () => {
+    const withUplift = expectedWinningsUsd(100, 600_000, 50_000, "one_btc", 1.45);
+    const without = expectedWinningsUsd(100, 600_000, 50_000, "one_btc", 1);
+    expect(withUplift).toBeCloseTo(without, 12);
+  });
+
+  it("does raise the epoch vault's expectation", () => {
+    const withUplift = expectedWinningsUsd(144, 668_088, 40_672, "epoch", 1.45);
+    const without = expectedWinningsUsd(144, 668_088, 40_672, "epoch", 1);
+    expect(withUplift / without).toBeCloseTo(1.45, 6);
+    expect(withUplift).toBeGreaterThan(11); // ~$11.4, matching the simulation
+  });
+});
