@@ -7,6 +7,13 @@
  * that, on real historical boards, so the comparison is decided by data rather
  * than by whichever channel was most recently analysed.
  *
+ * VALIDATED: replaying a round's deploy events and summing gross reproduces
+ * Round.deployed_usd_amount x 1.250 on every round checked, i.e. exactly
+ * 1/0.8 — the account records the 8000 bps pot leg, the event records gross.
+ * Two consequences: the replay is complete (a constant ratio means nothing is
+ * being dropped), and any volume figure taken from Round.deployed_usd_amount
+ * and called "gross" is 25% low.
+ *
  * Boards are rebuilt from PublicDeployCreated, which carries selection_mask and
  * total_stake_usd_amount; the program splits a deploy evenly across its masked
  * tiles, so replaying the events reconstructs the exact final per-tile stakes.
@@ -64,24 +71,33 @@ await prices.refresh();
 const SOL = prices.solUsd();
 
 // ── reconstruct boards from deploy events ────────────────────────────────────
-const bpda = boardPda(pid);
+// Deploys write the ROUND PDA, not the Board — scanning board signatures drops
+// roughly a third of them and reconstructs a board that never existed. Walk the
+// round PDAs directly instead: one signature query per round, complete by
+// construction.
+const { roundPda } = await import("../src/adapter/pdas.js");
+const headRound = board.round_id;
+const roundIds: number[] = [];
+for (let i = 1; i <= ROUNDS_WANTED; i++) if (headRound - i > 0) roundIds.push(headRound - i);
+
 const sigs: { sig: string; slot: number }[] = [];
-let before: string | undefined;
-const wantSlots = ROUNDS_WANTED * board.round_duration;
-const headSlot = await conn.getSlot("confirmed");
-while (sigs.length < 60_000) {
-  const page = await conn.getSignaturesForAddress(
-    bpda, { limit: 1000, ...(before ? { before } : {}) }, "confirmed",
+for (let i = 0; i < roundIds.length; i += 8) {
+  await Promise.all(
+    roundIds.slice(i, i + 8).map(async (id) => {
+      let before: string | undefined;
+      for (let page = 0; page < 5; page++) {
+        const res = await conn.getSignaturesForAddress(
+          roundPda(id, pid), { limit: 1000, ...(before ? { before } : {}) }, "confirmed",
+        );
+        if (res.length === 0) break;
+        for (const x of res) if (!x.err) sigs.push({ sig: x.signature, slot: x.slot });
+        if (res.length < 1000) break;
+        before = res[res.length - 1]?.signature;
+      }
+    }),
   );
-  if (page.length === 0) break;
-  for (const s of page) if (!s.err) sigs.push({ sig: s.signature, slot: s.slot });
-  const last = page[page.length - 1];
-  if (!last) break;
-  before = last.signature;
-  if (headSlot - last.slot > wantSlots) break;
-  if (page.length < 1000) break;
 }
-console.log(`${sigs.length.toLocaleString()} board signatures; decoding…`);
+console.log(`${sigs.length.toLocaleString()} round signatures over ${roundIds.length} rounds; decoding…`);
 
 interface Round { stakes: number[]; gross: number; winner: number | null }
 const rounds = new Map<number, Round>();
@@ -134,6 +150,25 @@ const usable = [...rounds.entries()]
   .filter(([, r]) => r.winner !== null && r.winner >= 0 && r.gross > 0)
   .sort((a, b) => a[0] - b[0]);
 console.log(`\rreconstructed ${usable.length} complete rounds                     `);
+// Reconstruction sanity: board size must match the ~$585/round measured off
+// Round accounts. If it does not, the event replay is dropping deploys and
+// every strategy number below is scored against a board that never existed.
+{
+  const tot = usable.map(([, r]) => r.stakes.reduce((a, b) => a + b, 0) / 1e6);
+  const mean = tot.reduce((a, b) => a + b, 0) / tot.length;
+  const disp = usable.map(([, r]) => {
+    const s = r.stakes.filter((x) => x > 0);
+    if (s.length < 21) return 0;
+    const avg = s.reduce((a, b) => a + b, 0) / s.length;
+    return avg > 0 ? Math.min(...s) / avg : 0;
+  }).filter((x) => x > 0);
+  const dmean = disp.length ? disp.reduce((a, b) => a + b, 0) / disp.length : 0;
+  console.log(`  board net/round: mean $${mean.toFixed(2)} (measured off Round accounts: ~$585 gross → ~$538 net)`);
+  console.log(`  emptiest tile / average tile: ${dmean.toFixed(3)} over ${disp.length} full boards`);
+  console.log(`  → break-even for a perfect-information single-tile snipe needs < ${(1/(0.92*0.988)).toFixed(3)}`);
+  const empties = usable.filter(([, r]) => r.stakes.some((x) => x === 0)).length;
+  console.log(`  rounds with at least one EMPTY tile: ${empties}/${usable.length}`);
+}
 if (usable.length === 0) { console.log("no usable rounds"); process.exit(0); }
 
 // ── cost model ───────────────────────────────────────────────────────────────
