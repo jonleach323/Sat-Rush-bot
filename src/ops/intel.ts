@@ -71,6 +71,19 @@ export interface IntelJson {
     medianCov: number | null;
     /** Share of rounds that settled effectively uniform (no tile edge). */
     uniformShare: number | null;
+    /** Fraction of board stake contributed by all-21-tile automations. */
+    blanketShare: number | null;
+    /**
+     * Median CoV with blanket (all-21) automation stake removed.
+     *
+     * A wallet spreading evenly over all 21 tiles adds the SAME amount to every
+     * tile. That raises the mean without touching the absolute spread, so it
+     * mechanically suppresses CoV — flatness that is manufactured rather than
+     * competitive. Subtracting it exposes the dispersion of the field underneath,
+     * which is the board our selector would face if the blanket deployers left.
+     * Higher than medianCov means the visible flatness is not the real one.
+     */
+    residualCov: number | null;
   };
   fairness: {
     samples: number;
@@ -202,13 +215,30 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
   };
 
   // ── Board uniformity (final snapshot per round) ───────────────────────────
-  const finals = db.query<{ stakes_json: string }>(
-    `SELECT stakes_json FROM occupancy_snapshots s
+  const finals = db.query<{ round_id: number; stakes_json: string }>(
+    `SELECT round_id, stakes_json FROM occupancy_snapshots s
      WHERE s.round_id > ?
        AND s.slot = (SELECT MAX(slot) FROM occupancy_snapshots WHERE round_id = s.round_id)`,
     since,
   );
+  // Net stake each round contributed by wallets covering ALL 21 tiles. Such a
+  // deploy adds an identical amount to every tile, so it inflates the mean
+  // while leaving the spread untouched — flatness by construction.
+  const blanketByRound = new Map<number, number>();
+  for (const r of db.query<{ round_id: number; blanket: number }>(
+    `SELECT round_id, COALESCE(SUM(CAST(total_stake AS REAL)), 0) AS blanket
+     FROM competitor_deploys
+     WHERE round_id > ? AND mask = ? GROUP BY round_id`,
+    since,
+    FULL_BOARD_MASK,
+  )) {
+    blanketByRound.set(r.round_id, r.blanket);
+  }
+
   const covs: number[] = [];
+  const residualCovs: number[] = [];
+  let boardTotal = 0;
+  let blanketTotal = 0;
   for (const row of finals) {
     let stakes: unknown;
     try {
@@ -217,10 +247,22 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
       continue; // a malformed snapshot must not take the panel down
     }
     if (!Array.isArray(stakes)) continue;
-    const cov = coefficientOfVariation(stakes.map((v) => Number(v)));
-    if (cov !== null && Number.isFinite(cov)) covs.push(cov);
+    const values = stakes.map((v) => Number(v));
+    const cov = coefficientOfVariation(values);
+    if (cov === null || !Number.isFinite(cov)) continue;
+    covs.push(cov);
+
+    const blanket = blanketByRound.get(row.round_id) ?? 0;
+    boardTotal += values.reduce((a, b) => a + b, 0);
+    blanketTotal += blanket;
+    // Removing a per-tile constant leaves the standard deviation alone and
+    // shrinks the mean, so the residual CoV is the honest dispersion.
+    const residual = values.map((v) => v - blanket / TILES_COUNT);
+    const rc = coefficientOfVariation(residual);
+    if (rc !== null && Number.isFinite(rc)) residualCovs.push(rc);
   }
   covs.sort((a, b) => a - b);
+  residualCovs.sort((a, b) => a - b);
   const uniformity = {
     samples: covs.length,
     medianCov: covs.length > 0 ? percentile(covs, 0.5) : null,
@@ -228,6 +270,8 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
       covs.length > 0
         ? covs.filter((c) => c <= UNIFORM_COV_THRESHOLD).length / covs.length
         : null,
+    blanketShare: boardTotal > 0 ? blanketTotal / boardTotal : null,
+    residualCov: residualCovs.length > 0 ? percentile(residualCovs, 0.5) : null,
   };
 
   // ── Winning-tile fairness (all observed history — more samples is better) ─

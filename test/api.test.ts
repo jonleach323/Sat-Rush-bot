@@ -56,7 +56,13 @@ const fakeData: MonitorData = {
       fullBoardShare: 0.85,
       avgRivalStakeUsd: 14.2,
     },
-    uniformity: { samples: 100, medianCov: 0.012, uniformShare: 0.94 },
+    uniformity: {
+      samples: 100,
+      medianCov: 0.012,
+      uniformShare: 0.94,
+      blanketShare: 0.63,
+      residualCov: 0.19,
+    },
     fairness: {
       samples: 999,
       counts: new Array(21).fill(47),

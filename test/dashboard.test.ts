@@ -111,7 +111,7 @@ const intel = () => ({
     fullBoardShare: 0.86,
     avgRivalStakeUsd: 14.2,
   },
-  uniformity: { samples: 500, medianCov: 0.012, uniformShare: 0.94 },
+  uniformity: { samples: 500, medianCov: 0.012, uniformShare: 0.94, blanketShare: 0.63, residualCov: 0.19 },
   fairness: {
     samples: 999,
     counts: new Array(21).fill(47),
@@ -234,7 +234,7 @@ describe("dashboard render", () => {
   it("verdict warns when realized edge trails the passive benchmark", () => {
     const { render, els } = loadDashboard();
     const i = intel();
-    i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1 }; // edge exists
+    i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1, blanketShare: 0.2, residualCov: 0.4 }; // edge exists
     i.calibration = { landed: 98, modeledBps: 368, realizedUsdBps: -900, realizedSharesBps: 920, realizedBps: 20, benchmarkBps: 85 };
     render(status(), rounds(), deploys(), comp(), health(), vault(), pnl(), i);
     const v = els.get("verdict")!.innerHTML;
@@ -245,7 +245,7 @@ describe("dashboard render", () => {
   it("verdict flags an over-optimistic model", () => {
     const { render, els } = loadDashboard();
     const i = intel();
-    i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1 };
+    i.uniformity = { samples: 500, medianCov: 0.31, uniformShare: 0.1, blanketShare: 0.2, residualCov: 0.4 };
     i.calibration = { landed: 98, modeledBps: 2500, realizedUsdBps: -800, realizedSharesBps: 900, realizedBps: 100, benchmarkBps: 85 };
     render(status(), rounds(), deploys(), comp(), health(), vault(), pnl(), i);
     expect(els.get("verdict")!.innerHTML).toContain("optimistic");
@@ -276,7 +276,7 @@ describe("dashboard render", () => {
         fullBoardShare: 0,
         avgRivalStakeUsd: 0,
       },
-      uniformity: { samples: 0, medianCov: null, uniformShare: null },
+      uniformity: { samples: 0, medianCov: null, uniformShare: null, blanketShare: null, residualCov: null },
       fairness: null,
       rivalTiming: null,
       calibration: {
