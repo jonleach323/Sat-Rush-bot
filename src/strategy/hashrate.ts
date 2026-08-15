@@ -108,7 +108,11 @@ export function strikeBonusMultiplier(opts: {
     Number.isFinite(roundsSinceStrike) &&
     windowRounds > 0
   ) {
-    return roundsSinceStrike >= 0 && roundsSinceStrike < windowRounds ? multiplier : 1;
+    // INCLUSIVE of the boundary round. Measured against the public API: with a
+    // Strike at round 13023, is_hashrate_boosted was true through 13263
+    // (strike + 240) and false at 13264 — so the program boosts the strike
+    // round itself plus the next `windowRounds`, i.e. 241 rounds in total.
+    return roundsSinceStrike >= 0 && roundsSinceStrike <= windowRounds ? multiplier : 1;
   }
 
   if (lastStrikeAtMs === null) return 1;

@@ -725,7 +725,12 @@ export class Orchestrator {
     if (!this.cfg.STRIKE_EV_ENABLED) return 0;
     const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? 0;
     if (modulus <= 0) return 0;
-    return Number(this.state.strikePoolUsd()) / modulus;
+    // Not the whole pool reaches the winning tile: a reserve is retained at
+    // trigger (see STRIKE_PAYOUT_FRACTION). Crediting the full pool overstates
+    // the jackpot leg of every round's EV.
+    return (
+      (Number(this.state.strikePoolUsd()) * this.cfg.STRIKE_PAYOUT_FRACTION) / modulus
+    );
   }
 
   /** Slots before cutoff to fire: the self-calibrated offset if available, else

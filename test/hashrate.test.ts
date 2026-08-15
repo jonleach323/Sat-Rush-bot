@@ -108,9 +108,14 @@ describe("strikeBonusMultiplier", () => {
       ).toBe(2);
     });
 
-    it("lapses at the round boundary", () => {
+    it("includes the boundary round, then lapses", () => {
+      // Verified against the public API: strike at 13023 → boosted through
+      // 13263 (strike + 240), not boosted at 13264.
       expect(
         strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 240 }),
+      ).toBe(2);
+      expect(
+        strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 241 }),
       ).toBe(1);
       expect(
         strikeBonusMultiplier({ ...base, ...R, lastStrikeAtMs: null, nowMs: 0, roundsSinceStrike: 2453 }),

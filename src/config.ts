@@ -120,6 +120,21 @@ const schema = z
      * STRIKE_SIZE_BOOST threshold. On by default (it is simply more accurate EV);
      * disable only if the mainnet strike mechanic proves to differ. */
     STRIKE_EV_ENABLED: boolFromEnv(true),
+    /** Fraction of the accumulated Strike pool that actually reaches the
+     * winning tile's stakers on trigger. The rest is retained as a reserve
+     * which seeds the NEXT strike, so it is real value but not value this
+     * round's deploy can win.
+     *
+     * MEASURED n=1: round 13023 paid $1133.85 of a $1214.84 pool = 0.9333.
+     * The reserve mechanic is new — the prior strike (round 10695) reserved
+     * nothing and paid 100% — so treat this as provisional and re-measure. It
+     * is set below 1 deliberately: the RoundRevealed event reports the true
+     * strike_bonus_usd, so the realized figure can be checked against the pool,
+     * and understating a jackpot is the safe direction when it feeds Kelly. */
+    STRIKE_PAYOUT_FRACTION: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().gt(0).max(1).default(0.9333),
+    ),
     /** Kill switch: if this file exists, all sending stops immediately. */
     KILL_SWITCH_FILE: z.preprocess(emptyToUndef, z.string().default("./KILL")),
 
