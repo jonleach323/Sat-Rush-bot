@@ -219,67 +219,113 @@ function realised(stakes: number[], alloc: bigint[], winner: number): number {
   return others + net <= 0 ? 0 : (pot * net) / (others + net);
 }
 
-const SIZES = { snipe: 25_000_000n, blanket: 21_000_000n, farm: 1_000_000n }; // base units
-const results: Record<string, { pnl: number; deploys: number; volume: number }> = {
-  snipe: { pnl: 0, deploys: 0, volume: 0 },
-  blanket: { pnl: 0, deploys: 0, volume: 0 },
-  farm: { pnl: 0, deploys: 0, volume: 0 },
-};
-let farmRaw = 0;
+// ── strategies ───────────────────────────────────────────────────────────────
+//
+// Every strategy is scored on the SAME rounds with the SAME cost model, and
+// each one carries its own streak. That last part is the whole tension: a
+// strategy that skips a round resets its counter to 1, so abstention protects
+// board P&L and destroys hashrate accrual at the same time. Crediting the
+// epoch channel to the farming variants only — as the first cut did — hid it.
+//
+// Strike is credited as a flat +274 bps of gross to deploying strategies
+// (294 bps leg x the 0.9333 payout fraction). An approximation: the real thing
+// is a ~1/1440 jackpot to the winning tile, so it is lumpy, but its expectation
+// is stake-keyed and identical for every strategy per dollar deployed.
+const STRIKE_RECOVERY = 0.0274;
+const MIN_BASE = BigInt(num(conf.min_deploy_usd_amount));
 
-for (const [, r] of usable) {
+interface Strategy {
+  name: string;
+  /** Return the allocation for this round, or null to sit out. */
+  decide: (ctx: EvContext, stakes: number[], inPromo: boolean) => bigint[] | null;
+}
+const flat = (total: bigint, tiles: number[]): bigint[] => {
+  const a = new Array<bigint>(TILES_COUNT).fill(0n);
+  const per = total / BigInt(tiles.length);
+  for (const t of tiles) a[t] = per;
+  return a;
+};
+const ALL_TILES = Array.from({ length: TILES_COUNT }, (_, i) => i);
+const emptiest = (stakes: number[]): number =>
+  stakes.reduce((best, v, i) => (v < (stakes[best] ?? Infinity) ? i : best), 0);
+
+const STRATEGIES: Strategy[] = [
+  {
+    name: "snipe",
+    decide: (ctx) => {
+      const pick = selectAllocation(ctx, {
+        strategy: "water_filling", maxPerRound: 25_000_000n, minDeploy: MIN_BASE,
+        ladder: [1_000_000n], minEdgeBps: cfg.MIN_EDGE_BPS, kEmptiest: cfg.K_EMPTIEST,
+      });
+      return pick.kind === "deploy" ? pick.allocation : null;
+    },
+  },
+  {
+    // Same selector, but never sits out: pads to the minimum on a skip so the
+    // streak survives. Isolates exactly what abstention costs in hashrate.
+    name: "snipe+present",
+    decide: (ctx, stakes) => {
+      const pick = selectAllocation(ctx, {
+        strategy: "water_filling", maxPerRound: 25_000_000n, minDeploy: MIN_BASE,
+        ladder: [1_000_000n], minEdgeBps: cfg.MIN_EDGE_BPS, kEmptiest: cfg.K_EMPTIEST,
+      });
+      return pick.kind === "deploy" ? pick.allocation : flat(MIN_BASE, [emptiest(stakes)]);
+    },
+  },
+  { name: "blanket", decide: () => flat(21_000_000n, ALL_TILES) },
+  { name: "farm-21", decide: () => flat(MIN_BASE, ALL_TILES) },
+  // One tile earns 21 raw/$ of "skill" hashrate against the blanket's 1, so at
+  // low streak it accrues far faster — at the cost of board variance.
+  { name: "farm-1", decide: (_c, stakes) => flat(MIN_BASE, [emptiest(stakes)]) },
+  { name: "promo-only", decide: (_c, stakes, inPromo) => (inPromo ? flat(MIN_BASE, [emptiest(stakes)]) : null) },
+];
+
+interface Acc { pnl: number; deploys: number; volume: number; raw: number; streak: number }
+const acc = new Map<string, Acc>(
+  STRATEGIES.map((s) => [s.name, { pnl: 0, deploys: 0, volume: 0, raw: 0, streak: 1 }]),
+);
+
+for (const [rid, r] of usable) {
   const winner = r.winner as number;
   const ctx = ctxFor(r.stakes);
+  // Promo windows are ~17% of rounds; without the strike history in this window
+  // we approximate with a deterministic 241-of-1440 cycle on round id.
+  const inPromo = rid % 1440 < 241;
 
-  // 1. SNIPE — the live selector, gated by MIN_EDGE_BPS.
-  const pick = selectAllocation(ctx, {
-    strategy: "water_filling", maxPerRound: SIZES.snipe, minDeploy: BigInt(num(conf.min_deploy_usd_amount)),
-    ladder: [1_000_000n], minEdgeBps: cfg.MIN_EDGE_BPS, kEmptiest: cfg.K_EMPTIEST,
-  });
-  if (pick.kind === "deploy") {
-    const gross = Number(pick.totalGross);
-    results.snipe!.pnl += realised(r.stakes, pick.allocation, winner) - gross - feeUsdPerRound * 1e6;
-    results.snipe!.deploys++; results.snipe!.volume += gross;
+  for (const st of STRATEGIES) {
+    const a = acc.get(st.name) as Acc;
+    const alloc = st.decide(ctx, r.stakes, inPromo);
+    if (alloc === null) { a.streak = 1; continue; }   // a missed round resets it
+    const gross = alloc.reduce((x, y) => x + Number(y), 0);
+    if (gross <= 0) { a.streak = 1; continue; }
+    const tiles = alloc.filter((x) => x > 0n).length;
+    a.pnl += realised(r.stakes, alloc, winner) + gross * STRIKE_RECOVERY - gross - feeUsdPerRound * 1e6;
+    a.deploys++; a.volume += gross;
+    a.raw += (gross / 1e6) * (Math.min(a.streak, 100) + TILES_COUNT / tiles) * (inPromo ? 2 : 1);
+    a.streak++;
   }
-
-  // 2. BLANKET — every round, all 21 tiles, even split.
-  const per = SIZES.blanket / 21n;
-  const bAlloc = new Array<bigint>(TILES_COUNT).fill(per);
-  results.blanket!.pnl += realised(r.stakes, bAlloc, winner) - Number(SIZES.blanket) - feeUsdPerRound * 1e6;
-  results.blanket!.deploys++; results.blanket!.volume += Number(SIZES.blanket);
-
-  // 3. FARM — minimum size every round, blanket, valued for the hashrate it earns.
-  const fPer = SIZES.farm / 21n;
-  const fAlloc = new Array<bigint>(TILES_COUNT).fill(fPer);
-  results.farm!.pnl += realised(r.stakes, fAlloc, winner) - Number(SIZES.farm) - feeUsdPerRound * 1e6;
-  results.farm!.deploys++; results.farm!.volume += Number(SIZES.farm);
-  farmRaw += (Number(SIZES.farm) / 1e6) * 101 * 0.65; // streak 100, blanket, liquid
-  void evOfAllocation;
 }
 
 const perDay = 1440 / usable.length;
+const ITER = 4320;
 console.log(`\nbacktest over ${usable.length} rounds (${(usable.length / 1440).toFixed(2)} days)`);
-console.log(`SOL $${SOL.toFixed(2)}   fee/round/wallet $${feeUsdPerRound.toFixed(5)} ` +
-  `(${LAM_DEPLOY.toLocaleString()} + ${LAM_SETTLE.toLocaleString()} lamports)\n`);
-console.log("  strategy    deploys   volume        board P&L     fees      net/day");
-for (const [name, r] of Object.entries(results)) {
-  const feeTotal = r.deploys * feeUsdPerRound;
+console.log(`SOL $${SOL.toFixed(2)}   fee $${feeUsdPerRound.toFixed(5)}/round   ` +
+  `strike credited flat at ${(STRIKE_RECOVERY * 1e4).toFixed(0)} bps\n`);
+console.log("  strategy        fires   volume    board$   end streak   tickets/iter   epoch$/iter    NET $/day");
+for (const st of STRATEGIES) {
+  const a = acc.get(st.name) as Acc;
+  const board = a.pnl / 1e6;
+  const rawPerIter = (a.raw / usable.length) * ITER * 0.65;   // 65% liquid
+  const tickets = Math.floor(rawPerIter / 100);
+  const epoch = tickets > 0 ? epochEv(tickets) : 0;
+  const net = board * perDay + (epoch / 3);
   console.log(
-    `  ${name.padEnd(10)}  ${String(r.deploys).padStart(7)}   ` +
-      `$${(r.volume / 1e6).toFixed(0).padStart(8)}   ${("$" + (r.pnl / 1e6).toFixed(2)).padStart(11)}   ` +
-      `${("$" + feeTotal.toFixed(2)).padStart(7)}   ` +
-      `${((r.pnl / 1e6) * perDay >= 0 ? "+" : "") + "$" + ((r.pnl / 1e6) * perDay).toFixed(2)}`,
+    `  ${st.name.padEnd(14)}  ${String(a.deploys).padStart(5)}   ` +
+      `$${(a.volume / 1e6).toFixed(0).padStart(6)}   ${("$" + board.toFixed(2)).padStart(9)}   ` +
+      `${String(a.streak).padStart(10)}   ${tickets.toLocaleString().padStart(12)}   ` +
+      `${("$" + epoch.toFixed(0)).padStart(11)}   ${(net >= 0 ? "+" : "") + "$" + net.toFixed(2)}`,
   );
 }
-
-// Farm's epoch credit, scaled to a full iteration.
-const rawPerIteration = (farmRaw / usable.length) * 4320;
-const ticketsPerIteration = Math.floor(rawPerIteration / 100);
-const epochTake = epochEv(ticketsPerIteration);
-const farmBoardPerIteration = (results.farm!.pnl / 1e6 / usable.length) * 4320;
-console.log(`\n  farm, full epoch accounting (4,320-round iteration):`);
-console.log(`    tickets earned   ${ticketsPerIteration.toLocaleString()}`);
-console.log(`    epoch take       $${epochTake.toFixed(2)}`);
-console.log(`    board + fees     $${farmBoardPerIteration.toFixed(2)}`);
-console.log(`    NET              ${(epochTake + farmBoardPerIteration >= 0 ? "+" : "")}$${(epochTake + farmBoardPerIteration).toFixed(2)} per iteration ` +
-  `= $${((epochTake + farmBoardPerIteration) / 3).toFixed(2)}/day`);
+console.log("\n  NET = board P&L scaled to a day + the epoch take the round's hashrate buys,");
+console.log("  spread over the 3-day iteration. Fires shows how often each strategy acted.");
+void evOfAllocation;

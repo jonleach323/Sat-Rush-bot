@@ -492,7 +492,14 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().nonnegative().default(5_000_000),
     ),
-    STREAK_OPTION_VALUE_ENABLED: boolFromEnv(true),
+    /** DEFAULT OFF after backtesting. Over 1,198 reconstructed rounds the same
+     * selector forced to stay present every round to protect its streak ran
+     * -$299/day against +$70/day for the one allowed to sit out: the hashrate a
+     * marginal round earns is worth far less than the board cost of deploying
+     * into a board that did not justify it. The streak reset is real, it is
+     * just not worth buying at the price of the rounds needed to keep it. Turn
+     * on only if the epoch channel gets materially richer than it is today. */
+    STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),
     /** Confidence haircut on the streak option value (0–1).
      *
      * The loss is real but projected: it assumes we keep deploying at this rate
