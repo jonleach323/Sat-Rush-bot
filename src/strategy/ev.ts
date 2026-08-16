@@ -65,6 +65,39 @@ export function feeModelFromConfig(config: SatrushConfig): FeeModel {
   };
 }
 
+/**
+ * Fraction of a Sat Strike bonus that actually reaches the winner.
+ *
+ * Operator-stated 70/30. This replaced an invented 0.9333 that had been
+ * flattering every deploying strategy by ~68 bps of gross; the old value still
+ * survived in one script long after the correction, which is why the number
+ * lives here now instead of being retyped per caller.
+ */
+export const STRIKE_PAYOUT_FRACTION = 0.70;
+
+/**
+ * Round-trip return on a BLANKET deploy, as a fraction of gross.
+ *
+ * Covering all 21 tiles guarantees holding the winner, so the parimutuel
+ * variance vanishes and what remains is pure toll — which makes this the
+ * reference cost of simply being present (the thing epoch farming has to beat).
+ *
+ * Three legs: the deploy fees never reach the tiles; the sats-vault round leg
+ * comes back as shares and only its CLAIM fee is truly lost; the strike leg
+ * returns at the operator-stated payout fraction. Returns > 1 would mean
+ * presence pays for itself, which it does not at any fee schedule seen so far.
+ */
+export function blanketReturn(fees: FeeModel, strikeFeeBps: number): number {
+  const potLeg = (1 - fees.deployFeeBps / BPS) *
+    (1 - (fees.satsVaultRoundBps / BPS) * (fees.satsVaultClaimBps / BPS));
+  return potLeg + (strikeFeeBps / BPS) * STRIKE_PAYOUT_FRACTION;
+}
+
+/** Cost of blanket presence as a fraction of gross — 1 − blanketReturn. */
+export function blanketToll(fees: FeeModel, strikeFeeBps: number): number {
+  return 1 - blanketReturn(fees, strikeFeeBps);
+}
+
 export interface EvContext {
   /** Predicted-final per-tile stakes S_i (base units), length 21. */
   predictedStakes: bigint[];

@@ -27,10 +27,16 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import { loadConfig } from "../src/config.js";
 import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../src/strategy/vault.js";
+import { blanketToll, feeModelFromConfig } from "../src/strategy/ev.js";
+import { decodeAccount, type SatrushConfig } from "../src/adapter/idl.js";
+import { satrushConfigPda } from "../src/adapter/pdas.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
 const pid = new PublicKey(cfg.PROGRAM_ID);
+const conf = decodeAccount<SatrushConfig>(
+  "SatrushConfig", (await conn.getAccountInfo(satrushConfigPda(pid), "confirmed"))!.data);
+const fees = feeModelFromConfig(conf);
 const usd = (n: number): string =>
   `${n < 0 ? "-" : "+"}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
@@ -84,12 +90,19 @@ const field = measured ?? observed.map((t) => t * (PROJECTED_FIELD / observedTot
 if (measured) console.log("using MEASURED iteration-4 distribution (157 wallets)");
 const fieldTotal = field.reduce((a, b) => a + b, 0);
 
-// Cost of a ticket in board toll: 6.36% of gross, and gross converts to raw
-// hashrate at 101/$ with 65% liquid → 0.6565 tickets per dollar deployed.
-// hashrate_earned is the FULL s(m + 21/n) output (operator-confirmed), and
-// unclaimed_hashrate_earned is an ADDITIONAL bonus on top — measured mean
-// 0.246 of it. The old 0.65 haircut treated a bonus as a deduction.
-const TOLL_PER_TICKET = 0.0636 / ((101 * 1.246) / 100);
+// Cost of a ticket in board toll. Two corrections were stranded here:
+//   - the toll was 0.0636, which used the invented 0.9333 strike payout
+//     fraction; the operator-stated 0.70 makes it 0.07046. It is now derived
+//     from live config rather than retyped.
+//   - the unclaimed-hashrate uplift was 1.246 ("measured mean 0.246"), which
+//     contradicts the 0.179 ratio measured over 1,875 PublicDeploySettled
+//     events in hashrate.ts. Both cannot be right; 1.179 is the one with a
+//     stated sample size, and it is also the conservative direction for
+//     anything that makes farming look good.
+// Gross converts to raw hashrate at 101/$ at streak 100 on a blanket.
+const UNCLAIMED_UPLIFT = 1.179;
+const TOLL_PER_TICKET = blanketToll(fees, conf.strike_fee_bps) /
+  ((101 * UNCLAIMED_UPLIFT) / 100);
 
 console.log(`iteration ${iteration}: ${observed.length} wallets, ${observedTotal.toLocaleString()} tickets observed`);
 console.log(`projected to close: ${Math.round(fieldTotal).toLocaleString()} tickets, pool $${POOL_USD.toLocaleString()}`);

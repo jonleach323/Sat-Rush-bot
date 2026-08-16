@@ -32,7 +32,10 @@
     "epoch-concentration": "tsx scripts/epoch-concentration.ts",
     "sats-drift": "tsx scripts/sats-drift.ts",
     "tile-bias": "tsx scripts/tile-bias.ts",
-    "farming-verdict": "tsx scripts/farming-verdict.ts"
+    "farming-verdict": "tsx scripts/farming-verdict.ts",
+    "farming-audit": "tsx scripts/farming-audit.ts",
+    "epoch-field": "tsx scripts/epoch-field.ts",
+    "epoch-pool-raw": "tsx scripts/epoch-pool-raw.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

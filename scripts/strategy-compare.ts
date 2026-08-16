@@ -44,6 +44,7 @@ import { PriceFeed } from "../src/ingest/prices.js";
 import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
 import { evOfAllocation, feeModelFromConfig, TILES_COUNT, type EvContext } from "../src/strategy/ev.js";
 import { selectAllocation } from "../src/strategy/selector.js";
+import { readEpochField, resampleField } from "../src/ingest/epoch-field.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -177,13 +178,52 @@ const LAM_DEPLOY = 5_000 + (CU_PRICE * cfg.DEPLOY_CU_LIMIT) / 1e6 + cfg.JITO_TIP
 const LAM_SETTLE = cfg.SELF_SETTLE ? 5_000 : 0;
 const feeUsdPerRound = ((LAM_DEPLOY + LAM_SETTLE) / 1e9) * SOL;
 
-// ── hashrate → epoch value, from the measured field ──────────────────────────
-const req = createRequire(import.meta.url);
-const measured: number[] = JSON.parse(
-  req("node:fs").readFileSync("data/epoch-iteration-4.json", "utf8"),
-).blocks;
+// ── hashrate → epoch value, from the LIVE field ──────────────────────────────
+//
+// This used to be two constants off epoch iteration 4 — POOL = 46_553 and the
+// 157-wallet block list in data/epoch-iteration-4.json — and they were carrying
+// the entire farming result. Volume has since fallen ~4.7x, and the two do not
+// move together (the pool tracks volume; the field tracks volume TIMES streak),
+// so the staleness compounded rather than cancelled. Swapping the pool constant
+// alone was worth about $78/day of phantom edge. See `pnpm farming-audit`.
+//
+// The field is projected to END-of-iteration on a stated entrant count, not
+// frozen at whatever has entered so far: with 21 wallet-deduped winner slots,
+// entrant count decides a small holder's take far more than ticket share does.
+const EXPECTED_ENTRANTS = Number(process.env["EPOCH_ENTRANTS"] ?? 157);
+const iterSlots = num(conf.epoch_vault_iteration_duration);
+const roundsPerIteration = Math.round(iterSlots / Math.max(1, board.round_duration));
+const liveField = await readEpochField({
+  connection: conn, programId: pid, btcUsd: prices.btcUsd(),
+  iterationSlots: iterSlots, slot: await conn.getSlot("confirmed"),
+});
+
+let measured: number[];
+let POOL: number;
+if (liveField.complete && liveField.progress > 0.05 && liveField.blocks.length > 0) {
+  const totalFull = liveField.totalTickets / liveField.progress;
+  measured = resampleField(liveField.blocks, EXPECTED_ENTRANTS, totalFull);
+  // Banked so far plus the inflow the CURRENT volume rate still implies. Most
+  // of the banked figure is rollover carry from earlier, busier iterations, so
+  // it is a draining stock rather than a run-rate — do not read it as evidence
+  // that volume recovered.
+  const meanGross = usable.reduce((a, [, r]) => a + r.gross, 0) / usable.length / 1e6;
+  POOL = liveField.poolUsd +
+    (1 - liveField.progress) * meanGross * roundsPerIteration * (conf.epoch_fee_bps / 1e4);
+  console.log(`epoch field: LIVE iteration ${liveField.iterationId} at ` +
+    `${(100 * liveField.progress).toFixed(1)}% → ${Math.round(totalFull).toLocaleString()} tickets ` +
+    `projected across ${EXPECTED_ENTRANTS} entrants; pool $${liveField.poolUsd.toFixed(0)} banked ` +
+    `→ $${POOL.toFixed(0)} projected at $${meanGross.toFixed(2)}/round`);
+} else {
+  const req = createRequire(import.meta.url);
+  measured = JSON.parse(
+    req("node:fs").readFileSync("data/epoch-iteration-4.json", "utf8"),
+  ).blocks as number[];
+  POOL = 46_553;
+  console.log(`epoch field: STALE fallback (iteration 4) — live pages unreadable or ` +
+    `iteration too young. Treat every epoch column below as unsourced.`);
+}
 const fieldTotal = measured.reduce((a: number, b: number) => a + b, 0);
-const POOL = 46_553;
 function epochEv(mine: number, trials = 8_000): number {
   const pool = [...measured, mine]; const me = pool.length - 1;
   const total = fieldTotal + mine; let cap = 0;
@@ -232,6 +272,18 @@ function realised(stakes: number[], alloc: bigint[], winner: number): number {
 // is a ~1/1440 jackpot to the winning tile, so it is lumpy, but its expectation
 // is stake-keyed and identical for every strategy per dollar deployed.
 const STRIKE_RECOVERY = 0.0206;  // 294 bps leg x 0.70 payout (operator-stated)
+
+/**
+ * Uplift from hashrate that is EARNED but deferred to claim time.
+ *
+ * Was 1.246, commented only "full output + measured bonus" and sourced to
+ * nothing. 1.179 is measured: PublicDeploySettled carries both `hashrate_earned`
+ * and `unclaimed_hashrate_earned`, and over 1,875 settles their ratio is 0.179
+ * (per-event median 0.173), so claiming releases 1.179x the headline figure.
+ * The promo bonus is NOT in here — it is applied per round inside `a.raw`, and
+ * folding it in again is a double count.
+ */
+const UNCLAIMED_UPLIFT = 1.179;
 const MIN_BASE = BigInt(num(conf.min_deploy_usd_amount));
 
 interface Strategy {
@@ -315,7 +367,7 @@ console.log("  strategy        fires   volume    board$   end streak   tickets/i
 for (const st of STRATEGIES) {
   const a = acc.get(st.name) as Acc;
   const board = a.pnl / 1e6;
-  const rawPerIter = (a.raw / usable.length) * ITER * 1.246;  // full output + measured bonus
+  const rawPerIter = (a.raw / usable.length) * ITER * UNCLAIMED_UPLIFT;
   const tickets = Math.floor(rawPerIter / 100);
   const epoch = tickets > 0 ? epochEv(tickets) : 0;
   const net = board * perDay + (epoch / 3);

@@ -190,3 +190,75 @@ before enabling live.**
 ticket-keypair signer landed, 2 tickets for 200 hashrate → **also 100
 points/ticket** (uniform across both vaults). Tx:
 [`2ch9Dyta5DjB…`](https://explorer.solana.com/tx/2ch9Dyta5DjBBwagSY9tCz3cKkf5W2Sb5orWbwMWognZYxkAS87sT6aYy3EZPXRFLYFCZ7pr1PxCKdxxxAvrHJd6?cluster=devnet)
+
+---
+
+## E-farming: the epoch-farming edge was two stale constants (2026-08-16)
+
+`strategy-compare` had ranked `farm-21` best at **+$35.81/day**, and that number
+was steering the farming gate. It does not survive live data. Re-run with the
+epoch field read from chain, every deploying strategy is negative:
+
+```
+  strategy        fires   volume    board$   tickets/iter   epoch$/iter   NET $/day
+  snipe               1   $    25    $-3.19              6           $0     $-11.43
+  snipe+present     400   $   424   $-28.03          5,838         $227     $-25.13
+  blanket           400   $  8400  $-562.79         94,792        $2018   $-1353.37
+  farm-21           400   $   400   $-26.95          4,513         $183     $-36.18
+  farm-1            400   $   400   $-25.82          5,532         $207     $-23.88
+```
+
+**What was wrong.** The board leg was always replayed from real rounds and was
+fine. The epoch leg was three constants:
+
+| input | was | live (iteration 5) |
+|---|---|---|
+| pool | `POOL = 46_553` (iteration 4) | $12,851 banked → $23,345 projected |
+| field | `epoch-iteration-4.json`, 157 wallets / 806,582 tickets | 135,208 tickets / 52 wallets at 22.8%, pages complete |
+| uplift | `x1.246`, sourced to nothing | 1.179, measured over 1,875 settles |
+
+Attribution, one input swapped at a time against a 157-entrant baseline:
+
+```
+  live pool + live field     -$36.73/day
+  STALE pool ($46,553)       +$41.77/day   ← the pool constant alone is worth $78/day
+  STALE field (iter 4)       -$44.56/day
+  both stale = the backtest  +$27.51/day
+```
+
+**The subtler error, and the one worth remembering.** Scaling a partly-elapsed
+field by `1/progress` is not a projection — it silently freezes the ENTRANT
+count. Payout is deduped across 21 wallet slots, so entrant count dominates a
+small holder's take far more than ticket share does:
+
+```
+  entrants   our share   dedup uplift   NET/day
+        52      0.902%           1.83x   +$15.70   (live, at 22.8% elapsed)
+        80      0.902%           1.29x   -$19.10
+       120      0.902%           1.09x   -$31.35
+       157      0.902%           0.96x   -$39.98   (what iteration 4 closed with)
+```
+
+Same tickets, same pool, same share — a $56/day swing purely from how many
+wallets turn up. The first cut of the audit made exactly this mistake and read
++$15.70/day.
+
+**A third, independent problem.** The model converts all earned hashrate to
+tickets — 5,436/iteration. `VAULT_MAX_TICKETS` defaults to **250**, and
+`VAULT_HASHRATE_FRACTION` spends only half the balance. At the configured cap
+the epoch take is $9.42, i.e. **−$98.32/day**. The backtest credited 21.7x the
+tickets the bot is permitted to buy.
+
+**Also stranded:** `dedup-effect.ts` still used a 6.36% blanket toll, built on
+the invented 0.9333 strike payout fraction the owner corrected to 0.70 months
+earlier. Correct figure is **7.046%**. Both it and the strike fraction now
+derive from live config via `blanketToll()` in `src/strategy/ev.ts`, pinned by
+`test/blanket-toll.test.ts`, so the correction cannot go stale in one caller
+again.
+
+**Board conditions, same run:** emptiest/average tile = 0.914 against a 1.100
+break-even, and **0 of 400 rounds had an empty tile**. There is no board edge to
+snipe at current volume either — `snipe` fired once in 400 rounds.
+
+Verdict: farming is not proven, it is *disproven at current volume*. The gate
+stays shut. Tools: `pnpm farming-audit`, `pnpm epoch-field`, `pnpm epoch-pool-raw`.
