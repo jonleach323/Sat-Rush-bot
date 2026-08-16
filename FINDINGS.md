@@ -348,3 +348,60 @@ Two errors in one session, both the same shape: reporting a point estimate from
 a sample whose standard error swamps it (`-25.45%`), and compounding a fee
 already applied (`0.9 x 0.9`). Every EV claim in this repo now needs a standard
 error next to it or it is not a claim.
+
+---
+
+## E-sdk: the official SDK exports what we spent weeks reverse-engineering (2026-08-16)
+
+`@satrush/client` and `@satrush/api` exist on npm. Neither was installed.
+
+**Verified: our formulas were right.** `test/sdk-parity.test.ts` checks
+`hashrateRawPerUsd` against the SDK's `hashrateReward()` across a 5x6x6 grid of
+(stake, streak, coverage) and agrees to within the program's single floor:
+
+```
+  hashrateReward = stake * (LOYALTY_WEIGHT*streak*covered + SKILL_WEIGHT*21)
+                   / (covered * usdUnit) * multiplier
+```
+
+With `SKILL_WEIGHT = LOYALTY_WEIGHT = 1n` that is exactly `stake/usdUnit x
+(streak + 21/covered)`. The anchor cases hold: $1 at streak 100 earns 101 raw on
+a blanket, 121 on one tile.
+
+**Two constants stop being guesses:**
+
+| fact | was | SDK |
+|---|---|---|
+| `REWARD_MAX_STREAK` | ASSUMED (highest observed streak 28) | `REWARD_MAX_STREAK = 100` |
+| `VAULT_HASHRATE_PER_TICKET` | measured on DEVNET, n=2 | `HASHRATE_PER_TICKET = 100n` |
+
+The first scaled every farming estimate linearly. Also confirmed: `TILE_COUNT
+= 21`, `BPS_DENOMINATOR = 1e4`, `HASHRATE_DECIMALS = 2`,
+`STRIKE_BOOST_HASHRATE_MULTIPLIER = 2n`, `STRIKE_BOOST_ROUNDS = 240` (which
+agrees with the 241-round inclusive span measured off the public API).
+
+**Caveat found in the SDK:** `hashrateReward()` does NOT clamp the streak.
+`REWARD_MAX_STREAK` is exported but unapplied, so any model feeding a raw streak
+past 100 overstates. `hashrateRawPerUsd` clamps; a parity test pins that.
+
+**`SHARE_OFFSET = 1000` — checked, immaterial.** `satsToBtc` is
+`shares * (vaultAmount + 1) / (vaultShares + SHARE_OFFSET)`, a virtual-share
+offset. Against ~9.5e9 issued shares that is a ~1e-7 effect, so the $893.35 net
+share valuation stands (agrees with satstats' $992.61 gross at the 10% claim fee).
+
+**The epoch reward curve is NOT in the client SDK**, so `EPOCH_REWARD_CURVE_BPS`
+stays owner-confirmed — but it is independently corroborated: the realised
+payout curve measured off four completed draws (3556, 1556, 889, 556, 444, 222…)
+is exactly the stored curve divided by the 0.9 payout fraction
+(3200/0.9 = 3556, 1400/0.9 = 1556, 800/0.9 = 889).
+
+**`@satrush/api` replaces most of the RPC scraping in `scripts/`:**
+`/v1/epoch/iterations/{id}/participants` (the field, no page scanning),
+`/v1/epoch/history`, `/v1/leaderboard/hashrate-earned` (the field's hashrate
+rate — rho, directly), `/v1/users/{address}/deployments`, `/v1/rounds`.
+`reconcile-ev` and `epoch-field` should move onto it.
+
+**Method note.** The costly part was not that the constants were wrong — two of
+five were. It is that four separate sessions spent effort measuring, arguing
+about, and being wrong about numbers that a published package exports. Check
+for a first-party SDK before reverse-engineering anything.

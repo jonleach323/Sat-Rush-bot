@@ -50,14 +50,30 @@ describe("every fact declares where it came from", () => {
     // Failing here means an assumption was added or removed. Both are fine —
     // but they have to be deliberate, because an assumption that arrives
     // quietly is exactly how 0.9333, 0.65 and 1.246 got into the EV path.
+    // REWARD_MAX_STREAK left this list once @satrush/client was installed and
+    // exported it. One assumption remains.
     expect(assumedFacts().map((x) => x.name).sort()).toEqual([
       "EPOCH_FIELD_BANKED_SHARE",
-      "REWARD_MAX_STREAK",
     ]);
   });
 
-  it("flags the streak cap specifically — farming EV is linear in it", () => {
-    expect(REWARD_MAX_STREAK.provenance.kind).toBe("assumed");
+  it("the streak cap is SDK-sourced now, not asserted", () => {
+    // It scaled every farming estimate linearly while being an assumption.
+    expect(REWARD_MAX_STREAK.provenance.kind).toBe("sdk");
+  });
+
+  it("prefers the SDK wherever the program exports the constant", () => {
+    // Anything the official client ships should not be measured or assumed
+    // here — sdk-parity.test.ts is what keeps the two honest.
+    const sdkBacked = Object.entries(ALL_FACTS)
+      .filter(([, f]) => f.provenance.kind === "sdk").map(([n]) => n).sort();
+    expect(sdkBacked).toEqual([
+      "REWARD_MAX_STREAK",
+      "STRIKE_BOOST_WINDOW_ROUNDS",
+      "STRIKE_HASHRATE_MULTIPLIER",
+      "TILES",
+      "VAULT_HASHRATE_PER_TICKET",
+    ]);
   });
 });
 
@@ -135,8 +151,13 @@ describe("estimates cannot be quoted without an error bar", () => {
 });
 
 describe("describe() surfaces provenance in one line", () => {
-  it("marks assumptions loudly", () => {
-    expect(describeFact("REWARD_MAX_STREAK", REWARD_MAX_STREAK)).toContain("ASSUMED");
+  it("names the SDK symbol a fact came from", () => {
+    expect(describeFact("REWARD_MAX_STREAK", REWARD_MAX_STREAK))
+      .toContain("REWARD_MAX_STREAK from @satrush/client");
+  });
+  it("marks remaining assumptions loudly", () => {
+    const [first] = assumedFacts();
+    expect(describeFact(first!.name, first!.fact)).toContain("ASSUMED");
   });
   it("dates measurements", () => {
     expect(describeFact("EPOCH_DEDUP_UPLIFT", EPOCH_DEDUP_UPLIFT)).toContain("n=127");

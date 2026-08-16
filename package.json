@@ -41,6 +41,8 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
+    "@satrush/api": "^0.1.14",
+    "@satrush/client": "^0.1.12",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8",
     "@triton-one/yellowstone-grpc": "^5.0.9",

@@ -31,11 +31,22 @@ provenance — not bad arithmetic. `evOfAllocation` verified exact against a
 closed form while the answers it produced were wrong, because its INPUTS were
 stale, invented, or duplicated. Rules:
 
+- **The official SDK is the source of truth. Check it before measuring
+  anything.** `@satrush/client` exports the program's real constants and
+  formulas — `REWARD_MAX_STREAK`, `HASHRATE_PER_TICKET`, `TILE_COUNT`,
+  `STRIKE_BOOST_*`, `hashrateReward()`, `satsToBtc()`, `getHashrateTicketsCount()`.
+  Two constants were reverse-engineered for weeks (one of them a devnet
+  measurement used for mainnet, one an outright assumption) that the SDK simply
+  exports. `@satrush/api` (`https://api.satrush.io/api`) serves epoch
+  participants, iteration history, leaderboards and per-wallet deployments —
+  use it instead of scanning RPC signatures. `test/sdk-parity.test.ts` pins our
+  implementations against the SDK's.
 - **Every economic constant lives in `src/strategy/facts.ts`**, once, carrying a
-  `Provenance`: `derived` (read from chain/config at use time — always prefer
-  this) | `measured` (needs `n`, date, half-life, recheck command) | `stated`
-  (by the owner) | `assumed` (must name the risk). Never inline the literal —
-  `0.9333` survived in a script for weeks after being corrected in `ev.ts`.
+  `Provenance`: `sdk` (strongest — the program's own constant) | `derived` (read
+  from chain/config at use time) | `measured` (needs `n`, date, half-life,
+  recheck command) | `stated` (by the owner) | `assumed` (must name the risk).
+  Never inline the literal — `0.9333` survived in a script for weeks after being
+  corrected in `ev.ts`.
 - **Never report a point estimate without its standard error.** Use `Estimate`
   and `significant()` from facts.ts. A realized −25.45% over 193 single-tile
   deploys had a ±28.6-point standard error (z = −0.61) and was written up as a

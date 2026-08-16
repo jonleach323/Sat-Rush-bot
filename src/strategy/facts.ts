@@ -35,7 +35,30 @@
  *    worthless because we had configured ourselves not to spend it.
  */
 
+import {
+  HASHRATE_PER_TICKET,
+  REWARD_MAX_STREAK as SDK_REWARD_MAX_STREAK,
+  STRIKE_BOOST_HASHRATE_MULTIPLIER,
+  STRIKE_BOOST_ROUNDS,
+  TILE_COUNT,
+} from "@satrush/client";
+
+/** Pinned in package.json; recorded so a fact's source is reproducible. */
+const SDK_VERSION = "@satrush/client@0.1.12";
+
 export type Provenance =
+  | {
+      /**
+       * Read straight out of the official @satrush/client. The strongest kind
+       * available: it is the program's own constant, versioned with the SDK,
+       * and `test/sdk-parity.test.ts` fails if the two ever diverge. Prefer
+       * this over measuring something the SDK already exports.
+       */
+      kind: "sdk";
+      /** Exported symbol it comes from. */
+      symbol: string;
+      version: string;
+    }
   | {
       /** Computed from live chain state or SatrushConfig at use time. Cannot go stale. */
       kind: "derived";
@@ -86,10 +109,9 @@ const fact = <T>(value: T, unit: string, provenance: Provenance): Fact<T> =>
 
 // ── facts ────────────────────────────────────────────────────────────────────
 
-/** Board tiles. Structural — the program's array width. */
-export const TILES = fact(21, "tiles", {
-  kind: "derived",
-  from: "Round.public_tile_stakes length in satrush.json",
+/** Board tiles. */
+export const TILES = fact(TILE_COUNT, "tiles", {
+  kind: "sdk", symbol: "TILE_COUNT", version: SDK_VERSION,
 });
 
 /**
@@ -124,35 +146,39 @@ export const UNCLAIMED_HASHRATE_UPLIFT = fact(1.179, "multiple", {
 /**
  * Hashrate points per vault ticket.
  *
- * MEASURED ON DEVNET, used for mainnet math. It has never been confirmed
- * against a mainnet buy, and it divides directly into every ticket count we
- * compute — a 2x error here is a 2x error in all epoch EV. Left as `measured`
- * rather than `assumed` because it was genuinely observed, but the source is
- * the wrong cluster and that is the point of recording it.
+ * Was a DEVNET measurement (n=2) used for every mainnet ticket count. The SDK
+ * confirms it, so the cluster mismatch no longer matters.
  */
-export const VAULT_HASHRATE_PER_TICKET = fact(100, "raw hashrate/ticket", {
-  kind: "measured",
-  source: "devnet buy_epoch_tickets and buy_one_btc_tickets (both 100/ticket)",
-  at: "2026-08-02",
-  n: 2,
-  halfLifeDays: null,
-  recheck: "confirm against a mainnet vault buy",
-});
+export const VAULT_HASHRATE_PER_TICKET = fact(
+  Number(HASHRATE_PER_TICKET), "raw hashrate/ticket",
+  { kind: "sdk", symbol: "HASHRATE_PER_TICKET", version: SDK_VERSION },
+);
 
 /**
- * Program cap on the streak multiplier.
+ * Cap on the streak multiplier.
  *
- * ASSUMED. `REWARD_MAX_STREAK = 100` is asserted in hashrate.ts as "the
- * program cap", but FINDINGS records streaks observed only to 28 with no cap
- * seen. Hashrate accrual is LINEAR in streak, so if the real cap is higher
- * every farming estimate is too low, and if there is none it is unbounded.
- * This is load-bearing for the whole farming question and nobody has read it
- * out of the program.
+ * Was ASSUMED — asserted as "the program cap" with the highest streak actually
+ * observed at 28, while every farming estimate scaled linearly with it. The SDK
+ * exports it, so it is now sourced. Note `hashrateReward()` does NOT apply the
+ * clamp itself; the caller must, and `hashrateRawPerUsd` does.
  */
-export const REWARD_MAX_STREAK = fact(100, "rounds", {
-  kind: "assumed",
-  why: "asserted in hashrate.ts; the highest streak actually observed is 28",
-  risk: "farming EV is linear in streak — a wrong cap scales every epoch estimate",
+export const REWARD_MAX_STREAK = fact(SDK_REWARD_MAX_STREAK, "rounds", {
+  kind: "sdk", symbol: "REWARD_MAX_STREAK", version: SDK_VERSION,
+});
+
+/** Hashrate multiplier during the post-Sat-Strike window. */
+export const STRIKE_HASHRATE_MULTIPLIER = fact(
+  Number(STRIKE_BOOST_HASHRATE_MULTIPLIER), "multiple",
+  { kind: "sdk", symbol: "STRIKE_BOOST_HASHRATE_MULTIPLIER", version: SDK_VERSION },
+);
+
+/**
+ * Rounds the strike hashrate boost covers, EXCLUSIVE of the strike round
+ * itself — measured against the public API the boosted span is 241 rounds
+ * inclusive, which agrees with this.
+ */
+export const STRIKE_BOOST_WINDOW_ROUNDS = fact(STRIKE_BOOST_ROUNDS, "rounds", {
+  kind: "sdk", symbol: "STRIKE_BOOST_ROUNDS", version: SDK_VERSION,
 });
 
 /**
@@ -216,6 +242,8 @@ export const SLOT_SECONDS = fact(0.4, "seconds", {
 /** Everything above, for the staleness sweep and the provenance test. */
 export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   TILES,
+  STRIKE_HASHRATE_MULTIPLIER,
+  STRIKE_BOOST_WINDOW_ROUNDS,
   STRIKE_PAYOUT_FRACTION,
   UNCLAIMED_HASHRATE_UPLIFT,
   VAULT_HASHRATE_PER_TICKET,
@@ -265,7 +293,8 @@ export function assumedFacts(): { name: string; fact: Fact<number> }[] {
 export function describe(name: string, f: Fact<number>): string {
   const p = f.provenance;
   const tag =
-    p.kind === "derived" ? `derived from ${p.from}`
+    p.kind === "sdk" ? `${p.symbol} from ${p.version}`
+    : p.kind === "derived" ? `derived from ${p.from}`
     : p.kind === "stated" ? `stated by ${p.by} on ${p.at}`
     : p.kind === "assumed" ? `ASSUMED — ${p.why}`
     : `measured ${p.at} (n=${p.n}${p.stderr !== undefined ? `, se=${p.stderr}` : ""})`;
