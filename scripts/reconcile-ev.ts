@@ -25,7 +25,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { loadConfig } from "../src/config.js";
 import {
-  decodeAccount, type Round, type SatrushConfig, type SatsVault,
+  decodeAccount, type SatrushConfig, type SatsVault,
 } from "../src/adapter/idl.js";
 import { publicDeploymentPda, roundPda, satrushConfigPda, satsVaultPda } from "../src/adapter/pdas.js";
 import { parseCpiEventData } from "../src/ingest/events.js";
@@ -130,20 +130,24 @@ async function settlementFor(roundId: number): Promise<Settled | null> {
   return null;
 }
 
-interface Row extends DeployRow { settled: Settled | null; round: Round | null }
+// Round accounts are rent-reclaimed within a few rounds, so there is nothing to
+// read there for anything but the last handful — boards get rebuilt from events
+// further down instead. Retry transient RPC failures rather than aborting a
+// ten-minute scan on one 500.
+interface Row extends DeployRow { settled: Settled | null }
+async function withRetry<T>(fn: () => Promise<T>, tries = 4): Promise<T | null> {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); } catch {
+      await new Promise((r) => setTimeout(r, 400 * 2 ** i));
+    }
+  }
+  return null;
+}
 const rows: Row[] = [];
 for (let i = 0; i < deploys.length; i += 8) {
-  const batch = deploys.slice(i, i + 8);
-  const out = await Promise.all(batch.map(async (d) => {
-    const [settled, info] = await Promise.all([
-      settlementFor(d.round_id),
-      conn.getAccountInfo(roundPda(d.round_id, pid), "confirmed"),
-    ]);
-    return {
-      ...d, settled,
-      round: info ? decodeAccount<Round>("Round", info.data) : null,
-    };
-  }));
+  const out = await Promise.all(deploys.slice(i, i + 8).map(async (d) => ({
+    ...d, settled: await withRetry(() => settlementFor(d.round_id)),
+  })));
   rows.push(...out);
   process.stdout.write(`\r  ${Math.min(i + 8, deploys.length)}/${deploys.length}…`);
 }
@@ -175,6 +179,21 @@ for (const r of scored) {
 }
 
 const realized = wonUsd + wonSharesUsd - deployed;
+
+// ── how much of this is signal? ─────────────────────────────────────────────
+// A single-tile deploy pays roughly 21x at p = 1/21, so per-bet SD is about 4x
+// the stake and the sample mean converges glacially. Reporting a realized
+// percentage without this is how a -25% draw from a -11% distribution gets
+// written up as a finding. Compute the standard error and refuse to call the
+// result anything until it clears it.
+const singleBets = perRound.filter((p) => p.tiles === 1);
+const P_WIN = 1 / TILES_COUNT;
+// Payoff multiple on a win, from the observed tile-vs-average ratio.
+const payoffMult = (1 - fees.deployFeeBps / 1e4) *
+  (1 - (fees.satsVaultRoundBps / 1e4) * (fees.satsVaultClaimBps / 1e4)) * TILES_COUNT;
+const sdPerDollar = Math.sqrt(P_WIN * (1 - P_WIN)) * payoffMult;
+const sumSq = singleBets.reduce((a, b) => a + b.amt * b.amt, 0);
+const stdErr = sdPerDollar * Math.sqrt(sumSq);
 const toll = blanketToll(fees, conf.strike_fee_bps);
 console.log(`scored ${scored.length} settled deploys`);
 console.log(`  deployed          $${deployed.toFixed(2)}`);
@@ -188,7 +207,25 @@ console.log(`  gap               ${(realized - evSum >= 0 ? "+" : "-")}$${Math.a
 console.log(`\n  a blanket over the same volume: -$${(toll * deployed).toFixed(2)} ` +
   `(-${(100 * toll).toFixed(2)}%) — that is the bar, not zero`);
 console.log(`  rounds where we held the winning tile: ${winners}/${scored.length} ` +
-  `(${(100 * winners / scored.length).toFixed(1)}%)`);
+  `(${(100 * winners / scored.length).toFixed(1)}%, chance is ${(100 / TILES_COUNT).toFixed(2)}%)`);
+
+if (singleBets.length > 0 && stdErr > 0) {
+  const singleReal = singleBets.reduce((a, b) => a + b.real, 0);
+  const singleVol = singleBets.reduce((a, b) => a + b.amt, 0);
+  const zBlanket = (singleReal - -toll * singleVol) / stdErr;
+  console.log(`\n  IS THIS SIGNAL? ${singleBets.length} single-tile bets, $${singleVol.toFixed(2)} volume`);
+  console.log(`    per-bet SD is ${sdPerDollar.toFixed(2)}x the stake (pays ~${payoffMult.toFixed(1)}x at p=1/${TILES_COUNT})`);
+  console.log(`    standard error on the total: +/-$${stdErr.toFixed(2)}`);
+  console.log(`    realized $${singleReal.toFixed(2)} vs a blanket's $${(-toll * singleVol).toFixed(2)} → z = ${zBlanket.toFixed(2)}`);
+  console.log(`    ${Math.abs(zBlanket) < 2
+    ? "NOT SIGNIFICANT — this sample cannot distinguish the two. Do not draw a"
+    : "significant at 2 sigma — the difference is real, but check the"}`);
+  console.log(`    ${Math.abs(zBlanket) < 2
+    ? "conclusion about edge from realized P&L here; use the prediction error below."
+    : "prediction error below for the mechanism."}`);
+  const need = Math.ceil(Math.pow((2 * sdPerDollar) / Math.max(1e-9, Math.abs(realized / deployed)), 2));
+  console.log(`    bets needed to resolve an effect this size at 2 sigma: ~${need.toLocaleString()}`);
+}
 
 // ── what did the model have to BELIEVE? ─────────────────────────────────────
 // The EV function itself is exact (verified against closed form), so a wrong
@@ -206,14 +243,15 @@ const singles = scored.filter((r) => {
 }).slice(0, SAMPLE);
 
 async function rebuildBoard(roundId: number): Promise<number[] | null> {
-  const sigs = await conn.getSignaturesForAddress(roundPda(roundId, pid), { limit: 1000 }, "confirmed");
+  const sigs = (await withRetry(() =>
+    conn.getSignaturesForAddress(roundPda(roundId, pid), { limit: 1000 }, "confirmed"))) ?? [];
   const ok = sigs.filter((x) => !x.err).map((x) => x.signature);
   if (ok.length === 0) return null;
   const stakes = new Array<number>(TILES_COUNT).fill(0);
   for (let i = 0; i < ok.length; i += 50) {
-    const txs = await conn.getTransactions(ok.slice(i, i + 50), {
+    const txs = (await withRetry(() => conn.getTransactions(ok.slice(i, i + 50), {
       commitment: "confirmed", maxSupportedTransactionVersion: 0,
-    });
+    }))) ?? [];
     for (const tx of txs) {
       if (!tx) continue;
       const keys = tx.transaction.message.getAccountKeys({
@@ -279,10 +317,17 @@ if (singles.length > 0) {
     console.log(`    stake the tile ACTUALLY finished at  $${act.toFixed(3)}  ` +
       `(${(100 * act / avg).toFixed(1)}% of average)`);
     console.log(`    board average tile                   $${avg.toFixed(3)}`);
+    // This is the LOW-VARIANCE measurement and the one to trust: it is a ratio
+    // of stakes, not a draw from a 1-in-21 lottery, so 25 rounds is plenty.
+    const trueEdge = (NETF * POTF) / (act / avg) - 1;
     console.log(`\n    A single-tile snipe clears only below ` +
-      `${(100 * NETF * POTF).toFixed(1)}% of average. The model was pricing tiles it`);
-    console.log(`    believed were nearly empty; they filled to roughly the board average`);
-    console.log(`    by cutoff. That is a PREDICTION failure, not an arithmetic one.`);
+      `${(100 * NETF * POTF).toFixed(1)}% of average. The model priced tiles it`);
+    console.log(`    believed were nearly empty; they finished at the board average.`);
+    console.log(`    That is a PREDICTION failure, not an arithmetic one.`);
+    console.log(`\n    Implied TRUE edge at ${(100 * act / avg).toFixed(1)}% of average: ` +
+      `${(100 * trueEdge).toFixed(2)}% per deploy`);
+    console.log(`    versus a blanket at ${(-100 * toll).toFixed(2)}%. Trust this over the realized`);
+    console.log(`    percentage above — a stake ratio converges, a 1-in-21 payout does not.`);
   }
 }
 
