@@ -480,3 +480,74 @@ The ROI standard error is `sqrt(Σ(yᵢ − R·xᵢ)²) / Σxᵢ` — the ratio 
 own residuals. Earlier I derived a standard error analytically from an assumed
 1-in-21 payoff; this needs no such assumption and handles the varying deploy
 sizes that analytic version ignored.
+
+---
+
+## E-input: the automation book was counted twice (2026-08-16) — FIXED
+
+The input error is found and fixed. `pnpm fire-timing` splits each round's
+deploys at OUR OWN landing slot, which recovers the board exactly as it stood
+when we fired — no instrumentation needed, because every deploy carries its slot.
+
+```
+  60 single-tile rounds
+
+  our tile / board average AT FIRE       99.38% ± 0.11%
+  our tile / board average AT SETTLE    102.09% ± 0.12%
+  share of the board landing AFTER us     0.16% ± 0.01%
+  our tile's rank at fire (0 = emptiest)  1.3 of 21
+  break-even for a single-tile snipe:    below 90.9% of average
+```
+
+Three things fall out at once, all with tight error bars because these are
+ratios rather than 1-in-21 payouts:
+
+1. **The board is essentially final when we fire.** 0.16% lands after us. There
+   was never any future inflow to predict.
+2. **Tile selection is not broken.** Rank 1.3 of 21 — we do pick near the
+   emptiest tile. There is simply no dispersion to exploit: the emptiest tile
+   sits ~0.6% below average on a board that is nearly uniform.
+3. **Every one of those deploys was −EV at the moment we fired**, on
+   information available at that moment. 99.38% is well above the 90.9%
+   break-even.
+
+### The cause
+
+`visibleStakes()` reads `Round.public_tile_stakes` — the program's own state —
+and the owner's crank executes every funded automation at ROUND OPEN (open
+question 7). So the board already contains that money. `predictedRivalInflow()`
+then added the entire automation book on top: **86% of the field, counted
+twice.**
+
+It flatters the tile we pick specifically. 33 of the 36 funded automations run
+full 21-tile blankets, which lift every tile equally and tilt nothing. The other
+three run 18-, 16- and 7-tile masks, so the phantom money lands on OTHER tiles
+and leaves ours looking cheap. Predicted totals ran ~2x actual and the chosen
+tile was priced near 68% of average when it was at 99.4%.
+
+**Why it survived review: this error is not conservative in either direction.**
+Over-predicting rival inflow raises the POT as well as the dilution, so a
+too-large inflow *raises* modelled EV instead of lowering it. Every instinct
+that says "over-estimating rivals is the safe side" is wrong here. The only
+safe prediction is an accurate one, and `test/double-count.test.ts` pins that
+property directly.
+
+### The fix
+
+`pendingCommitments(book, alreadyDeployed)` reduces the book to automations not
+yet seen deploying this round; the orchestrator tracks deployers per round from
+`PublicDeployCreated` and resets on rotation.
+
+Restarting mid-round leaves that set incomplete, and the gap is undetectable
+from the set itself — so `roundObservedFromOpen` gates it, and when false the
+predicted inflow is **zero**. That is the accurate prior rather than a cautious
+one: the crank fires at round open, so by mid-round they have all fired.
+
+### What this does and does not fix
+
+It removes the phantom edge, so the selector should now decline these rounds
+rather than firing them. It does **not** create an edge. At a 99.4% tile ratio
+the honest single-tile number is −8.5%, against a blanket's −7.05%. On the
+current board there is nothing to snipe, and the correct behaviour is to sit
+out — which is what `snipe` did in the backtest (1 fire in 400 rounds) before
+the book was wired in.

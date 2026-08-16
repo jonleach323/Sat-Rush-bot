@@ -121,3 +121,31 @@ export function inflowSkew(stakes: readonly bigint[]): number {
   const spread = Math.max(...vals) - Math.min(...vals);
   return spread / mean;
 }
+
+/**
+ * Automations that have NOT yet fired this round.
+ *
+ * This is the correction for a real and expensive bug. `visibleStakes()` reads
+ * `Round.public_tile_stakes` — the program's own state — and the owner's crank
+ * executes every funded automation at ROUND OPEN (FINDINGS open question 7).
+ * So by the time we evaluate near cutoff, the board already contains all of
+ * that money, and adding `automationInflow()` on top counted the entire book
+ * twice.
+ *
+ * Measured consequence: predicted board totals ran roughly 2x actual, and
+ * because 3 of the 36 funded automations run uneven masks (18, 16 and 7 tiles)
+ * the phantom money landed on OTHER tiles and left ours looking cheap. Our
+ * chosen tile sat at 99.4% of the board average at fire time — a losing pick —
+ * while the model priced it near 68% and logged a +26% edge.
+ *
+ * Note this error is NOT conservative in either direction, which is why it was
+ * hard to spot. Over-predicting rival inflow inflates the POT as well as their
+ * stakes, so it raises modelled EV rather than lowering it. The only safe
+ * prediction here is an accurate one.
+ */
+export function pendingCommitments(
+  commitments: readonly AutomationCommitment[],
+  alreadyDeployed: ReadonlySet<string>,
+): AutomationCommitment[] {
+  return commitments.filter((c) => !alreadyDeployed.has(c.authority.toBase58()));
+}

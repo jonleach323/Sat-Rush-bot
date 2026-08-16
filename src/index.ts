@@ -61,6 +61,7 @@ import { createHash } from "node:crypto";
 import { projectField } from "./strategy/epoch-pool.js";
 import {
   automationInflow,
+  pendingCommitments,
   readableCommitments,
   type AutomationCommitment,
 } from "./ingest/automations.js";
@@ -96,7 +97,7 @@ import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
-import { feeModelFromConfig, netFactor, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { feeModelFromConfig, netFactor, TILES_COUNT, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
@@ -558,6 +559,10 @@ export class Orchestrator {
   }
 
   private enterRound(roundId: number): void {
+    // We watched this round open, so the set of who has deployed in it starts
+    // empty and stays complete. That is what lets predictedRivalInflow() trust
+    // it; on a restart mid-round it cannot, and predicts zero instead.
+    this.noteRoundOpened(roundId);
     this.roundId = roundId;
     this.skipLogged.clear();
     this.fireInFlight = false;
@@ -673,12 +678,55 @@ export class Orchestrator {
    */
   private predictedRivalInflow(): bigint[] {
     if (this.cfg.AUTOMATION_BOOK_ENABLED && this.automationBook.length > 0) {
-      return automationInflow(this.automationBook, {
+      // Only automations that have not ALREADY fired this round. The board we
+      // read is the Round account, which the crank has already written every
+      // executed automation into, so predicting the whole book on top of it
+      // double-counted 86% of the field — see pendingCommitments().
+      //
+      // Joining a round mid-flight (a restart) means we cannot know who has
+      // fired, and the accurate prior is that they all have: the crank executes
+      // at round open. Predicting zero is therefore the CORRECT call, not a
+      // conservative one.
+      if (!this.roundObservedFromOpen) return new Array<bigint>(TILES_COUNT).fill(0n);
+      const pending = pendingCommitments(this.automationBook, this.deployedThisRound);
+      return automationInflow(pending, {
         netFactor: netFactor(this.fees),
         fireRate: this.cfg.AUTOMATION_FIRE_RATE,
       });
     }
     return predictRivalInflow(this.rivalProfiles, this.state.visibleStakes());
+  }
+
+  /**
+   * Authorities seen deploying in `deployedRoundId`, so the automation book can
+   * be reduced to what is still to come. Reset on every rotation.
+   */
+  private deployedThisRound = new Set<string>();
+  private deployedRoundId = -1;
+  /**
+   * False until we witness a round rotate, i.e. until we know we have seen the
+   * round from its beginning. A restart mid-round leaves the set incomplete and
+   * the difference is not detectable from the set itself.
+   */
+  private roundObservedFromOpen = false;
+
+  /** Record a deploy against the round it belongs to, rotating state if needed. */
+  private noteDeployer(roundId: number, authority: string): void {
+    if (roundId !== this.deployedRoundId) {
+      this.deployedRoundId = roundId;
+      this.deployedThisRound = new Set<string>();
+      // A round we first hear about through a deploy is a round we joined
+      // late. Only an observed rotation clears this.
+      this.roundObservedFromOpen = false;
+    }
+    this.deployedThisRound.add(authority);
+  }
+
+  /** Called when the board rotates to a new round we watched happen. */
+  private noteRoundOpened(roundId: number): void {
+    this.deployedRoundId = roundId;
+    this.deployedThisRound = new Set<string>();
+    this.roundObservedFromOpen = true;
   }
 
   private evContext(): EvContext {
@@ -2188,6 +2236,7 @@ export class Orchestrator {
       for (const event of parseTransactionEvents(u)) {
         if (event.name === "PublicDeployCreated") {
           const data = event.data as PublicDeployCreated;
+          this.noteDeployer(data.round_id, data.authority.toBase58());
           if (data.authority.equals(this.payer.publicKey)) {
             this.db.markDeployLandedByRound(data.round_id, event.slot);
           } else {

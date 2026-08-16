@@ -38,7 +38,8 @@
     "epoch-pool-raw": "tsx scripts/epoch-pool-raw.ts",
     "hashrate-balance": "tsx scripts/hashrate-balance.ts",
     "reconcile-ev": "tsx scripts/reconcile-ev.ts",
-    "recompute": "tsx scripts/recompute.ts"
+    "recompute": "tsx scripts/recompute.ts",
+    "fire-timing": "tsx scripts/fire-timing.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
