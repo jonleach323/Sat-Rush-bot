@@ -36,7 +36,8 @@
     "farming-audit": "tsx scripts/farming-audit.ts",
     "epoch-field": "tsx scripts/epoch-field.ts",
     "epoch-pool-raw": "tsx scripts/epoch-pool-raw.ts",
-    "hashrate-balance": "tsx scripts/hashrate-balance.ts"
+    "hashrate-balance": "tsx scripts/hashrate-balance.ts",
+    "reconcile-ev": "tsx scripts/reconcile-ev.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

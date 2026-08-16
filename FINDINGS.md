@@ -262,3 +262,76 @@ snipe at current volume either — `snipe` fired once in 400 rounds.
 
 Verdict: farming is not proven, it is *disproven at current volume*. The gate
 stays shut. Tools: `pnpm farming-audit`, `pnpm epoch-field`, `pnpm epoch-pool-raw`.
+
+---
+
+## E-recon: the live bot is firing losing trades and logging them as winners (2026-08-16)
+
+`pnpm reconcile-ev` compares `ev_expected` (recorded at fire time) against
+`PublicDeploySettled` (what the chain paid), counting BOTH the USD leg and the
+sats-share leg. Over the 193 landed deploys the monitoring API retains:
+
+```
+  deployed          $507.00
+  won USD           $332.53
+  won shares        $45.45   (net of the 10% claim fee)
+  REALIZED          -$129.02   = -25.45% of volume
+  MODEL SAID        +$131.28   = +25.89% of volume
+  gap               -$260.31
+
+  a blanket over the same volume:  -$35.72  (-7.05%)
+  rounds holding the winning tile: 12/193 (6.2%, vs 4.76% by chance)
+```
+
+The bot is **3.6x worse than simply blanketing**, and its own EV log says it is
+winning by 26%.
+
+**The EV function is not the bug.** Probed against an independently derived
+closed form on the live board shape it agrees to 1.00x at every size, and it
+correctly returns negative on both the live board and a perfectly uniform one.
+
+**The inputs are the bug.** Back-solving the tile stake each `ev_expected`
+implies, against boards rebuilt from `PublicDeployCreated` (Round accounts are
+rent-reclaimed within a few rounds, so the accounts are gone):
+
+```
+  stake the model priced our tile at   $21.948   (68.2% of average)
+  stake the tile ACTUALLY finished at  $32.875   (102.2% of average)
+  board average tile                   $32.180
+  break-even for a single-tile snipe:   below 90.9% of average
+```
+
+We pick a tile that looks 32% below average and it settles 2% **above** it.
+
+**That the figure exceeds 100% is the diagnostic.** Blanket inflow — 33 of the
+36 funded automations run full 21-tile masks — can only pull a cheap tile
+*towards* the average, never past it. Finishing above average requires inflow
+aimed at the same tile we chose. Two candidates, and they need different fixes:
+
+1. **Collision / adverse selection** — rival snipers computing the same
+   "emptiest tile" and landing on it after us. `K_EMPTIEST` randomisation exists
+   for this and is evidently not sufficient.
+2. **Under-reading the board already present at fire time** — ingest missing
+   deploys, so the tile was never as cheap as the model thought.
+
+Distinguishing test: snapshot predicted vs actual per-tile stakes at fire time
+and again at settle, and check whether the gap is present at t=0 (case 2) or
+opens after (case 1).
+
+**Why it has not cost more:** 188 of 193 deploys were single-tile at ~$2 each,
+because the board is small enough that water-filling caps the size. That is the
+only brake. `ev_expected` claims a +26% edge, and Kelly sizes off that — on a
+larger board the same defect scales with the position.
+
+Mask breakdown (the wide masks I suspected first are a rounding error here):
+
+```
+    tiles   deploys    volume     model EV      realized     model - real
+        1       188   $ 387.00    +$127.02     -$115.94       +$242.95
+    13-20         5   $ 120.00      +$4.27      -$13.08        +$17.35
+```
+
+Note the P&L caveat from E-pnl applies throughout: `returnedToday()` counts
+`won_usd` only, so the dashboard's daily net understates by the share leg
+(here $45.45 on $507). The realized figure above includes it and is still
+-25.45%.
