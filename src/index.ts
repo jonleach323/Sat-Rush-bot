@@ -25,6 +25,7 @@ import type {
   OneBtcVault,
   OneBtcVaultEntry,
   OneBtcVaultIteration,
+  PublicAutomation,
   PublicDeployCreated,
   PublicDeploySettled,
   RoundRevealed,
@@ -56,7 +57,13 @@ import {
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
 import { streakOptionValueUsd } from "./strategy/streak.js";
+import { createHash } from "node:crypto";
 import { projectField } from "./strategy/epoch-pool.js";
+import {
+  automationInflow,
+  readableCommitments,
+  type AutomationCommitment,
+} from "./ingest/automations.js";
 import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
 import {
   epochAction,
@@ -89,7 +96,7 @@ import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
-import { feeModelFromConfig, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { feeModelFromConfig, netFactor, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
@@ -622,7 +629,55 @@ export class Orchestrator {
    * (anti-collision). Uses the cached profiles (refreshed off the hot path) with
    * the LIVE board, so the emptiest-tile ranking snipers chase is current. Cheap.
    */
+  /**
+   * Refresh the automation book. Registrations change rarely, so this polls on
+   * a round cadence rather than sitting in the fire path.
+   */
+  private async refreshAutomationBook(): Promise<void> {
+    if (!this.cfg.AUTOMATION_BOOK_ENABLED) return;
+    const round = this.state.board?.round_id ?? 0;
+    if (round - this.automationBookRound < this.cfg.AUTOMATION_REFRESH_ROUNDS) return;
+    this.automationBookRound = round;
+    try {
+      const programId = new PublicKey(this.cfg.PROGRAM_ID);
+      const disc = createHash("sha256").update("account:PublicAutomation").digest().subarray(0, 8);
+      const accounts = await this.connection.getProgramAccounts(programId, {
+        commitment: "confirmed",
+        filters: [
+          { memcmp: { offset: 0, bytes: bs58.encode(disc), encoding: "base58" as const } },
+        ],
+      });
+      const entries = accounts.map(({ pubkey, account }) => ({
+        authority: pubkey,
+        account: decodeAccount<PublicAutomation>("PublicAutomation", account.data),
+      }));
+      this.automationBook = readableCommitments(entries);
+      this.log.info(
+        { registered: accounts.length, funded: this.automationBook.length },
+        "automation book refreshed",
+      );
+    } catch (err) {
+      // Keep the previous book; a stale one beats falling back to a guess.
+      this.log.warn({ err: String(err) }, "automation book refresh failed");
+    }
+  }
+
+  /**
+   * Expected rival inflow per tile.
+   *
+   * Prefers the READ automation book over the statistical profiles: about 86%
+   * of the field is funded Static automations whose masks and amounts are
+   * public, so predicting them is strictly worse than looking. Falls back to
+   * the profiles when the book is empty — before the first read, or if the
+   * refresh failed — because an empty book means "unknown", not "no rivals".
+   */
   private predictedRivalInflow(): bigint[] {
+    if (this.cfg.AUTOMATION_BOOK_ENABLED && this.automationBook.length > 0) {
+      return automationInflow(this.automationBook, {
+        netFactor: netFactor(this.fees),
+        fireRate: this.cfg.AUTOMATION_FIRE_RATE,
+      });
+    }
     return predictRivalInflow(this.rivalProfiles, this.state.visibleStakes());
   }
 
@@ -824,6 +879,13 @@ export class Orchestrator {
    * reveal consumes it. Without this the measurement above has nothing to
    * divide by, because the Board is already drained by the time we see it. */
 
+
+  /** The automation book: funded Static registrations, refreshed periodically.
+   * Empty until the first read, which is why the caller falls back to the
+   * statistical prediction rather than treating an empty book as an empty
+   * board. */
+  private automationBook: AutomationCommitment[] = [];
+  private automationBookRound = -1;
 
   private strikePoolBeforeReveal = 0n;
 
@@ -1070,6 +1132,7 @@ export class Orchestrator {
     // denominator for the payout-fraction measurement in onRevealed().
     const pool = this.state.strikePoolUsd();
     if (pool > 0n) this.strikePoolBeforeReveal = pool;
+    void this.refreshAutomationBook();
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;

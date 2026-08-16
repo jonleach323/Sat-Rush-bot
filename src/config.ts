@@ -508,6 +508,33 @@ const schema = z
      * into a board that did not justify it. The streak reset is real, it is
      * just not worth buying at the price of the rounds needed to keep it. Turn
      * on only if the epoch channel gets materially richer than it is today. */
+    /** Read the automation book instead of predicting rival inflow.
+     *
+     * PublicAutomation accounts carry a Static strategy's selection_mask and
+     * per_round_usd_amount, and the crank executes them at round open — so a
+     * funded Static automation is a deploy that WILL land, on tiles already
+     * known. Measured: 201 accounts, all Static, 36 funded, committing $115.67
+     * per round against a board of ~$135 gross. About 86% of the field is
+     * readable rather than guessable. */
+    AUTOMATION_BOOK_ENABLED: boolFromEnv(true),
+    /** Share of funded automations that actually fire in a round.
+     *
+     * Intent is not execution — the crank must run, and funding can move
+     * between our read and the round. 1.0 is the measured starting point (36
+     * funded automations against ~43 deploys per round, of which ~96% are
+     * automations), but it should be calibrated against what lands. Over-
+     * predicting is the dangerous direction: it makes every tile look more
+     * crowded than it is and suppresses deploys we should be making. */
+    AUTOMATION_FIRE_RATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(1),
+    ),
+    /** Rounds between automation-book refreshes. Registrations change rarely,
+     * so this is a cheap poll, not a hot path. */
+    AUTOMATION_REFRESH_ROUNDS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(20),
+    ),
     /** Let the hashrate a deploy earns subsidise that deploy's cost.
      *
      * OFF until epoch farming is PROVEN +EV, which it is not. The distinction
