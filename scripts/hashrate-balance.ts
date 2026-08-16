@@ -20,12 +20,13 @@ import { PriceFeed } from "../src/ingest/prices.js";
 import { readEpochField } from "../src/ingest/epoch-field.js";
 import { hashrateRawPerUsd, REWARD_MAX_STREAK } from "../src/strategy/hashrate.js";
 import { TILES_COUNT } from "../src/strategy/ev.js";
+import { VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
 const pid = new PublicKey(cfg.PROGRAM_ID);
 const n = (v: unknown): number => Number((v as { toString(): string }).toString());
-const TICKET_PRICE_RAW = 100;
+const TICKET_PRICE_RAW = VAULT_HASHRATE_PER_TICKET.value;
 
 // An explicit pubkey argument checks any wallet; with none, the configured
 // keypair. Reporting which one was used is the point — a KEYPAIR_PATH that

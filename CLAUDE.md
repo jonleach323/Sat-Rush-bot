@@ -25,6 +25,36 @@ slot-hash entropy; the pot is swapped to BTC on-chain and winners are paid in va
 - Secrets (keypair path, RPC URLs, Telegram token) come from `.env` only. `.env` is
   gitignored. Never print private keys.
 
+## Numbers discipline (this is where every past error came from)
+Nearly every wrong conclusion in this project was a bare `number` with no
+provenance — not bad arithmetic. `evOfAllocation` verified exact against a
+closed form while the answers it produced were wrong, because its INPUTS were
+stale, invented, or duplicated. Rules:
+
+- **Every economic constant lives in `src/strategy/facts.ts`**, once, carrying a
+  `Provenance`: `derived` (read from chain/config at use time — always prefer
+  this) | `measured` (needs `n`, date, half-life, recheck command) | `stated`
+  (by the owner) | `assumed` (must name the risk). Never inline the literal —
+  `0.9333` survived in a script for weeks after being corrected in `ev.ts`.
+- **Never report a point estimate without its standard error.** Use `Estimate`
+  and `significant()` from facts.ts. A realized −25.45% over 193 single-tile
+  deploys had a ±28.6-point standard error (z = −0.61) and was written up as a
+  finding. Payout-based samples converge glacially at p = 1/21; ratio-based
+  measurements converge fast — prefer the latter.
+- **Our own config is never an economic input.** Reading `VAULT_MAX_TICKETS` to
+  value hashrate concluded hashrate was worthless because we had configured
+  ourselves not to spend it. Bound quantities economically (`VAULT_MAX_SHARE`).
+- **Projecting a partial window means projecting EVERY dimension.** Scaling
+  epoch tickets by `1/progress` while freezing the entrant count swung the
+  answer by $200/day. Bracket the uncertain dimension; don't pick a value.
+- **Every reconstruction needs a conservation check.** `strategy-compare`
+  validates replayed gross against `Round.deployed_usd_amount × 1.250`; without
+  it, scanning the Board PDA instead of the Round PDA silently dropped a third
+  of deploys.
+- **Don't assert operational state you have not read this turn.** "The KILL file
+  is set" was repeated from a stale note while the bot was live and trading.
+- `pnpm preflight` prints assumed and stale facts. Treat stale as an error.
+
 ## Stack
 TypeScript, Node 20+, pnpm. Deps: @solana/web3.js v1, @coral-xyz/anchor,
 @triton-one/yellowstone-grpc, better-sqlite3, grammy (Telegram), pino, zod, vitest, tsx.

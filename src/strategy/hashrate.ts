@@ -36,9 +36,16 @@
  * has confirmed. Do not size epoch farming off this until it is settled.
  */
 import { TILES_COUNT } from "./ev.js";
+import { REWARD_MAX_STREAK as REWARD_MAX_STREAK_FACT } from "./facts.js";
 
-/** Program cap on the streak multiplier (REWARD_MAX_STREAK). */
-export const REWARD_MAX_STREAK = 100;
+/**
+ * Cap on the streak multiplier.
+ *
+ * ASSUMED, not read from the program — see facts.ts. The highest streak
+ * actually observed is 28, and accrual is LINEAR in streak, so if this is
+ * wrong every farming estimate scales with it.
+ */
+export const REWARD_MAX_STREAK = REWARD_MAX_STREAK_FACT.value;
 
 /** Raw hashrate units per whole USD deployed: m + N/n. */
 export function hashrateRawPerUsd(streak: number, tilesCovered: number): number {

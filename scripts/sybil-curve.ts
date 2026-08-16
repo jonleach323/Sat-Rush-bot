@@ -27,6 +27,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import { loadConfig } from "../src/config.js";
 import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../src/strategy/vault.js";
+import { EPOCH_LAST_CLOSE_TICKETS } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -34,7 +35,7 @@ const pid = new PublicKey(cfg.PROGRAM_ID);
 const usd = (n: number): string => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
 // Measured close of the last COMPLETE iteration (4), from EpochDrawTriggered.
-const FIELD_TICKETS = 806_582;
+const FIELD_TICKETS = EPOCH_LAST_CLOSE_TICKETS.value;
 const POOL_USD = 46_553;
 const TOTAL = Number(process.argv[2] ?? 100_000);
 

@@ -22,11 +22,12 @@ import { loadConfig } from "../src/config.js";
 import { decodeAccount, type SatrushConfig, type SatsVault } from "../src/adapter/idl.js";
 import { parseCpiEventData } from "../src/ingest/events.js";
 import { satrushConfigPda, satsVaultPda } from "../src/adapter/pdas.js";
+import { SLOT_SECONDS as SLOT_SECONDS_FACT } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
 const pid = new PublicKey(cfg.PROGRAM_ID);
-const SLOT_SECONDS = 0.4;
+const SLOT_SECONDS = SLOT_SECONDS_FACT.value;
 
 const vault = satsVaultPda(pid);
 const sv = decodeAccount<SatsVault>("SatsVault", (await conn.getAccountInfo(vault, "confirmed"))!.data);

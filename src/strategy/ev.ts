@@ -35,6 +35,7 @@
 import type { SatrushConfig } from "../adapter/idl.js";
 import { maskToTiles } from "../adapter/mask.js";
 import { hashrateRebateUsd, type HashrateValuation } from "./hashrate.js";
+import { STRIKE_PAYOUT_FRACTION as STRIKE_PAYOUT_FRACTION_FACT } from "./facts.js";
 
 export const TILES_COUNT = 21;
 const P_WIN = 1 / TILES_COUNT;
@@ -68,12 +69,12 @@ export function feeModelFromConfig(config: SatrushConfig): FeeModel {
 /**
  * Fraction of a Sat Strike bonus that actually reaches the winner.
  *
- * Operator-stated 70/30. This replaced an invented 0.9333 that had been
- * flattering every deploying strategy by ~68 bps of gross; the old value still
- * survived in one script long after the correction, which is why the number
- * lives here now instead of being retyped per caller.
+ * The value and its provenance live in `facts.ts`; this is a convenience
+ * re-export so the EV math reads cleanly. Do not inline the literal — an
+ * invented 0.9333 survived in one script for weeks after being corrected here,
+ * which is the whole reason facts.ts exists.
  */
-export const STRIKE_PAYOUT_FRACTION = 0.70;
+export const STRIKE_PAYOUT_FRACTION = STRIKE_PAYOUT_FRACTION_FACT.value;
 
 /**
  * Round-trip return on a BLANKET deploy, as a fraction of gross.

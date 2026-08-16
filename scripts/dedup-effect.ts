@@ -30,6 +30,7 @@ import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../src/strategy/v
 import { blanketToll, feeModelFromConfig } from "../src/strategy/ev.js";
 import { decodeAccount, type SatrushConfig } from "../src/adapter/idl.js";
 import { satrushConfigPda } from "../src/adapter/pdas.js";
+import { EPOCH_LAST_CLOSE_TICKETS, UNCLAIMED_HASHRATE_UPLIFT } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -66,7 +67,7 @@ const observedTotal = observed.reduce((a, b) => a + b, 0);
 // projection. Earlier revisions of this script extrapolated the live iteration
 // from ~7% elapsed and got 475,872 tickets against a $63,898 pool; the actual
 // close was 806,582 tickets against a $46,553 pool. Both errors flattered us.
-const PROJECTED_FIELD = 806_582;
+const PROJECTED_FIELD = EPOCH_LAST_CLOSE_TICKETS.value;
 const POOL_USD = 46_553;
 
 // Prefer the MEASURED distribution of a completed iteration over the live
@@ -100,7 +101,7 @@ const fieldTotal = field.reduce((a, b) => a + b, 0);
 //     stated sample size, and it is also the conservative direction for
 //     anything that makes farming look good.
 // Gross converts to raw hashrate at 101/$ at streak 100 on a blanket.
-const UNCLAIMED_UPLIFT = 1.179;
+const UNCLAIMED_UPLIFT = UNCLAIMED_HASHRATE_UPLIFT.value;
 const TOLL_PER_TICKET = blanketToll(fees, conf.strike_fee_bps) /
   ((101 * UNCLAIMED_UPLIFT) / 100);
 

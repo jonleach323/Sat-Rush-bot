@@ -32,6 +32,7 @@ import { readEpochField, resampleField } from "../src/ingest/epoch-field.js";
 import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
 import { hashrateRawPerUsd, REWARD_MAX_STREAK } from "../src/strategy/hashrate.js";
 import { blanketToll, feeModelFromConfig, TILES_COUNT } from "../src/strategy/ev.js";
+import { UNCLAIMED_HASHRATE_UPLIFT, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -39,7 +40,7 @@ const pid = new PublicKey(cfg.PROGRAM_ID);
 const num = (v: unknown): number => Number((v as { toString(): string }).toString());
 const DEPLOY_USD = Number(process.argv[2] ?? 1);
 const STREAK = Number(process.argv[3] ?? REWARD_MAX_STREAK);
-const TICKET_PRICE_RAW = 100;
+const TICKET_PRICE_RAW = VAULT_HASHRATE_PER_TICKET.value;
 
 const [confInfo, boardInfo, slot] = await Promise.all([
   conn.getAccountInfo(satrushConfigPda(pid), "confirmed"),
@@ -152,10 +153,8 @@ console.log(`  blanket toll ${(100 * toll).toFixed(2)}% of gross → board cost 
   `$${boardCost.toFixed(2)} per iteration\n`);
 
 // ── the dominant variable: how many wallets show up ─────────────────────────
-// 1.179, not the 1.246 strategy-compare used: PublicDeploySettled's
-// unclaimed_hashrate_earned / hashrate_earned ratio is 0.179 over 1,875 settles.
-// The 0.246 it was built on has no stated sample and cannot be reproduced.
-const UNCLAIMED_UPLIFT = 1.179;
+// Value and provenance live in facts.ts, alongside the contested 0.246.
+const UNCLAIMED_UPLIFT = UNCLAIMED_HASHRATE_UPLIFT.value;
 const tix = ticketsFor(UNCLAIMED_UPLIFT);
 console.log(`  projected pool $${Math.round(poolFull).toLocaleString()}   ` +
   `projected field ${Math.round(totalFull).toLocaleString()} tickets   ` +

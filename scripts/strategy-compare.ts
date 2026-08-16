@@ -42,9 +42,10 @@ import { parseCpiEventData } from "../src/ingest/events.js";
 import { boardPda, satrushConfigPda } from "../src/adapter/pdas.js";
 import { PriceFeed } from "../src/ingest/prices.js";
 import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
-import { evOfAllocation, feeModelFromConfig, TILES_COUNT, type EvContext } from "../src/strategy/ev.js";
+import { evOfAllocation, feeModelFromConfig, STRIKE_PAYOUT_FRACTION, TILES_COUNT, type EvContext } from "../src/strategy/ev.js";
 import { selectAllocation } from "../src/strategy/selector.js";
 import { readEpochField, resampleField } from "../src/ingest/epoch-field.js";
+import { UNCLAIMED_HASHRATE_UPLIFT } from "../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -271,19 +272,11 @@ function realised(stakes: number[], alloc: bigint[], winner: number): number {
 // (294 bps leg x the 0.70 payout fraction). An approximation: the real thing
 // is a ~1/1440 jackpot to the winning tile, so it is lumpy, but its expectation
 // is stake-keyed and identical for every strategy per dollar deployed.
-const STRIKE_RECOVERY = 0.0206;  // 294 bps leg x 0.70 payout (operator-stated)
+const STRIKE_RECOVERY = (conf.strike_fee_bps / 1e4) * STRIKE_PAYOUT_FRACTION;
 
-/**
- * Uplift from hashrate that is EARNED but deferred to claim time.
- *
- * Was 1.246, commented only "full output + measured bonus" and sourced to
- * nothing. 1.179 is measured: PublicDeploySettled carries both `hashrate_earned`
- * and `unclaimed_hashrate_earned`, and over 1,875 settles their ratio is 0.179
- * (per-event median 0.173), so claiming releases 1.179x the headline figure.
- * The promo bonus is NOT in here — it is applied per round inside `a.raw`, and
- * folding it in again is a double count.
- */
-const UNCLAIMED_UPLIFT = 1.179;
+/** Deferred-hashrate uplift. Value and provenance live in facts.ts. The promo
+ * bonus is NOT in here — it is applied per round inside `a.raw`. */
+const UNCLAIMED_UPLIFT = UNCLAIMED_HASHRATE_UPLIFT.value;
 const MIN_BASE = BigInt(num(conf.min_deploy_usd_amount));
 
 interface Strategy {
@@ -359,7 +352,7 @@ for (const [rid, r] of usable) {
 }
 
 const perDay = 1440 / usable.length;
-const ITER = 4320;
+const ITER = roundsPerIteration;
 console.log(`\nbacktest over ${usable.length} rounds (${(usable.length / 1440).toFixed(2)} days)`);
 console.log(`SOL $${SOL.toFixed(2)}   fee $${feeUsdPerRound.toFixed(5)}/round   ` +
   `strike credited flat at ${(STRIKE_RECOVERY * 1e4).toFixed(0)} bps\n`);
