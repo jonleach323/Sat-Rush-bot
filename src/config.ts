@@ -508,24 +508,30 @@ const schema = z
      * into a board that did not justify it. The streak reset is real, it is
      * just not worth buying at the price of the rounds needed to keep it. Turn
      * on only if the epoch channel gets materially richer than it is today. */
-    /** Settle OTHER players' deployments for the rent bounty.
+    /** DISABLED — the rent bounty does not exist. Kept only so the machinery
+     * is not silently deleted along with the finding that killed it.
      *
-     * settle_deploy_public is permissionless and pays its rent to whoever
-     * cranks — measured at +0.001730 SOL net per deployment, ~116 SOL/day
-     * across the field — and deployment_settle_grace_duration is 0, so it is a
-     * first-to-land race the moment a round resolves.
+     * The claim was that settle_deploy_public pays its rent to whoever cranks,
+     * worth ~116 SOL/day across the field. It does not. Measured on a
+     * transaction that settled three deployments at once, the released rent
+     * split exactly: +0.003670 SOL to the settler (its OWN two deployments,
+     * recaptured) and +0.001837 to the third deployment's authority, who had
+     * paid it. rent_recipient is constrained by the program — it goes back to
+     * whoever funded the account and cannot be pointed elsewhere.
      *
-     * ON. It is legitimate on its own terms — the program pays a bounty for
-     * work the game needs done, and unsettled deployments never pay their
-     * owners out — and the operator, whose crank currently collects it, has
-     * been asked directly and has no objection. SELF_SETTLE, which only
-     * reclaims our own, is separate and unaffected.
+     * The error was measuring the settle transaction in isolation. The fee
+     * payer's balance does rise by the rent, which looks like income until you
+     * check who paid it at CREATE time. 210 of 215 matched deployments were
+     * created and settled by the same wallet (the game authority, running
+     * automations), so the sample was almost entirely one party recovering its
+     * own deposit.
      *
-     * Losing a race costs only the transaction fee, and the margin is ~99.7%
-     * (0.00173 SOL against ~0.000015), so a low win rate is still strongly
-     * profitable. Watch the win rate in the "rent crank resolved" log line
-     * before tuning SETTLE_CRANK_MAX_PER_TX. */
-    SETTLE_CRANK_ENABLED: boolFromEnv(true),
+     * SELF_SETTLE is the part that was always real: recapturing OUR rent on
+     * OUR deployments. That is separate, still on, and unaffected.
+     *
+     * Turning this on now would pay fees to hand other players their own money
+     * back. */
+    SETTLE_CRANK_ENABLED: boolFromEnv(false),
     /** Settles packed per transaction.
      *
      * A collision bound, not a protocol one: a deployment a rival closed first
