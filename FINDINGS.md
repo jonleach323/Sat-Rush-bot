@@ -405,3 +405,78 @@ rate — rho, directly), `/v1/users/{address}/deployments`, `/v1/rounds`.
 five were. It is that four separate sessions spent effort measuring, arguing
 about, and being wrong about numbers that a published package exports. Check
 for a first-party SDK before reverse-engineering anything.
+
+---
+
+## E-recompute: every claim from today, redone against first-party data (2026-08-16)
+
+`pnpm recompute` rebuilds every live number from `@satrush/client` (program
+constants) and `@satrush/api` (full history), with EMPIRICAL error bars — a
+ratio estimator's residuals, no assumption about the payoff distribution.
+
+| claim | as stated today | recomputed |
+|---|---|---|
+| blanket toll | 6.36% → 7.04% | **7.046%**, exact |
+| `farm-21` | **+$35.81/day** | **−$64/day** at live pool, 157 entrants |
+| farming viability | "unproven at current volume" | **dead**: ρ = 0.96 vs break-even 3.04 |
+| wallet P&L | "+$100–290", then "+$498" | **+$199.50 … +$498.31** by convention |
+| wallet edge | "3.6× worse than blanketing" | **unresolved** — need ~2,458 deploys |
+| single-tile edge | −25.45%, then −11.03% | **−30.56% ± 22.10%** (n=270), unresolved |
+| wide masks | "a rounding error" | **the only positive leg**: +$679 on $2,856 |
+| ρ | 4.91 → 2.73 → 2.00 → 1.47 | **0.96** blanket / **1.15** single-tile |
+| streak cap | ASSUMED 100 | SDK 100; the COUNTER reaches 9,723 |
+
+### The headline: we cannot tell whether the bot has an edge
+
+```
+  463 deploys · deployed $5,639 · USD won $5,144.70 · BTC won $770.89
+  NET +$199.50    ROI +3.54% ± 12.19%   NOT SIGNIFICANT
+  vs a blanket (−7.05%): unresolved, need ~2,458 deploys
+```
+
+Every strategy leg is inside its own error bar:
+
+```
+  tiles   deploys   volume       net    ROI ± se
+      1       270   $  524   -$160.15   -30.56% ± 22.10%   unresolved
+   2-12       168   $ 2259   -$319.32   -14.14% ± 11.94%   unresolved
+  13-20        25   $ 2856   +$678.97   +23.77% ± 20.11%   unresolved
+```
+
+Two things worth noting. **Wide masks carried the wallet** — 25 deploys on
+$2,856 of volume produced all the profit, while I dismissed them earlier as "a
+rounding error" off a 200-row window that happened to exclude them. And the
+low-variance tile-ratio estimate (−11.03%) sits comfortably inside the
+high-variance direct measurement (−30.56% ± 22.10%), so the two independent
+routes to the single-tile edge agree.
+
+### Farming is now dead three separate ways
+
+```
+  field rate      105.1 raw/$   (top 50 wallets, $4.55M deployed)
+  ours, blanket   101 raw/$  → ρ = 0.96
+  ours, 1 tile    121 raw/$  → ρ = 1.15
+  break-even                   ρ ≥ 3.04   (toll 7.046% / epoch leg 232 bps)
+```
+
+The field is already at the streak cap, so ρ ≈ 1 by construction and no amount
+of persistence changes it. The entrant bracket agrees — and note participants
+run 96 → 151 → 160 → 157, so the live iteration's 53 is an early count that will
+converge on ~157, the losing end:
+
+```
+   entrants   epoch take   NET/iter    (pool held at iteration 4's $46,532 — an upper bound)
+         53   $  462.40    +$158.02
+        100   $  307.18      +$2.79
+        157   $  245.97     -$58.42
+```
+
+At the live ~$21.3k pool rather than iteration 4's $46.5k, the 157-entrant case
+is roughly **−$192/iteration ≈ −$64/day**.
+
+### Method
+
+The ROI standard error is `sqrt(Σ(yᵢ − R·xᵢ)²) / Σxᵢ` — the ratio estimator's
+own residuals. Earlier I derived a standard error analytically from an assumed
+1-in-21 payoff; this needs no such assumption and handles the varying deploy
+sizes that analytic version ignored.
