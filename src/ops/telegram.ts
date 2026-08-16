@@ -101,8 +101,6 @@ export interface VaultReport {
   unclaimedHashrate: number;
   epoch: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
   oneBtc: { ticketsBought: number; iterationsPlayed: number; iterationsClaimed: number };
-  /** Settle-rent cranking, counted in deployments won/lost — see VaultJson. */
-  crank?: { enabled: boolean; landed: number; lost: number; winRate: number; solEarned: number } | undefined;
   recent: Record<string, unknown>[];
 }
 
@@ -295,17 +293,6 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
       `epoch: ${v.epoch.ticketsBought} tickets / ${v.epoch.iterationsPlayed} draws / ${v.epoch.iterationsClaimed} claimed`,
       `1-BTC: ${v.oneBtc.ticketsBought} tickets / ${v.oneBtc.iterationsPlayed} draws / ${v.oneBtc.iterationsClaimed} claimed`,
     ];
-    if (v.crank) {
-      const c = v.crank;
-      const races = c.landed + c.lost;
-      lines.push(
-        c.enabled
-          ? races > 0
-            ? `crank: ${c.landed}/${races} won (${(100 * c.winRate).toFixed(0)}%) · ${c.solEarned.toFixed(4)} SOL`
-            : "crank: armed, no races yet"
-          : "crank: OFF",
-      );
-    }
     if (v.recent.length > 0) {
       lines.push("recent:");
       for (const r of v.recent.slice(0, 8)) {

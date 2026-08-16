@@ -42,7 +42,6 @@ const fakeData: MonitorData = {
       usdPerRawUnit: null,
     },
     pools: null,
-    crank: { enabled: false, landed: 0, lost: 0, winRate: 0, solEarned: 0, perTx: 8 },
     hashrateValue: { usdPerRawUnit: 0, source: "none" as const },
     recent: [{ kind: "epoch", iteration_id: 293, tickets: 5, claimed: 0 }],
   }),

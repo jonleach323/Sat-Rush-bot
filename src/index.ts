@@ -10,7 +10,6 @@
  * loops — the slot stream IS the tick.
  */
 import {
-  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
@@ -58,12 +57,6 @@ import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
 import { streakOptionValueUsd } from "./strategy/streak.js";
 import { projectField } from "./strategy/epoch-pool.js";
-import {
-  DEFAULT_PACKING,
-  SettleRegistry,
-  batchClearsCost,
-  planBatches,
-} from "./exec/settle-crank.js";
 import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
 import {
   epochAction,
@@ -188,10 +181,7 @@ export class Orchestrator {
         snapshotSlot: () => this.state.currentSlot,
         rpcSlot: () => this.connection.getSlot("processed"),
         solBalanceLamports: () =>
-          this.connection.getBalance(this.payer.publicKey, "processed").then((v) => {
-            this.lastKnownLamports = v;
-            return v;
-          }),
+          this.connection.getBalance(this.payer.publicKey, "processed"),
         usdcBalanceBaseUnits: async () => {
           const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
           const ata = getAssociatedTokenAddressSync(
@@ -224,10 +214,7 @@ export class Orchestrator {
       dailyLossCapBase: usdToBase(cfg.DAILY_LOSS_CAP_USD),
       myAuthority: this.payer.publicKey.toBase58(),
       solBalanceLamports: () =>
-        this.connection.getBalance(this.payer.publicKey, "processed").then((v) => {
-          this.lastKnownLamports = v;
-          return v;
-        }),
+        this.connection.getBalance(this.payer.publicKey, "processed"),
       usdcBalanceBaseUnits: async () => {
         const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
         const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
@@ -253,18 +240,6 @@ export class Orchestrator {
       vaultPools: () => this.vaultPoolCache,
       fireOffsetSlots: () => this.currentFireOffset(),
       shareValueUsd: () => this.satsShareValueUsd(),
-      crank: () => {
-        const { landed, lost, solEarned } = this.crankStats;
-        const seen = landed + lost;
-        return {
-          enabled: cfg.SETTLE_CRANK_ENABLED,
-          landed,
-          lost,
-          winRate: seen > 0 ? landed / seen : 0,
-          solEarned,
-          perTx: cfg.SETTLE_CRANK_MAX_PER_TX,
-        };
-      },
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -848,35 +823,12 @@ export class Orchestrator {
   /** Strike pool as of the last slot tick — the payout base, sampled before the
    * reveal consumes it. Without this the measurement above has nothing to
    * divide by, because the Board is already drained by the time we see it. */
-  /** Last observed SOL balance, cached from the health/monitor reads so the
-   * crank can check its reserve without adding an RPC call to the race. */
-  private lastKnownLamports: number | null = null;
 
-  /** Settle-crank lookup table, fetched once at boot and refreshed lazily.
-   * Null when unconfigured or unfetchable — the crank still works, it just
-   * packs fewer settles per transaction. */
-  private settleAlt: AddressLookupTableAccount | null = null;
 
   private strikePoolBeforeReveal = 0n;
 
-  /** Deployments seen this round, so the settle plan is ready the instant the
-   * round resolves. Discovering them afterwards is the race, already lost. */
-  private readonly settleRegistry = new SettleRegistry();
 
-  /** Cumulative settle-rent race record, counted in DEPLOYMENTS not
-   * transactions — a batch shares one fate, so deployments is what the win
-   * rate must be measured in. */
-  private crankStats = { landed: 0, lost: 0, solEarned: 0 };
 
-  /**
-   * A blockhash kept warm off the slot tick, so the rent crank does not spend
-   * an RPC round-trip fetching one on the critical path. Settling is a
-   * first-to-land race decided in milliseconds; a getLatestBlockhash between
-   * seeing the reveal and signing is the difference between winning the round
-   * and paying a fee to lose it.
-   */
-  private hotBlockhash: { blockhash: string; lastValidBlockHeight: number; atSlot: number } | null =
-    null;
 
   private monetisableRawPerRound(): number {
     const e = this.epochTicketEconomics();
@@ -1118,22 +1070,6 @@ export class Orchestrator {
     // denominator for the payout-fraction measurement in onRevealed().
     const pool = this.state.strikePoolUsd();
     if (pool > 0n) this.strikePoolBeforeReveal = pool;
-    // Keep a blockhash warm for the settle race. Refreshed well inside the
-    // ~150-slot lifetime so it is never close to expiry when a round resolves.
-    if (
-      this.cfg.SETTLE_CRANK_ENABLED &&
-      (this.hotBlockhash === null || this.state.currentSlot - this.hotBlockhash.atSlot >= 30)
-    ) {
-      const atSlot = this.state.currentSlot;
-      void this.connection
-        .getLatestBlockhash("confirmed")
-        .then((bh) => {
-          this.hotBlockhash = { ...bh, atSlot };
-        })
-        .catch(() => {
-          // Keep the previous one; assembleTx will fetch if it is missing.
-        });
-    }
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;
@@ -1355,128 +1291,6 @@ export class Orchestrator {
   }
 
   // ── settle + sweep ──────────────────────────────────────────────────────────
-
-  /**
-   * Settle everyone's deployments for a resolved round, not just ours.
-   *
-   * settle_deploy_public pays its rent to whoever cranks — measured at
-   * +0.001730 SOL net per deployment — and the grace duration is 0, so the
-   * moment a round resolves it is a first-to-land race against the incumbent
-   * crank. Batches are fired in PARALLEL rather than in sequence: they do not
-   * depend on each other, and serialising them would hand the tail of the
-   * round to whoever else is racing.
-   *
-   * Each batch shares one fate. A deployment a rival closed first fails its
-   * whole transaction, which is exactly why planBatches caps the pack size
-   * instead of maximising it.
-   */
-  private async rentCrank(roundId: number): Promise<void> {
-    if (!this.cfg.SETTLE_CRANK_ENABLED || this.cfg.EXECUTION_MODE === "dry") return;
-    if (this.bankroll.killSwitchEngaged()) return;
-    // Never let cranking starve the deploy path. The crank pays for itself out
-    // of the same transaction, so this only bites during a fee spike or a long
-    // losing streak — exactly when the sniper still needs to be able to fire.
-    const lamports = this.lastKnownLamports;
-    if (lamports !== null && lamports / 1e9 < this.cfg.SETTLE_CRANK_MIN_SOL) {
-      this.log.warn(
-        { solBalance: (lamports / 1e9).toFixed(4), floor: this.cfg.SETTLE_CRANK_MIN_SOL },
-        "rent crank paused — SOL below reserve",
-      );
-      return;
-    }
-    const targets = this.settleRegistry.targets(roundId);
-    if (targets.length === 0) return;
-
-    // Fetch the table once; a miss is not fatal, it only costs batch size.
-    if (this.settleAlt === null && this.cfg.SETTLE_ALT_ADDRESS) {
-      try {
-        const res = await this.connection.getAddressLookupTable(
-          new PublicKey(this.cfg.SETTLE_ALT_ADDRESS),
-        );
-        if (res.value) {
-          this.settleAlt = res.value;
-          this.log.info(
-            { alt: this.cfg.SETTLE_ALT_ADDRESS, addresses: res.value.state.addresses.length },
-            "settle lookup table loaded",
-          );
-        }
-      } catch (err) {
-        this.log.warn({ err: String(err) }, "settle lookup table unavailable — packing fewer per tx");
-      }
-    }
-
-    const rentSol = this.cfg.SETTLE_RENT_SOL_ESTIMATE;
-    const fee = this.feeEstimator.currentMicroLamportsPerCu();
-    const txCostSol = (5_000 + (fee * this.cfg.DEPLOY_CU_LIMIT) / 1e6) / 1e9;
-    const limits = { ...DEFAULT_PACKING, maxPerTx: this.cfg.SETTLE_CRANK_MAX_PER_TX };
-    const batches = planBatches(targets, limits);
-
-    this.log.info(
-      { roundId, targets: targets.length, batches: batches.length, perTx: batches[0]?.length ?? 0 },
-      "rent crank planning",
-    );
-
-    const results = await Promise.allSettled(
-      batches.map(async (batch) => {
-        if (!batchClearsCost(batch.length, rentSol, txCostSol)) return null;
-        const ixs = batch.map((t) =>
-          buildSettleDeployPublic(this.ixCtx, {
-            authority: this.payer.publicKey,
-            deploymentAuthority: t.authority,
-            roundId,
-          }),
-        );
-        // Only reuse the cached hash while it is comfortably fresh; a stale one
-        // costs the whole batch, which is worse than the round-trip it saves.
-        const hot =
-          this.hotBlockhash && this.state.currentSlot - this.hotBlockhash.atSlot < 100
-            ? { blockhash: this.hotBlockhash.blockhash, lastValidBlockHeight: this.hotBlockhash.lastValidBlockHeight }
-            : undefined;
-        const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-          payer: this.payer,
-          instructions: ixs,
-          // Budget for the whole batch, not one settle.
-          computeUnitLimit: Math.min(1_400_000, limits.cuPerSettle * batch.length),
-          priorityFeeMicroLamports: fee,
-          blockhash: hot,
-          lookupTables: this.settleAlt ? [this.settleAlt] : undefined,
-        });
-        return this.sender.fire(
-          {
-            signature: bs58.encode(tx.signatures[0]!),
-            serialized: Buffer.from(tx.serialize()),
-            lastValidBlockHeight,
-            meta: { kind: "rent_crank", roundId },
-          },
-          { timeoutMs: 20_000 },
-        );
-      }),
-    );
-
-    let landed = 0;
-    let lost = 0;
-    results.forEach((r, i) => {
-      const size = batches[i]?.length ?? 0;
-      if (r.status === "fulfilled" && r.value?.outcome === "landed") landed += size;
-      else lost += size;
-    });
-    this.crankStats.landed += landed;
-    this.crankStats.lost += lost;
-    this.crankStats.solEarned += landed * rentSol;
-    if (landed > 0 || lost > 0) {
-      this.log.info(
-        {
-          roundId,
-          landed,
-          lost,
-          rentSol: (landed * rentSol).toFixed(6),
-          winRate: `${((100 * landed) / Math.max(1, landed + lost)).toFixed(0)}%`,
-        },
-        "rent crank resolved",
-      );
-    }
-    this.settleRegistry.prune(roundId);
-  }
 
   private async selfSettle(roundId: number): Promise<void> {
     if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry") return;
@@ -2244,7 +2058,6 @@ export class Orchestrator {
 
     if (reveal.round_id === this.roundId) {
       if (this.botState === "SETTLING" || this.botState === "CONFIRMING") {
-        void this.rentCrank(reveal.round_id);
         void this.selfSettle(reveal.round_id).then(() => {
           const reconciliation = this.pnl.reconcileRound(reveal.round_id);
           this.transition("LOGGED", {
@@ -2312,12 +2125,6 @@ export class Orchestrator {
       for (const event of parseTransactionEvents(u)) {
         if (event.name === "PublicDeployCreated") {
           const data = event.data as PublicDeployCreated;
-          // Every deployment is a settle target — ours and everyone else's.
-          this.settleRegistry.add({
-            authority: data.authority,
-            roundId: data.round_id,
-            seenSlot: event.slot,
-          });
           if (data.authority.equals(this.payer.publicKey)) {
             this.db.markDeployLandedByRound(data.round_id, event.slot);
           } else {
@@ -2333,10 +2140,6 @@ export class Orchestrator {
               sig: event.signature,
             });
           }
-        } else if (event.name === "PublicDeploySettled") {
-          // Someone got there first (or it was us) — stop planning around it.
-          const d = event.data as { authority: PublicKey; round_id: number };
-          this.settleRegistry.remove(d.round_id, d.authority);
         } else if (event.name === "RoundRevealed") {
           this.onRevealed(event.data as RoundRevealed);
         } else if (event.name === "PublicDeploySettled") {

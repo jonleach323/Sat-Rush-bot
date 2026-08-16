@@ -484,17 +484,9 @@ function renderVault(v){
   const ec = v.economics || {};
   const price = ec.usdPerRawUnit;
   const hv = v.hashrateValue || {usdPerRawUnit:0, source:"none"};
-  // Rent cranking is a separate business from the vaults but shares the panel:
-  // it is the same hashrate/settle lifecycle and the operator watches both.
-  const ck = v.crank || {enabled:false,landed:0,lost:0,winRate:0,solEarned:0,perTx:0};
   el("vaultsub").textContent = (v.enabled ? "ON" : "OFF")
     + " · pricing hashrate at " + usd4(hv.usdPerRawUnit) + "/raw unit (" + hv.source + ")"
-    + (price!=null ? " · realized "+usd4(price) : "")
-    + " · crank " + (ck.enabled
-        ? (ck.landed+ck.lost>0
-            ? (100*ck.winRate).toFixed(0)+"% of "+(ck.landed+ck.lost)+" ("+ck.solEarned.toFixed(4)+" SOL, "+ck.perTx+"/tx)"
-            : "armed, no races yet")
-        : "OFF");
+    + (price!=null ? " · realized "+usd4(price) : "");
 
   // Pools first — these are the numbers that decide whether to enter.
   const p = v.pools;

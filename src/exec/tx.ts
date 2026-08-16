@@ -6,7 +6,6 @@
  */
 import { readFileSync } from "node:fs";
 import {
-  AddressLookupTableAccount,
   ComputeBudgetProgram,
   Keypair,
   TransactionMessage,
@@ -33,12 +32,6 @@ export interface AssembleTxParams {
   priorityFeeMicroLamports: number;
   /** Reuse a pre-fetched blockhash instead of fetching one. */
   blockhash?: { blockhash: string; lastValidBlockHeight: number } | undefined;
-  /**
-   * Address lookup tables. Every account they cover costs one byte in the
-   * message instead of thirty-two, which is what lets a settle batch hold more
-   * than a couple of deployments.
-   */
-  lookupTables?: AddressLookupTableAccount[] | undefined;
 }
 
 export interface AssembledTx {
@@ -86,7 +79,7 @@ export async function assembleTx(
     payerKey: params.payer.publicKey,
     recentBlockhash: blockhash,
     instructions,
-  }).compileToV0Message(params.lookupTables ?? []);
+  }).compileToV0Message();
 
   const tx = new VersionedTransaction(message);
   tx.sign([params.payer]);
