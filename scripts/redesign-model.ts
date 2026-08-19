@@ -231,6 +231,131 @@ console.log(`  return from a uniform tile draw with pro-rata payout IS your stak
 console.log(`  share, so removing the lottery changes variance, not EV. The delta`);
 console.log(`  above is entirely the epoch redistribution.`);
 
+// ── does less variance actually buy more game cycles? ───────────────────────
+//
+// The owner's core claim, and the one worth testing hardest: today "98.6% of
+// player facing value is tied to variance" and that exhausts balances too fast.
+//
+// The first half is right, and understated. EVERY leg is tile- or draw-keyed
+// today: the pot, the sats leg (paid to the winning tile's stakers), Strike,
+// the epoch draw, the 1-BTC draw. Nothing is returned unconditionally. Under
+// the proposal 80% + BTC comes back regardless and only Strike is a lottery.
+//
+// The second half needs splitting in two, because they are different things:
+//   - the MEAN burn rate is set by the toll, and the proposal does not touch it;
+//   - the TAIL — going broke fast — is set by variance, and the proposal
+//     removes almost all of it.
+// If the goal is "more cycles on average" the lever is the toll. If the goal is
+// "players do not get wiped out in an afternoon" the proposal nails it.
+function simulateRuin(
+  mode: "concentrated" | "blanket" | "proposed",
+  deployFraction: number, rounds: number, paths = 4000,
+): { medianHalfLife: number; pBelow10: number; medianEnd: number } {
+  const toll = 1 - (POT + SATS * CLAIM_NET + B(conf.strike_fee_bps) * STRIKE_PAYOUT);
+  // A single tile pays about 21x the blanket multiple when it hits.
+  const hit = (POT + SATS * CLAIM_NET) * TILES.value;
+  const halfLives: number[] = [];
+  const ends: number[] = [];
+  let below10 = 0;
+  for (let p = 0; p < paths; p++) {
+    let bal = 1;
+    let half = rounds;
+    let recorded = false;
+    for (let r = 0; r < rounds && bal > 1e-6; r++) {
+      const stake = bal * deployFraction;
+      bal -= stake;
+      if (mode === "concentrated") {
+        // 1-in-21 for the full multiple, nothing otherwise. Strike expectation
+        // is folded in so the MEAN matches the other modes exactly.
+        bal += (Math.random() < 1 / TILES.value ? hit * stake : 0)
+          + B(conf.strike_fee_bps) * STRIKE_PAYOUT * stake;
+      } else {
+        bal += (1 - toll) * stake;
+      }
+      if (!recorded && bal < 0.5) { half = r + 1; recorded = true; }
+    }
+    halfLives.push(half);
+    ends.push(bal);
+    if (bal < 0.1) below10++;
+  }
+  const med = (xs: number[]): number => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+  return { medianHalfLife: med(halfLives), pBelow10: below10 / paths, medianEnd: med(ends) };
+}
+
+console.log(`\n══ BALANCE DECAY — does removing variance buy more cycles? ══`);
+console.log(`  redeploying 20% of the running balance each round, 100 rounds (~100 min)\n`);
+console.log("  design                    median rounds to half   P(below 10% @100)   median end");
+for (const [label, mode] of [
+  ["today, single tile", "concentrated"],
+  ["today, blanket", "blanket"],
+  ["proposed (any mask)", "proposed"],
+] as [string, "concentrated" | "blanket" | "proposed"][]) {
+  const r = simulateRuin(mode, 0.20, 100);
+  console.log(`  ${label.padEnd(24)}  ${String(r.medianHalfLife).padStart(21)}   ` +
+    `${(100 * r.pBelow10).toFixed(1).padStart(15)}%   ${(100 * r.medianEnd).toFixed(1).padStart(9)}%`);
+}
+console.log(`\n  Blanket and proposed are the SAME row — identical mean, identical`);
+console.log(`  variance, because a blanket already holds the winning tile every`);
+console.log(`  round. The proposal gives every player what blanket players`);
+console.log(`  already have, and takes the ruin tail away from everyone else.`);
+console.log(`\n  But note the median half-life does not improve. The toll sets that,`);
+console.log(`  and the proposal does not change the toll. For MORE CYCLES rather`);
+console.log(`  than SAFER cycles the levers are the claim fee and the protocol leg:`);
+for (const [label, t] of [
+  ["today", 1 - (POT + SATS * CLAIM_NET + B(conf.strike_fee_bps) * STRIKE_PAYOUT)],
+  ["claim fee → 0", 1 - (POT + SATS + B(conf.strike_fee_bps) * STRIKE_PAYOUT)],
+  ["claim fee → 0, protocol → 71 bps",
+    1 - (POT + B(conf.protocol_fee_bps) / 2 + SATS + B(conf.strike_fee_bps) * STRIKE_PAYOUT)],
+] as [string, number][]) {
+  // Rounds for a fully-recycled balance to halve at this toll.
+  const n = Math.log(0.5) / Math.log(1 - t);
+  console.log(`    ${label.padEnd(34)} toll ${(100 * t).toFixed(2)}% → ` +
+    `${n.toFixed(0)} full-recycle rounds to halve`);
+}
+
+// ── how the 21 are SELECTED decides the sybil answer ────────────────────────
+//
+// The owner's objection is correct and my first cut was sloppy: "equal shares
+// to 21 unique wallets" does not say HOW the 21 are chosen, and the sybil
+// answer depends entirely on that. Two readings:
+//
+//   UNIFORM  drawn at random among participants. Every wallet is one lottery
+//            ticket regardless of size, so k wallets buy k entries. Linear.
+//   WEIGHTED drawn ticket-weighted with the existing wallet dedup — the
+//            mechanism that already runs — but PAID a flat 1/21 each. A tiny
+//            wallet is then unlikely to be drawn at all, so splitting buys
+//            little until you already hold a large ticket share.
+//
+// He is also right that the hole is not new: today's dedup already rewards
+// splitting, measured below at ~1.6x. The only question is whether the change
+// makes it bigger, and that turns on this choice alone.
+function equalLegWeighted(
+  mine: number[], others: readonly number[], pool: number, trials = 30_000,
+): number {
+  const arr = [...others, ...mine];
+  const mineFrom = others.length;
+  const total = arr.reduce((a, b) => a + b, 0);
+  if (total <= 0) return 0;
+  const slots = TILES.value;
+  let won = 0;
+  for (let t = 0; t < trials; t++) {
+    const dead = new Uint8Array(arr.length);
+    let rem = total;
+    for (let r = 0; r < slots && rem > 0; r++) {
+      let x = Math.random() * rem, pick = -1;
+      for (let i = 0; i < arr.length; i++) {
+        if (dead[i]) continue;
+        x -= arr[i] as number;
+        if (x < 0) { pick = i; break; }
+      }
+      if (pick < 0) break;
+      dead[pick] = 1; rem -= arr[pick] as number;
+      if (pick >= mineFrom) won += 1 / slots;
+    }
+  }
+  return (won / trials) * 0.40 * pool;
+}
+
 // ── sybil curve ─────────────────────────────────────────────────────────────
 console.log(`\n══ SYBIL GAIN — same total volume, split across k wallets ══`);
 const sybilOf = types.find((t) => t.name === "mid")!;
@@ -238,24 +363,31 @@ const volS = sybilOf.perRoundUsd * ROUNDS_PER_EPOCH;
 const tixS = Math.floor((volS * sybilOf.rate) / HASHRATE_PER_TICKET);
 const base = { today: drawTake([tixS], field, POOL), prop: proposedTake([tixS], ref.total_participants, POOL) };
 console.log(`  a ${usd(volS)}/epoch wallet holding ${tixS.toLocaleString()} tickets\n`);
-console.log("     k    TODAY (rank curve)    PROPOSED 60/40      prop 40% leg alone");
-for (const k of [1, 2, 4, 8, 21, 50]) {
+const baseW = equalLegWeighted([tixS], field, POOL);
+console.log("     k    TODAY rank curve   40% leg UNIFORM      40% leg TICKET-WEIGHTED");
+for (const k of [1, 2, 4, 8, 21, 50, 500]) {
   const split = new Array<number>(k).fill(tixS / k);
   const today = drawTake(split, field, POOL);
-  const prop = proposedTake(split, ref.total_participants + k - 1, POOL);
+  const uni = proposedTake(split, ref.total_participants + k - 1, POOL).equal;
+  const wtd = equalLegWeighted(split, field, POOL);
   console.log(`  ${String(k).padStart(4)}    ${usd(today).padStart(9)} ` +
-    `${("(" + (today / base.today).toFixed(2) + "x)").padStart(8)}    ` +
-    `${usd(prop.total).padStart(9)} ${("(" + (prop.total / base.prop.total).toFixed(2) + "x)").padStart(8)}    ` +
-    `${usd(prop.equal).padStart(9)} ${("(" + (prop.equal / Math.max(1e-9, base.prop.equal)).toFixed(2) + "x)").padStart(8)}`);
+    `${("(" + (today / base.today).toFixed(2) + "x)").padStart(8)}   ` +
+    `${usd(uni).padStart(9)} ${("(" + (uni / Math.max(1e-9, base.prop.equal)).toFixed(2) + "x)").padStart(9)}   ` +
+    `${usd(wtd).padStart(9)} ${("(" + (wtd / Math.max(1e-9, baseW)).toFixed(2) + "x)").padStart(9)}`);
 }
-console.log(`\n  The 40% equal-shares leg is LINEAR in wallet count: each wallet you`);
-console.log(`  add draws its own slot with the same probability, and each slot pays`);
-console.log(`  the same 1/21 regardless of size. Today's rank curve is ticket-`);
-console.log(`  weighted with wallet dedup, so splitting buys far less.`);
-console.log(`\n  This is the one part of the proposal that works AGAINST the stated`);
-console.log(`  goal of attracting whales: equal shares taxes size directly.`);
-console.log(`  The 60% pro-rata leg does the opposite and is sybil-proof — with the`);
-console.log(`  field pinned at the streak cap (${fieldRate.toFixed(1)} raw/$ against a ` +
-  `theoretical max near 121),`);
-console.log(`  hashrate per dollar is nearly flat, so pro-rata by hashrate is`);
-console.log(`  effectively pro-rata by volume and splitting gains nothing.`);
+console.log(`\n  The 60% pro-rata leg is sybil-proof, and the owner is right about why:`);
+console.log(`  splitting creates no new hashrate. With the field pinned at the streak`);
+console.log(`  cap (${fieldRate.toFixed(1)} raw/$ against a theoretical max of 121) hashrate per dollar`);
+console.log(`  is flat, so pro-rata by hashrate IS pro-rata by volume. 500 wallets at`);
+console.log(`  1/500 the size each earn 1/500 the hashrate. Nothing is gained.`);
+console.log(`\n  He is also right that the hole is not new: today's dedup already pays`);
+console.log(`  ~1.6x for splitting, and it SATURATES — one win per wallet caps it.`);
+console.log(`\n  The whole question is how the 21 are SELECTED, which the proposal does`);
+console.log(`  not specify:`);
+console.log(`    UNIFORM at random   one entry per wallet regardless of size, so the`);
+console.log(`                        gain is LINEAR and unbounded — 113x at k=500.`);
+console.log(`    TICKET-WEIGHTED     reuse the dedup draw that already exists and only`);
+console.log(`                        flatten the PAYOUT — saturates at 2.75x.`);
+console.log(`\n  So: reuse the existing selection and the objection is answered. Only`);
+console.log(`  the uniform-random reading opens anything new, and 2.75x against`);
+console.log(`  today's 1.6x is the honest cost of flattening the curve.`);

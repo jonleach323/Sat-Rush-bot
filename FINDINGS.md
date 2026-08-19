@@ -643,3 +643,79 @@ This change deletes this client's edge — finding under-deployed tiles is the
 whole premise. Worth stating plainly. The measurements argue for it anyway: the
 board is already 99.4% uniform at fire time and the field has converged on
 blanket coverage, so the proposal formalises what players have already done.
+
+
+---
+
+## E-redesign-2: the owner's rebuttal, tested (2026-08-19)
+
+He pushed back on three points. He is right on two, and the third was a
+presentation error on this side, not a flaw in his design.
+
+### He is right: the variance claim, and it is understated
+
+"98.6% of player facing value is tied to variance" — in fact it is all of it.
+Every leg today is tile- or draw-keyed: the pot, the sats leg (paid to the
+WINNING TILE's stakers, not to everyone), Sat Strike, the epoch draw, the 1-BTC
+draw. Nothing is returned unconditionally.
+
+Simulated, redeploying 20% of the running balance each round:
+
+```
+  design                 median rounds to half   P(below 10% @100)   median end
+  today, single tile                         4               99.7%         0.0%
+  today, blanket                            49                0.0%        23.7%
+  proposed (any mask)                       49                0.0%        23.7%
+```
+
+A concentrated player halves their balance in **4 rounds**; a blanket player
+takes **49**. That is a 12x difference in survival time on an identical mean,
+and it is exactly the "exhausting balances" problem he describes.
+
+Note blanket and proposed are the SAME row. The proposal does not invent a new
+safety property — it gives every player what blanket players already have, and
+removes the ruin tail from everyone else.
+
+### But variance reduction does not buy more cycles ON AVERAGE
+
+Two different things are being conflated. The MEAN burn rate is set by the toll,
+which the proposal does not change; the TAIL is set by variance, which it
+removes. Median half-life is 49 rounds before and after.
+
+If the goal is more cycles rather than safer cycles, the levers are the fees:
+
+```
+  today                              toll 7.14%  →  9 full-recycle rounds to halve
+  claim fee → 0                      toll 5.94%  → 11
+  claim fee → 0, protocol → 71 bps   toll 5.23%  → 13
+```
+
+### He is right about the 60% leg, and about the hole not being new
+
+Splitting creates no hashrate: the field is pinned at the streak cap (107.3
+raw/$ against a max of 121), so hashrate per dollar is flat and pro-rata by
+hashrate is pro-rata by volume. 500 wallets at 1/500 the size earn 1/500 each.
+
+And today's dedup already pays ~1.6x for splitting, saturating because one win
+per wallet caps it. The hole predates the proposal.
+
+### Where the earlier 37x came from — a reading, not the proposal
+
+"Equal shares to 21 unique wallets" does not say how the 21 are chosen, and the
+whole answer turns on that. Modelling both:
+
+```
+     k    TODAY rank curve   40% leg UNIFORM     40% leg TICKET-WEIGHTED
+     1              1.00x            1.00x                   1.00x
+     4              1.41x            3.92x                   2.15x
+    21              1.57x           18.47x                   2.64x
+   500              1.63x          113.18x                   2.76x
+```
+
+The earlier writeup asserted the uniform-random reading as if it were the
+proposal's property. It is not — it is one implementation of it.
+
+**Reuse the existing ticket-weighted dedup draw and only flatten the PAYOUT, and
+his objection is fully answered:** the gain saturates at 2.76x against today's
+1.63x. That residual is the honest cost of flattening a steep curve, and it is
+a design choice rather than an exploit.
