@@ -551,3 +551,95 @@ the honest single-tile number is −8.5%, against a blanket's −7.05%. On the
 current board there is nothing to snipe, and the correct behaviour is to sit
 out — which is what `snipe` did in the backtest (1 fire in 400 rounds) before
 the book was wired in.
+
+---
+
+## E-redesign: the owner's proposal, priced against live data (2026-08-19)
+
+`pnpm redesign-model`. Archetypes are real leaderboard wallets; the epoch draw
+is simulated against the reference iteration's actual per-wallet distribution.
+
+### 1. It is EV-neutral by construction
+
+```
+  today, blanket:   80% pot + 12% sats x 0.90 + 2.94% strike x 0.70 = 92.86%
+  proposed:         80% USDC returned + same sats + same strike      = 92.86%
+```
+
+Nothing changes what comes in or what the house keeps. It changes who gets it
+and how lumpy it is. That is a real improvement — variance is what keeps size
+out — but it must not be sold as extra yield.
+
+### 2. "Take the difference out of the fee layer" has no room
+
+The fee layer is 800 bps and only the 142 bps protocol leg is the house's; the
+other 658 already returns to players. So more BTC must come out of the USDC
+leg, and every point moved is taxed by the 10% claim fee:
+
+```
+  BTC target   USDC back   BTC net   total    vs today
+        12%       80.00%    10.80%   90.80%    +0.00 pts
+        20%       72.00%    18.00%   90.00%    -0.80 pts
+        25%       67.00%    22.50%   89.50%    -1.30 pts
+```
+
+The lever that actually adds value is the claim fee: 1000 → 0 bps is +1.20 pts
+to every player, funded from nothing.
+
+### 3. The anti-whale mechanism IS the epoch draw — measured
+
+```
+  type      TODAY     PROPOSED    delta     epoch returned as % of volume
+  whale    -4.65%      -4.39%    +0.26%     today 1.17%  →  prop 1.43%
+  mid      -2.98%      -3.83%    -0.85%     today 2.84%  →  prop 1.99%
+  minnow   -0.17%      -1.87%    -1.70%     today 5.65%  →  prop 3.95%
+```
+
+Every other leg is strictly proportional. The gradient comes entirely from
+per-wallet dedup: each time a whale is drawn its whole block leaves the pool
+and lifts every small holder's odds on later draws. **A minnow gets 4.8x more
+epoch back per dollar than a whale.**
+
+The proposal does narrow the gap — 4.48 points today to 2.52 — which is his
+stated goal. But it does it by taking 1.70 points from minnows, not by giving
+to whales, who gain only 0.26.
+
+### 4. The 40% equal-shares leg is a linear sybil hole
+
+Same total volume, split k ways:
+
+```
+     k    TODAY (rank curve)   PROPOSED 60/40   the 40% leg alone
+     1              1.00x            1.00x            1.00x
+     4              1.39x            1.25x            3.92x
+    21              1.58x            2.50x           18.47x
+    50              1.57x            4.13x           37.44x
+```
+
+Today's curve saturates near 1.6x because it is ticket-weighted with dedup.
+Equal shares pays each drawn wallet 1/21 regardless of size, so the gain is
+LINEAR in wallet count and unbounded until k approaches the participant count.
+
+It also contradicts the goal: equal shares taxes size directly. The design ends
+up rewarding whoever scripts wallet creation rather than whoever brings capital.
+
+The 60% pro-rata leg is the good half and is sybil-proof — the field is pinned
+at the streak cap (107.3 raw/$ against a theoretical max of 121), so hashrate
+per dollar is nearly flat and pro-rata by hashrate is effectively pro-rata by
+volume. Splitting gains nothing.
+
+Fixes, cheapest first: threshold the 40% leg on real volume/hashrate; or keep
+ticket-weighted selection with dedup but pay the 21 equally; or weight by
+sqrt(hashrate) to bound the gain at sqrt(k).
+
+### 5. Product risk
+
+Reward frequency falls from 1-in-21 per round to 1-in-1440 (Sat Strike only).
+The 60% rebate pays deterministically but on a 3-day cycle, not a 60-second one.
+
+### Disclosure
+
+This change deletes this client's edge — finding under-deployed tiles is the
+whole premise. Worth stating plainly. The measurements argue for it anyway: the
+board is already 99.4% uniform at fire time and the field has converged on
+blanket coverage, so the proposal formalises what players have already done.
