@@ -803,3 +803,80 @@ rounds to halve a balance, a 67% increase. Removing variance does not do that
 epoch pools shrink with it — 6.58 of those 8 points fund player-facing prizes,
 not the house. Cutting the 1.42% protocol leg alone captures nearly the same
 player benefit and costs the prize pools nothing.
+
+---
+
+## E-v2-edge: where the money actually is (2026-08-19)
+
+`pnpm v2-edge`. Three results, in ascending order of importance.
+
+### Correction: the all-in rake is ~3.5%, not 7%
+
+The 7.046% figure quoted throughout is the BOARD round-trip only — it writes off
+the epoch and 1-BTC legs entirely. Those come back through the vaults. Crediting
+them, a blanket player under v2 nets **−3.50%**, and −1.59% if the fee layer
+drops to 6% and the claim fee to zero. Both numbers are right; they measure
+different things, and the 7% has been over-quoted.
+
+### 1. v2 makes concentration free, and concentration pays hashrate
+
+Today the field runs at 107.4 raw/$ because everyone blankets — and they blanket
+because concentrating costs pot share. **Under v2 the pot comes back regardless,
+so that cost goes to zero, while `m + N/n` still pays 21 skill points for one
+tile against 1 for a blanket.**
+
+```
+  tiles   raw/$ at cap   vs field   base-layer cost under v2
+     21            101      -6.0%   —
+      5            104      -3.2%   ZERO (was a pot-share loss)
+      1            121     +12.7%   ZERO (was a pot-share loss)
+```
+
+Worth **+17.6 bps of volume** through the 60% rebate. Real, zero-variance, and
+strictly transition alpha — it decays to zero as the field adopts:
+
+```
+  field also concentrating     0%    25%    50%    75%   100%
+  our uplift                12.7%   9.2%   6.0%   2.9%   0.0%
+```
+
+### 2. Nothing makes the game absolutely +EV
+
+```
+  scenario                                blanket   1-tile
+  v2 as described                          -3.50%   -3.33%
+  fee layer → 6%                           -2.93%   -2.79%
+  fee layer → 6%, claim fee → 0            -1.73%   -1.59%
+```
+
+Every pool is a redistribution of money players put in, so an edge means losing
+less than the field, not making money from the game.
+
+### 3. The sats vault is a carry trade, and it dwarfs everything else
+
+**The 10% claim fee stays IN the vault.** Every wallet that claims pays the
+wallets that do not. Measured on the operator wallet:
+
+```
+  paid into the sats leg       $696.84
+  BTC credited at settle        0.01235065
+  those same shares now worth   0.01671132 BTC = $1,155.50
+  share appreciation           +35.31%     ← structural, not BTC price
+  total return on the leg      +65.82%
+```
+
+Decomposed: ~+11.6% from winning above proportional, **+35.31% from share
+appreciation**, ~+9.7% from BTC price.
+
+The leg is 12% of every deploy, so 35.31% appreciation on it is **+4.24% of
+volume — larger than the 3.33% all-in rake.** Holding shares has more than paid
+for playing the game.
+
+This also inverts the earlier advice. `SWEEP_ENABLED=false` was described as a
+neutral choice to hold BTC exposure. It is not neutral: it is the single largest
+edge available, it needs no latency, no tile selection and no prediction, and
+`claim_sats` is the one instruction that actively destroys value.
+
+**Caveats that matter:** it is a transfer from claimers, so it decays if the
+field stops claiming; it is BTC-denominated; and it is one wallet over a few
+weeks, not a measured rate with an error bar. Re-measure before sizing off it.

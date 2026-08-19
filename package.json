@@ -41,7 +41,8 @@
     "recompute": "tsx scripts/recompute.ts",
     "fire-timing": "tsx scripts/fire-timing.ts",
     "redesign-model": "tsx scripts/redesign-model.ts",
-    "strike-concentration": "tsx scripts/strike-concentration.ts"
+    "strike-concentration": "tsx scripts/strike-concentration.ts",
+    "v2-edge": "tsx scripts/v2-edge.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
