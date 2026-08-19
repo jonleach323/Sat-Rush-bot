@@ -719,3 +719,87 @@ proposal's property. It is not — it is one implementation of it.
 his objection is fully answered:** the gain saturates at 2.76x against today's
 1.63x. That residual is the honest cost of flattening a steep curve, and it is
 a design choice rather than an exploit.
+
+---
+
+## E-strike: is coverage an EV decision under v2? (2026-08-19)
+
+`pnpm strike-concentration`. The owner's v2 puts the whole strategy layer on Sat
+Strike: "cover all 21 for a diluted share, or half the board — risk missing it
+but potentially double the EV."
+
+**The last clause is false as the mechanic currently works.** Strike pays the
+winning tile's stakers pro-rata and the tile is uniform, so for stake `s` over
+`n` tiles against an evenly-spread board `O`:
+
+```
+  n = 21  →  E = S·s / (O + s)
+  n = 1   →  E = S·s / (O + 21s)
+```
+
+The blanket is always ≥ the single tile. Measured against the live $9,984 pool
+and a $101 net board:
+
+```
+  stake     1 tile vs blanket
+     $1              -16.37%
+    $10              -64.27%
+   $100              -90.86%
+  $1000              -94.78%
+```
+
+They only converge as s → 0, and on a board this thin "small" means under about
+$0.50. **At every realistic size, concentrating LOSES expected value.** It is a
+variance dial, not an EV dial:
+
+```
+  tiles   P(hit)   EV        sd        (staking $100)
+     21   100.0%   $3473     $0
+      5    23.8%   $1341     $2399
+      1     4.8%   $317      $1420
+```
+
+A variance dial is a legitimate product feature. It just cannot be marketed as
+"double the EV", and the arithmetic is one line for anyone who checks.
+
+### A fix that makes the claim true, using a mechanic already in the game
+
+Hashrate already pays `m + N/n`, so a single tile earns 21x the skill term of a
+blanket. Applying the same weight to the Strike leg turns coverage into a real
+trade-off:
+
+```
+  tiles   weight   EV        vs blanket   sd
+     21     1.00   $3473          0.0%   $0
+      5     4.20   $5632         62.1%   $10074
+      1    21.00   $6667         91.9%   $29817
+```
+
+Now concentrating genuinely is worth ~2x, the marketing line is true, and it
+stays whale-neutral because the weight keys off COVERAGE, not size. It also
+restores a real board game — uneven coverage makes under-covered tiles cheap —
+but over the 2.94% strike leg instead of the whole pot, so the strategy layer is
+about **27x smaller** than today's. That is probably the right size for it.
+
+### The fee cut is the part that actually adds EV — and it delivers his goal
+
+```
+  reading                             player keeps   vs today   rounds to halve
+  today (8% layer, 10% claim)               92.86%      —              9
+  whole fee layer 8% → 6%                   94.34%   +1.49 pts        12
+  …and claim fee → 0                        95.54%   +2.69 pts        15
+  only the protocol leg 142 → 0 bps         94.28%   +1.42 pts        12
+```
+
+**This corrects the earlier "EV-neutral" verdict** — that was based on the first
+description, which had no fee cut. With one, v2 is EV-positive, and the fee cut
+is worth more than every other change combined.
+
+It is also the only lever that delivers "more game cycles": 9 → 15 full-recycle
+rounds to halve a balance, a 67% increase. Removing variance does not do that
+(it flattens the tail, not the mean); cutting the toll does.
+
+**Ambiguity to resolve:** if "8% → 6%" means the whole fee layer, the strike and
+epoch pools shrink with it — 6.58 of those 8 points fund player-facing prizes,
+not the house. Cutting the 1.42% protocol leg alone captures nearly the same
+player benefit and costs the prize pools nothing.
