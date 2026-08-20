@@ -880,3 +880,69 @@ edge available, it needs no latency, no tile selection and no prediction, and
 **Caveats that matter:** it is a transfer from claimers, so it decays if the
 field stops claiming; it is BTC-denominated; and it is one wallet over a few
 weeks, not a measured rate with an error bar. Re-measure before sizing off it.
+
+---
+
+## E-carry: the sats carry is real, small, and does NOT make v2 +EV (2026-08-19)
+
+**Retracts the previous entry's headline.** E-v2-edge reported +35.31% share
+appreciation on the operator wallet and concluded that holding shares was worth
+"+4.24% of volume — larger than the 3.33% all-in rake", i.e. that the game was
++EV. That was a single-wallet reading published without a field check. It does
+not survive one.
+
+### The mechanism is confirmed and clean
+
+Current BTC-per-share is **one global ratio**, identical to 7 significant
+figures across all 42 wallets checked (1.723521e-11). So a wallet's appreciation
+is exactly `current ratio ÷ average ratio at receipt − 1`, and it comes from the
+10% claim fee staying in the vault when others exit. Real, verified.
+
+### But the field gets 5%, not 35%
+
+```
+  field appreciation   +6.61% ± 0.89%  (n=41)
+  median 4.97%   ·   range 0.00% … 19.48%   ·   sd 5.69%
+
+  our wallet 35.39%  →  z = 5.06
+```
+
+Our basis ratio (1.272960e-11) is below wallets with 47x more rounds played,
+which a monotonically rising ratio cannot produce. **Unexplained, so unusable.**
+
+### The EV question, settled
+
+The sats leg is 12% of volume, so covering a 3.33% rake needs 27.8%
+appreciation:
+
+```
+  source                value    carry as % of volume   net vs rake
+  field mean            6.61%                  0.793%       -2.54%
+  field median          4.97%                  0.597%       -2.73%
+  field best wallet    19.48%                  2.338%       -0.99%
+  break-even           27.75%                  3.330%       +0.00%
+```
+
+**Not +EV, and not marginal — off by a factor of four.** Significant against
+break-even, not merely unresolved.
+
+It also cannot get there structurally: the carry is funded by other players'
+claim fees, so it shrinks precisely as the field learns to stop claiming.
+
+### What still holds
+
+Never claiming remains strictly better than claiming — it is free, the carry is
+real (+6.61% ± 0.89%, significant against zero), and `claim_sats` destroys
+value. The single-tile hashrate uplift under v2 is also real at +17.6 bps. Both
+reduce the loss. Neither reverses it.
+
+Best achievable v2 position: **−3.33% + 0.79% + 0.18% ≈ −2.4% of volume.**
+
+### Method
+
+Third time in one session that a point estimate was published before its field
+distribution was checked, after `-25.45%` (±28.6) and the two stale epoch
+constants. The guardrails in `facts.ts` catch stale and unsourced inputs; they
+do not catch *"n=1 reported as a rate."* `pnpm carry-check` now computes the
+field distribution and the z-score directly, and states whether the result
+clears break-even rather than leaving that to prose.
