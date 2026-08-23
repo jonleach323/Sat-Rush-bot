@@ -946,3 +946,78 @@ constants. The guardrails in `facts.ts` catch stale and unsourced inputs; they
 do not catch *"n=1 reported as a rate."* `pnpm carry-check` now computes the
 field distribution and the z-score directly, and states whether the result
 clears break-even rather than leaving that to prose.
+
+---
+
+## E-accounting: the rake is 1.42%, not 3.33% — and v2 can be +EV (2026-08-21)
+
+**Third correction to the same number.** Every prior pass over-counted the rake
+by classifying buffers and transfers as losses. `pnpm full-accounting` fixes it.
+
+### The strike's 30% is a buffer, not a rake
+
+Read from live board state:
+
+```
+  strike  pool_usd_amount / usd_amount            = 0.700000
+  epoch   active_pool_usd_amount / pool_usd_amount = 0.900000
+```
+
+Identical structure. The epoch's 10% is **owner-confirmed as a rollover buffer**
+("nothing leaks from the player pool" — a buffer distributes its whole inflow at
+steady state, it just runs the pool larger than one cycle's inflow). The strike
+exposes the same shape under different field names, so its 30% reads the same
+way. Counting it as a leak cost **0.88% of volume**.
+
+*Inferred by analogy, not separately confirmed — worth asking the owner
+directly.*
+
+### The claim fee is a transfer, not a rake
+
+It stays IN the vault. That is the entire reason share value appreciates
+(+6.61% ± 0.89%, n=41, measured). Claimers pay holders; for the player pool it
+nets to zero. Counting it as a leak cost another **1.20%**.
+
+### The ledger
+
+```
+  leg                     share    class           note
+  pot → USDC returned    80.00%    returned        v2: pro-rata regardless of tile
+  sats vault round leg   12.00%    returned        paid as BTC shares
+  sat strike              2.94%    redistributed   30% buffered
+  epoch vault             2.32%    redistributed   10% rolls over
+  1-BTC vault             1.32%    redistributed   accumulates to a 1 BTC prize
+  protocol fee            1.42%    LEAK            the only money that leaves
+                        100.00%
+```
+
+**True aggregate rake = 1.42%. Players collectively get back 98.58%.**
+
+### So: is v2 +EV?
+
+Individual capture above proportional:
+
+```
+  never claiming        0.793% of volume  (2σ: 0.580%…1.007%)
+  single-tile hashrate  0.139% of volume
+  total                 0.93%             (2σ: 0.72%…1.15%)
+
+  scenario                               rake    capture     NET
+  today's protocol fee (142 bps)        1.42%      0.93%   -0.49%
+  fee layer 8% → 6%, protocol pro-rata  1.06%      0.93%   -0.13%
+  protocol fee → 71 bps                 0.71%      0.93%   +0.22%
+  protocol fee → 0                      0.00%      0.93%   +0.93%
+```
+
+**Unresolved at today's fees — the 2σ band straddles break-even — and POSITIVE
+if the protocol leg is cut, which is what v2 proposes.** Previous verdicts of
+−2.54% and −3.33% were wrong by the two misclassifications above.
+
+### Two things that decide it and are not measured yet
+
+- **The carry is a RATE, not a level.** 6.61% is cumulative over the game's life
+  so far. Per unit of volume it depends on how fast others claim, and no time
+  series exists.
+- **It decays as the field learns**, being funded entirely by claimers.
+
+Both need a time series on the vault ratio before any of this is sized.

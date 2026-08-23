@@ -43,7 +43,8 @@
     "redesign-model": "tsx scripts/redesign-model.ts",
     "strike-concentration": "tsx scripts/strike-concentration.ts",
     "v2-edge": "tsx scripts/v2-edge.ts",
-    "carry-check": "tsx scripts/carry-check.ts"
+    "carry-check": "tsx scripts/carry-check.ts",
+    "full-accounting": "tsx scripts/full-accounting.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
