@@ -13,13 +13,20 @@ dollar in one round is 11%, not 100%. What is still keyed to the winning tile �
 a 5%-of-volume BTC pool, 64% of the round's RUSH mint, the Sat Strike jackpot —
 is shared pro-rata exactly the way V1's pot was. So:
 
-1. **Whether presence pays at all is decided by one number nobody has yet:
-   the RUSH minted per dollar of round volume, times its price.** A
-   proportional player gets back exactly 1 − fee layer (94%) from the USD/BTC
-   legs whatever the draw, plus 80% of the mint pro-rata by volume. Break-even
-   is a token yield of 7.5% of volume if the whole 6% layer is toll, 1.3% if
-   only the protocol leg leaves the pool. Until rounds run, the token is
-   credited at zero and the game is −6% per dollar, like V1 was −7%.
+1. **Whether presence pays is decided by the RUSH yield per dollar of
+   volume, and the owner has now stated it: 1 RUSH per $500 of volume,
+   listing at $10, so y = 2% of volume.** The mint is proportional to volume,
+   so there is no thin-round timing edge on the token leg: every dollar
+   earns the same 0.002 RUSH whoever else plays, and only the price and the
+   mint rate move it. A proportional player gets back exactly 1 − fee layer
+   (94%) from the USD/BTC legs whatever the draw, plus 80% of the mint this
+   round. At $10 that is −4.4% per dollar on the board-only view and about
+   +0.9% all-in (fee legs recycling through the vaults to a full
+   participant). Break-even price at the launch rate: $37.50 board-only,
+   about $6.7 protocol-leg-only (the leg's V2 split is read at boot). The price is the whole trade: every dollar of
+   volume mints $0.02 of sell-side supply, the 2.1M cap means the rate can
+   only fall, and the realisable yield is −10% through the exit fee unless
+   held for the vault APR. The launch window is the richest the leg will be.
 2. **The board edge survives but shrinks ~17x** (5% of volume up for grabs
    instead of ~88%). At today's $220/round it is worth about a dollar a
    round. Water-filling still finds it, unchanged.
@@ -102,13 +109,18 @@ winning-tile stake, per settlement.
 
 ## 3. Where the edge is, ranked
 
-1. **Token yield timing.** If the mint is a fixed amount per round (the
-   "2.1M supply", "mining" framing), `y = M·P/V` falls as volume rises and the
-   equilibrium volume is where `y` meets the toll. The bot fires at cutoff and
-   sees `V`; it deploys into thin rounds and sits out fat ones. If the mint is
-   proportional to volume, `y = k·P` is a constant and only the price decides.
-   `pnpm v2-strategy` tells them apart from the first ~50 rounds (mint CV and
-   mint–volume correlation).
+1. **Token yield, front-loaded.** The mint is proportional to volume (owner:
+   "initially 1 token per $500 volume"), so `y = k·P` is a per-dollar
+   constant — 2% at $10 — and there is nothing to time within a round. What
+   there is to time is the launch window: the "complex algo" that replaces
+   the rate can only lower it under a 2.1M cap, and the price is highest
+   before the linear supply meets the market. Deploy full size from round
+   one while `P ≥ break-even` and the measured rate holds; `pnpm v2-strategy`
+   prints both against the oracle every run. Size against how much RUSH the
+   market can absorb, not against the 11% toll: at today's ~$300/round the
+   whole game mints ~660 RUSH/day, ~$6.6k at $10, and a $1,000/round bot
+   alone would add ~2,160 RUSH/day, ~$21.6k of supply. The buyback sink is the `buybacks_fee_bps` leg
+   times volume — read it from the config on day one.
 2. **The contested pool** `C = 0.05·V + 0.64·M·P + E_strike`, shared pro-rata
    on the winning tile. Same shape as V1's pot, so `selectAllocation` is
    unchanged; only `v2Model` is handed in. At $220/round it is $11 of BTC plus
@@ -216,8 +228,9 @@ observable — and each is a place the bot would trade on wrong numbers:
 2. `Round::swap_budget`: 5% of gross plus the winning tile's net stake, or
    5% of gross with winners refunded in USD? How does "significantly more
    BTC for winning blocks" follow — is the pool larger than 5% of volume?
-3. The RUSH mint per round: fixed with a schedule, or proportional to gross
-   volume? Which program, and is its config readable?
+3. The mint is 1 RUSH per $500 of gross volume at launch (stated). What does
+   the "complex algo" key on, when does it switch, and is its config
+   readable on-chain? Is the $10 listing a seeded pool, and how deep?
 4. Are the winners' and losers' RUSH legs pro-rata by stake?
 5. `prices.token`: which pool/oracle, and is it a spot or a TWAP?
 6. Strike: with the 10% epoch skim and 5% reserve at reveal, is the payable

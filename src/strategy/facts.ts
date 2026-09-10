@@ -313,6 +313,28 @@ export const TOKEN_SPLIT_EPOCH_BPS = fact(600, "bps of mint", {
   kind: "stated", by: "@satrush/client@0.1.15 RoundRevealed doc; V2 announcement", at: "2026-09-10",
 });
 
+/**
+ * RUSH launch price, USD per whole token. The owner's number for the listing;
+ * the live figure is the API's `prices.token` (the mint program's oracle) and
+ * overrides this the moment it loads. A launch price is a level, not a
+ * forecast: everything sized off it must be re-marked to the oracle.
+ */
+export const RUSH_LAUNCH_PRICE_USD = fact(10, "USD/RUSH", {
+  kind: "stated", by: "game owner", at: "2026-09-10",
+});
+
+/**
+ * RUSH minted per USD of gross round volume at launch: "initially 1 token per
+ * $500 volume". PROPORTIONAL to volume, so the yield per dollar does not
+ * depend on how much anyone else deploys — there is no thin-round timing
+ * edge on the token leg. The owner says a "very complex algo" replaces this
+ * rate; with a 2.1M cap it can only fall. `pnpm v2-strategy` measures the
+ * live rate from `Round.mintedTokenAmount / deployedGrossUsdAmount`.
+ */
+export const RUSH_MINT_PER_USD_VOLUME = fact(1 / 500, "RUSH per USD of gross volume", {
+  kind: "stated", by: "game owner", at: "2026-09-10",
+});
+
 /** RUSH maximum supply. Only the announcement says so; the mint program is not in the SDK. */
 export const RUSH_MAX_SUPPLY = fact(2_100_000, "RUSH", {
   kind: "stated", by: "game owner, V2 announcement", at: "2026-09-10",
@@ -360,6 +382,8 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   TOKEN_SPLIT_STRIKE_BPS,
   TOKEN_SPLIT_EPOCH_BPS,
   RUSH_MAX_SUPPLY,
+  RUSH_LAUNCH_PRICE_USD,
+  RUSH_MINT_PER_USD_VOLUME,
   EPOCH_WINNER_SLOTS,
 });
 

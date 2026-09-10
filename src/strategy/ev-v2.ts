@@ -75,6 +75,8 @@ import { maskToTiles } from "../adapter/mask.js";
 import { TILES_COUNT, type EvModel } from "./ev.js";
 import { hashrateRebateUsd, type HashrateValuation } from "./hashrate.js";
 import {
+  RUSH_LAUNCH_PRICE_USD,
+  RUSH_MINT_PER_USD_VOLUME,
   TOKEN_SPLIT_LOSERS_BPS,
   TOKEN_SPLIT_WINNERS_BPS,
   V2_DEPLOY_FEE_LAYER_BPS,
@@ -218,6 +220,15 @@ export interface V2EvContext {
    */
   mintedTokenValueBase: number;
   /**
+   * USD of RUSH minted per USD of gross round volume — the token yield `y`
+   * when the mint is PROPORTIONAL to volume (the owner's launch rule: 1 RUSH
+   * per $500 at $10 is y = 0.02). When set it replaces `mintedTokenValueBase`
+   * with y·V, where V includes our own allocation — so the token leg grows
+   * with the deploy the way the program's does. Use `statedTokenYield()` for
+   * the launch numbers, or the measured rate times the oracle price.
+   */
+  tokenYieldPerVolume?: number | undefined;
+  /**
    * Expected strike jackpot rolled onto the winning tile this round (base
    * units) — USD + BTC + RUSH legs valued, times the payout fraction, over the
    * trigger modulus. Undefined = 0.
@@ -244,6 +255,7 @@ function validateContext(ctx: V2EvContext): void {
     throw new RangeError(`invalid mintedTokenValueBase: ${ctx.mintedTokenValueBase}`);
   }
   for (const [name, v] of [
+    ["tokenYieldPerVolume", ctx.tokenYieldPerVolume],
     ["strikeExpectedPot", ctx.strikeExpectedPot],
     ["presenceCreditBase", ctx.presenceCreditBase],
   ] as const) {
@@ -283,7 +295,6 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
   const haircut = ctx.valueNetOfExitFee ? 1 - ctx.econ.vaultExitFeeBps / BPS : 1;
   const winnersLeg = TOKEN_SPLIT_WINNERS_BPS.value / BPS;
   const losersLeg = TOKEN_SPLIT_LOSERS_BPS.value / BPS;
-  const mp = ctx.mintedTokenValueBase;
   const strike = ctx.strikeExpectedPot ?? 0;
 
   const mine = allocGross.map((a) => Number(a));
@@ -297,6 +308,10 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
   }
   let volume = cost;
   for (const w of othersGross) volume += w;
+  // Proportional emission: the mint scales with the round's gross, ours included.
+  const mp = ctx.tokenYieldPerVolume !== undefined
+    ? ctx.tokenYieldPerVolume * volume
+    : ctx.mintedTokenValueBase;
 
   const payouts = new Array<number>(TILES_COUNT).fill(0);
   if (cost <= 0) return { cost: 0, payouts, fixed: 0 };
@@ -399,4 +414,21 @@ export function v2Model(ctx: V2EvContext): EvModel {
 export function tokenYield(mintedTokenValueUsd: number, grossVolumeUsd: number): number {
   if (!(grossVolumeUsd > 0)) return 0;
   return Math.max(0, mintedTokenValueUsd) / grossVolumeUsd;
+}
+
+/**
+ * The launch token yield from the owner's two stated numbers: 1 RUSH per
+ * $500 of volume at $10 → 2% of volume. Pass a live oracle price to re-mark.
+ */
+export function statedTokenYield(priceUsd = RUSH_LAUNCH_PRICE_USD.value): number {
+  if (!Number.isFinite(priceUsd) || priceUsd < 0) throw new RangeError(`invalid price: ${priceUsd}`);
+  return RUSH_MINT_PER_USD_VOLUME.value * priceUsd;
+}
+
+/**
+ * RUSH price at which presence breaks even against a toll of `leakBps`, given
+ * the launch mint rate: the yield needed divided by tokens per dollar.
+ */
+export function breakEvenTokenPriceUsd(leakBps: number): number {
+  return breakEvenTokenYield(leakBps) / RUSH_MINT_PER_USD_VOLUME.value;
 }

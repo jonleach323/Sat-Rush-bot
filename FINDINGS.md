@@ -1100,6 +1100,29 @@ or the claim is per-winner. First V2 settlements: `won_shares × vault ratio ×
 price` against the winning-tile stake, and `RoundStakeSwapped.deployedUsdAmount`
 against `0.05·V + 0.89·W_win`.
 
+### Addendum, same day: the owner stated the mint rule and the launch price
+
+"Launching the token at $10 per token … initially 1 token per $500 volume."
+Both are in facts.ts as `stated`. The mint is proportional to volume, so the
+token yield is a per-dollar constant, `y = P/500 = 2%` at $10, and the
+timing question above is closed: nothing to time within a round, everything
+to time about the launch window (the replacement "algo" can only lower the
+rate under a 2.1M cap).
+
+```
+  blanket at a uniform board, $10:   1 − 6% + 0.80 × 2% = 95.6%   →  −4.4% board-only
+  all-in (fee legs recycle, protocol ~106 bps leaks):               ≈ +0.9% per dollar of volume
+  break-even RUSH price at 1/500:    $37.50 whole layer as toll  …  ≈$6.7 protocol leg only (~107 bps, scaled)
+  realisable through the exit fee:   y × 0.9 = 1.8%
+  supply at today's ~$306/round:     0.61 RUSH/round ≈ 660/day ≈ $6.6k/day at $10 (1,080 rounds/day)
+```
+
+So V2 is +EV at launch for a full participant only in the all-in view, only
+while the price holds, and the price is what every farmer's volume sells
+into. The trade is the price, not the board. `pnpm v2-strategy` now prints
+the measured mint rate against the stated 1/500 and the oracle price against
+both break-evens on every run.
+
 ### Method note
 
 Everything above came from reading a package that had been on npm for

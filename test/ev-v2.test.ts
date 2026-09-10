@@ -235,3 +235,23 @@ describe("outcome returns and sizing", () => {
 function usdToBaseN(usd: number): number {
   return Number(usdToBase(usd));
 }
+
+describe("the owner's launch numbers: 1 RUSH per $500 at $10", () => {
+  it("is a 2% token yield, and the mint scales with our own deploy", async () => {
+    const { statedTokenYield, breakEvenTokenPriceUsd } = await import("../src/strategy/ev-v2.js");
+    expect(statedTokenYield()).toBeCloseTo(0.02, 12);
+    expect(statedTokenYield(5)).toBeCloseTo(0.01, 12);
+    // Blanket at a uniform board: (−f + 0.8·y)·A = −4.4% of stake, exactly.
+    const A = 21;
+    const c = ctx({ tokenYieldPerVolume: statedTokenYield() });
+    expect(evOfAllocationV2(c, on(ALL, 1))).toBeCloseTo((-F + 0.8 * 0.02) * usdToBaseN(A), 0);
+    // The yield route and the fixed-mint route agree when the mint equals y·V.
+    const volume = 21 * 100 + A;
+    const fixed = ctx({ mintedTokenValueBase: 0.02 * usdToBaseN(volume) });
+    expect(evOfAllocationV2(c, on(ALL, 1))).toBeCloseTo(evOfAllocationV2(fixed, on(ALL, 1)), 0);
+    // Break-even prices bracket $10: whole layer as toll needs $37.50, the
+    // protocol leg alone $6.62 (at 106 bps).
+    expect(breakEvenTokenPriceUsd(600)).toBeCloseTo(37.5, 6);
+    expect(breakEvenTokenPriceUsd(106)).toBeCloseTo(6.625, 6);
+  });
+});

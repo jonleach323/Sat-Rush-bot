@@ -23,10 +23,12 @@
 import { REWARD_MAX_STREAK, TILE_COUNT, hashrateReward } from "@satrush/client";
 import {
   blanketReturnV2,
+  breakEvenTokenPriceUsd,
   breakEvenTokenYield,
   evOfAllocationV2,
   outcomeReturnsV2,
   satsLegBps,
+  statedTokenYield,
   statedV2Economics,
   tokenYield,
   tollAtRiskFraction,
@@ -36,6 +38,8 @@ import {
 } from "../src/strategy/ev-v2.js";
 import { TILES_COUNT, outcomeReturns, type EvContext } from "../src/strategy/ev.js";
 import {
+  RUSH_LAUNCH_PRICE_USD,
+  RUSH_MINT_PER_USD_VOLUME,
   STREAK_GRACE_ROUNDS,
   TOKEN_SPLIT_EPOCH_BPS,
   TOKEN_SPLIT_LOSERS_BPS,
@@ -128,7 +132,7 @@ console.log("  provenance of every constant used below:");
 for (const [name, fct] of Object.entries({
   V2_DEPLOY_FEE_LAYER_BPS, V2_LOSING_TILE_REFUND_BPS, V2_VAULT_EXIT_FEE_BPS,
   TOKEN_SPLIT_WINNERS_BPS, TOKEN_SPLIT_LOSERS_BPS, TOKEN_SPLIT_STRIKE_BPS,
-  TOKEN_SPLIT_EPOCH_BPS, STREAK_GRACE_ROUNDS,
+  TOKEN_SPLIT_EPOCH_BPS, STREAK_GRACE_ROUNDS, RUSH_LAUNCH_PRICE_USD, RUSH_MINT_PER_USD_VOLUME,
 })) console.log(`    ${describeFact(name, fct)}`);
 console.log(`  economics in force: ${econSource}`);
 if (conf && !v2Live) {
@@ -175,16 +179,29 @@ console.log(`  to a proportional player this round; the strike and epoch legs (2
 console.log(`\n  break-even yield, board-only view (whole ${pct(f)} layer is toll):     y* = ${pct(beLayer, 3)}`);
 console.log(`  break-even yield, all-in view (only the protocol leg leaves):      y* = ${pct(beLeak, 3)}` +
   `   (protocol ${protocolBps} bps${conf && v2Live ? "" : ", scaled from V1's 142 of 800"})`);
+const yStated = statedTokenYield();
+console.log(`\n  OWNER'S LAUNCH NUMBERS: 1 RUSH per $${(1 / RUSH_MINT_PER_USD_VOLUME.value).toFixed(0)} of volume, ` +
+  `listing at $${RUSH_LAUNCH_PRICE_USD.value}  →  y = ${pct(yStated)} of volume`);
+console.log(`  The mint is PROPORTIONAL to volume. So the yield per dollar is the same in a thin`);
+console.log(`  round and a fat one — there is NO timing edge on the token leg — and only the price`);
+console.log(`  and the mint rate move it. "A very complex algo" replaces the rate later; with a`);
+console.log(`  2.1M cap it can only fall, so the launch window is the richest the leg will ever be.`);
+console.log(`\n  break-even RUSH price at the launch rate:  $${breakEvenTokenPriceUsd(econ.feeLayerBps).toFixed(2)} (whole layer as toll)` +
+  `  …  $${breakEvenTokenPriceUsd(protocolBps).toFixed(2)} (protocol leg only)`);
 console.log(`\n  scenario yield     blanket return    net per $     $/round on a $${(100 / toll).toFixed(0)} deploy`);
-for (const y of [0, 0.01, 0.02, 0.04, beLayer, 0.10, 0.20]) {
+for (const [label, y] of [
+  ["0 (oracle unloaded)", 0], ["$5", statedTokenYield(5)], ["$10 launch", yStated],
+  ["$10, claimed (−10%)", yStated * (1 - econ.vaultExitFeeBps / BPS)], ["$20", statedTokenYield(20)],
+  ["board break-even", beLayer], ["$50", statedTokenYield(50)],
+] as [string, number][]) {
   const ret = blanketReturnV2(econ, y);
-  console.log(`  ${pad(pct(y, 2), 14)}     ${pad(pct(ret), 14)}    ${pad(pct(ret - 1), 9)}     ${pad(usd((ret - 1) * (100 / toll)), 10)}`);
+  console.log(`  ${pad(label, 20)} ${pad(pct(y, 2), 7)}   ${pad(pct(ret), 14)}    ${pad(pct(ret - 1), 9)}     ${pad(usd((ret - 1) * (100 / toll)), 10)}`);
 }
-console.log(`\n  If the mint is a FIXED amount per round (Bitcoin-style, which "2.1M max supply" and`);
-console.log(`  "mining" suggest), the yield is M·P/V and FALLS as the field piles in. Then it is a`);
-console.log(`  timing game the late-fire bot is built for: it sees V at cutoff and deploys into`);
-console.log(`  thin rounds, sits out fat ones. If the mint is ∝ volume, the yield is a constant`);
-console.log(`  k·P and only the price decides. \`pnpm v2-strategy\` measures which, once rounds run.`);
+console.log(`\n  At $10 the board-only view is ${pct(blanketReturnV2(econ, yStated) - 1)} per dollar; the all-in view (fee`);
+console.log(`  legs recycling through strike, epoch and 1-BTC vaults to a full participant) is`);
+console.log(`  about ${pct(yStated - protocolBps / BPS, 2)}. Positive only if the price HOLDS while every dollar of volume`);
+console.log(`  mints sell-side supply, and only realisable at −${pct(econ.vaultExitFeeBps / BPS, 0)} through the exit fee or by`);
+console.log(`  holding for the vault APR. The price is the whole trade; the mint rate is measured below.`);
 
 // ── 4. the board edge that survives ─────────────────────────────────────────
 const boardGross = finished.length > 0
@@ -295,6 +312,12 @@ if (!conf || !board) {
     `${pct(blanketShare, 1)} of miners paid each round (≈ the blanket share of the field)`);
   console.log(`  At this volume the V2 contested pool is ${usd(s * boardGross)}/round of BTC plus 64% of the`);
   console.log(`  mint; the toll on a full blanket of the board's average deploy is ${usd(toll * boardGross / Math.max(1, miners))}.`);
+  const roundsPerDay = 86_400 / (board.round_duration * 0.4);
+  const mintPerRound = boardGross * RUSH_MINT_PER_USD_VOLUME.value;
+  console.log(`  At the launch rate this volume mints ${mintPerRound.toFixed(2)} RUSH/round ≈ ` +
+    `${(mintPerRound * roundsPerDay).toFixed(0)} RUSH/day ≈ ${usd(mintPerRound * roundsPerDay * RUSH_LAUNCH_PRICE_USD.value)}/day`);
+  console.log(`  of new supply at $${RUSH_LAUNCH_PRICE_USD.value} (${board.round_duration}-slot rounds, ${roundsPerDay.toFixed(0)}/day). ` +
+    `Every dollar we add mints $${(RUSH_MINT_PER_USD_VOLUME.value * RUSH_LAUNCH_PRICE_USD.value).toFixed(3)} more.`);
   console.log(`  strike pool ${usd(board.strike.pool_combined_usd_amount)} · sats vault APR ` +
     `${board.sats_vault?.apr == null ? "n/a" : `${board.sats_vault.apr.toFixed(1)}%`}`);
   console.log(`\n  Nothing V2 to measure yet. After the cutover this section prints the token yield.`);
@@ -318,7 +341,9 @@ if (!conf || !board) {
     const sd = Math.sqrt(ys.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, ys.length - 1));
     const est: Estimate = { value: 100 * mean, stderr: (100 * sd) / Math.sqrt(ys.length), n: ys.length };
     console.log(`\n  token yield y = M·P/V over the last ${ys.length} rounds: ${formatEstimate(est, "%")}`);
-    console.log(`  break-even: ${pct(beLayer, 3)} (board-only) … ${pct(beLeak, 3)} (all-in)`);
+    console.log(`  break-even: ${pct(beLayer, 3)} (board-only) … ${pct(beLeak, 3)} (all-in) · stated launch yield ${pct(yStated)}`);
+    const rate = yields.reduce((a, x) => a + x.minted / x.gross, 0) / yields.length;
+    console.log(`  measured mint rate ${(rate * 500).toFixed(3)} RUSH per $500 (stated 1.000) — if this drifts the "complex algo" is live`);
     // Fixed-per-round or proportional? Correlate minted with gross.
     const mm = yields.reduce((a, x) => a + x.minted, 0) / yields.length;
     const gm = yields.reduce((a, x) => a + x.gross, 0) / yields.length;
@@ -342,6 +367,7 @@ console.log(`\n══ WHAT TO DO ══`);
 console.log(`  1. Hold everything: never claim_sats / claim_token (exit fee funds the holders; both vaults pay APR).`);
 console.log(`  2. Size on the ${pct(toll)} toll, not the stake; start at a fraction of Kelly.`);
 console.log(`  3. Water-fill the contested pool (sats slice + 64% RUSH + strike); one tile by default.`);
-console.log(`  4. Deploy every round while y ≥ y*, else the minimum every third round to keep the streak.`);
+console.log(`  4. No timing edge on the token: y is per-dollar. Deploy every round while price ≥ break-even,`);
+console.log(`     front-loaded while the launch rate lasts; else the minimum every third round for the streak.`);
 console.log(`  5. Hand the vault engine the flat curve and lower VAULT_MAX_SHARE.`);
 console.log(`  6. Measure before trusting: refund %, mint rule, RUSH price, board ratio at cutoff.`);
