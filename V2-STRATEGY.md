@@ -41,8 +41,13 @@ is shared pro-rata exactly the way V1's pot was. So:
 6. **The streak survives two skipped rounds** (SDK `STREAK_GRACE_ROUNDS = 2`),
    so a −EV round is skippable and the counter costs $0.11 per three rounds
    to keep, not a full toll per round.
-7. **Epoch prizes are equal**, so one wallet's take caps at one flat slot:
-   lower `VAULT_MAX_SHARE`, hand the vault engine `EPOCH_EQUAL_CURVE_BPS`.
+7. **Epoch prizes are equal, so run a wallet set.** One wallet's take caps
+   at one flat slot however many tickets it holds, and at any real volume we
+   dominate the tickets: with one wallet at $1,000/round we get back 5% of
+   the epoch fee we ourselves pay in, with 21 wallets 88%. The owner has
+   approved extra wallets under our affiliate tag. This is the correction to
+   the "+0.9% all-in" above: that figure assumes the epoch leg recycles,
+   which it only does with the wallet set (§7).
 
 Nothing above is a reason to trade on day one. The client cannot decode the
 migrated accounts until the V2 IDL is loaded, and the first V2 settlement will
@@ -221,7 +226,59 @@ observable — and each is a place the bot would trade on wrong numbers:
    `SWEEP_ENABLED=false`, `CLAIM_USD_ENABLED=true` (refunds and strike USD are
    fee-free to claim), `SELF_SETTLE=true`.
 
-## 7. Questions for the owner
+## 7. The wallet set (owner-approved, 2026-09-10)
+
+`pnpm wallet-set [usdPerRound]` sizes it against the last closed field
+(iteration 13: 90 participants, 458k tickets, $11.5k pool):
+
+```
+  $1,000/round → 5.2M tickets (92% of all), our own epoch leg $75k/iteration
+  wallets     take of pool      $/iteration   marginal   of our own leg
+        1         4.3%             $3,713      $3,713          5%
+        5        21.4%            $18,563      $3,713         25%
+       13        55.7%            $48,211      $3,702         64%
+       21        76.5%            $66,254      $2,255         88%
+       34        80.4%            $69,667        $263         93%
+  fees ≈ $43 per wallet per iteration at an ASSUMED $0.005/tx, 2 tx/round
+```
+
+At $100/round the curve is the same shape at a tenth the scale and the
+13th wallet is already marginal. Under V1's rank curve one wallet would
+have taken 21–31%; V2's flat slot makes the split the only way a large
+holder collects the pool it funds. The field will do the same, and the live
+iteration already holds one-ticket wallets, so re-run against every closed
+iteration.
+
+What each wallet is for:
+- an epoch slot (the reason), with its own tickets bought late;
+- a single-tile deploy each round on a distinct tile, 121 vs 101 raw/$
+  against a blanket, splitting one aggregate budget — not extra volume;
+- its own streak, kept alive by a play at least every third round;
+- the affiliate rebate: 10% of the protocol leg ≈ 0.1% of referred volume,
+  landing as grubstake on the main miner. A rounding term next to the RUSH
+  on the same volume, but free.
+
+Binding sequence: the main wallet claims a tag (`set_miner_tag`, 3–16 chars
+of `a-z0-9_-`, creating the Affiliate PDA); each new wallet's FIRST deploy
+passes that PDA as `affiliate` and is bound for life; points freeze at deploy
+and land at settlement; `exchange_affiliate_points` moves them to the main
+miner's grubstake; `deploy_public(is_grubstake_funded=true)` spends it.
+A wallet that has already deployed can never be bound, so the new wallets
+must not touch the program before the tag exists.
+
+Right now (iteration 14, a day in) there are 16 participants: with 21 or
+fewer every wallet is drawn and a one-ticket wallet takes a full slot. Five
+more fit. Iterations have closed at 75–90 entrants, so this usually ends
+before the draw, but entering early costs one ticket per wallet.
+
+Execution: `src/exec/wallets.ts` already has the wallet set (loading,
+funding floor, equal-split allocation of ONE aggregate budget so MAX_PER_ROUND
+and DAILY_LOSS_CAP stay aggregate) and is not wired into the orchestrator.
+Wiring it — per-wallet miner state, latches, candidates, ticket buys, the
+`affiliate` account on deploys — is cutover work alongside §5, not before.
+Fees are the cost to measure: at Jito-tip levels the per-wallet line moves.
+
+## 8. Questions for the owner
 
 1. Is the losing-tile refund a fixed 89% of gross, or 100% − fee legs − 5%?
    What happens to it if `update_deploy_fees` changes the layer?

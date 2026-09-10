@@ -1123,6 +1123,36 @@ into. The trade is the price, not the board. `pnpm v2-strategy` now prints
 the measured mint rate against the stated 1/500 and the oracle price against
 both break-evens on every run.
 
+### Addendum 2: the wallet set — the epoch leg only recycles if you split (2026-09-10)
+
+The owner approved extra wallets under the operator's own affiliate tag.
+`pnpm wallet-set` simulates the V2 draw (21 flat slots, ticket-weighted,
+without replacement, one win per wallet) with our tickets split k ways
+against the last closed field (iteration 13: 90 participants, 458,473
+tickets, $11,458 pool), with the pool grown by our own epoch leg (174 bps,
+scaled from V1's 232 of 800):
+
+```
+  $1,000/round (92% of tickets)     $100/round (53% of tickets)
+  wallets  take    of own leg       take    of own leg
+        1   4.3%        5%           4.3%       11%
+        5  21.4%       25%          21.3%       54%
+       13  55.7%       64%          41.7%      105%
+       21  76.5%       88%          47.0%      119%
+       34  80.4%       93%          49.7%      125%
+  (se ≤ 0.15 pts on every take; fees ≈ $43/wallet/iteration at an ASSUMED $0.005/tx)
+```
+
+This corrects the "+0.9% all-in" figure above, which assumed the fee legs
+recycle pro-rata. The epoch leg does not, under equal prizes, for anyone
+above a few percent of the tickets: one wallet forfeits ~95% of it at
+scale. With ~21 wallets it comes back. Under V1's rank curve one wallet
+would have taken 21–31% of the pool, so this is a V2 effect, and the ten
+sub-10-ticket wallets already in the field show others have seen it.
+
+The affiliate rebate on the same wallets is 10% of the protocol leg ≈ 0.1%
+of volume as grubstake — free, but a rounding term next to the RUSH.
+
 ### Method note
 
 Everything above came from reading a package that had been on npm for

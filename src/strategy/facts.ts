@@ -335,6 +335,19 @@ export const RUSH_MINT_PER_USD_VOLUME = fact(1 / 500, "RUSH per USD of gross vol
   kind: "stated", by: "game owner", at: "2026-09-10",
 });
 
+/**
+ * Affiliate share of the protocol fee leg on referred plays, bps. The
+ * announcement says "10% of Sat Rush's protocol gross profit"; the SDK's
+ * `Affiliate.rateBps` is admin-set per affiliate (`set_affiliate_rate`, max
+ * 10000) and is read from our Affiliate PDA once the tag is claimed. The
+ * owner has approved extra wallets under the operator's own tag (2026-09-10).
+ * Points land as grubstake USD on the affiliate's own miner: spendable on
+ * rounds only, no hashrate, winnings return to the grubstake, and it expires.
+ */
+export const AFFILIATE_RATE_BPS = fact(1000, "bps of the protocol leg", {
+  kind: "stated", by: "game owner, V2 announcement", at: "2026-09-10",
+});
+
 /** RUSH maximum supply. Only the announcement says so; the mint program is not in the SDK. */
 export const RUSH_MAX_SUPPLY = fact(2_100_000, "RUSH", {
   kind: "stated", by: "game owner, V2 announcement", at: "2026-09-10",
@@ -382,6 +395,7 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   TOKEN_SPLIT_STRIKE_BPS,
   TOKEN_SPLIT_EPOCH_BPS,
   RUSH_MAX_SUPPLY,
+  AFFILIATE_RATE_BPS,
   RUSH_LAUNCH_PRICE_USD,
   RUSH_MINT_PER_USD_VOLUME,
   EPOCH_WINNER_SLOTS,
