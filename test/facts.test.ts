@@ -69,6 +69,7 @@ describe("every fact declares where it came from", () => {
       .filter(([, f]) => f.provenance.kind === "sdk").map(([n]) => n).sort();
     expect(sdkBacked).toEqual([
       "REWARD_MAX_STREAK",
+      "STREAK_GRACE_ROUNDS",
       "STRIKE_BOOST_WINDOW_ROUNDS",
       "STRIKE_HASHRATE_MULTIPLIER",
       "TILES",

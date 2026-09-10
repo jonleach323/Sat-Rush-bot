@@ -38,13 +38,21 @@
 import {
   HASHRATE_PER_TICKET,
   REWARD_MAX_STREAK as SDK_REWARD_MAX_STREAK,
+  STREAK_GRACE_ROUNDS as SDK_STREAK_GRACE_ROUNDS,
   STRIKE_BOOST_HASHRATE_MULTIPLIER,
   STRIKE_BOOST_ROUNDS,
   TILE_COUNT,
 } from "@satrush/client";
 
-/** Pinned in package.json; recorded so a fact's source is reproducible. */
-const SDK_VERSION = "@satrush/client@0.1.12";
+/**
+ * Pinned in package.json; recorded so a fact's source is reproducible.
+ *
+ * 0.1.15 (published 2026-09-10, the day before the V2 cutover) is the V2 SDK:
+ * it carries the migrated account layouts, the token vault, the RNG rotor,
+ * the streak grace window and the fee-leg changes. Everything V2 in this
+ * file is sourced from it or from the owner's V2 announcement of the same day.
+ */
+const SDK_VERSION = "@satrush/client@0.1.15";
 
 export type Provenance =
   | {
@@ -229,6 +237,96 @@ export const EPOCH_LAST_CLOSE_POOL_USD = fact(46_553, "USD", {
   recheck: "pnpm epoch-history",
 });
 
+// ── V2 (program upgrade of 2026-09-11) ──────────────────────────────────────
+//
+// Sourced from @satrush/client@0.1.15 and the owner's V2 announcement. The
+// values that SatrushConfig carries (fee legs, exit fee) are read from chain
+// at boot and OVERRIDE the stated numbers below; the stated copies exist so
+// the model can be exercised before the upgrade lands and so `pnpm preflight`
+// can compare what landed against what was announced.
+
+/**
+ * Rounds a miner may skip without losing the streak. Mirrors the program's
+ * `STREAK_GRACE_ROUNDS`; the SDK's `nextStreakMultiplier` shows the exact
+ * rule (a play `gap` rounds after the last one continues the streak iff
+ * `1 <= gap <= STREAK_GRACE_ROUNDS + 1`). V1 had no grace: E5 measured a
+ * single missed round resetting 28 → 1.
+ */
+export const STREAK_GRACE_ROUNDS = fact(SDK_STREAK_GRACE_ROUNDS, "rounds", {
+  kind: "sdk", symbol: "STREAK_GRACE_ROUNDS", version: SDK_VERSION,
+});
+
+/**
+ * USD refunded per losing-tile gross under V2. The SDK documents
+ * `PublicDeploySettled.wonUsdAmount` as "losing-tile refunds (89% of gross
+ * per losing tile) plus any strike USD bonus share". Stated, not measured:
+ * the first V2 settlements must confirm it (`won_usd / losing gross`).
+ * Together with the fee layer it fixes the sats leg: 10000 − 8900 − 600 =
+ * 500 bps of gross is what the winning tile's BTC pool is funded with.
+ */
+export const V2_LOSING_TILE_REFUND_BPS = fact(8900, "bps of gross", {
+  kind: "stated",
+  by: "@satrush/client@0.1.15, PublicDeploySettled.wonUsdAmount doc",
+  at: "2026-09-10",
+});
+
+/**
+ * Deploy fee layer under V2 (strike + epoch + one_btc + protocol + buybacks
+ * legs), announced as "8% → 6%". V1's layer measured 800 bps (E6), so the
+ * owner's "protocol fee" means the whole layer. Read from SatrushConfig at
+ * boot; this is the pre-launch stated value.
+ */
+export const V2_DEPLOY_FEE_LAYER_BPS = fact(600, "bps of gross", {
+  kind: "stated",
+  by: "game owner, V2 announcement",
+  at: "2026-09-10",
+});
+
+/**
+ * Exit fee on vault redemptions (Sats Vault AND Token Vault), the "same 10%
+ * claim tax". Read from `SatrushConfig.vaultExitFeeBps` at boot. It stays in
+ * the vault, which is the carry every non-claimer earns.
+ */
+export const V2_VAULT_EXIT_FEE_BPS = fact(1000, "bps", {
+  kind: "stated",
+  by: "game owner, V2 announcement; SatrushConfig.vaultExitFeeBps doc",
+  at: "2026-09-10",
+});
+
+/**
+ * Split of each round's minted RUSH. The SDK's RoundRevealed doc: "the
+ * winners' (64%), losers' (16%) and epoch (6%) legs are derived from
+ * minted_token_amount"; the strike leg is 14% plus any player leg with no
+ * claimant (an empty winning tile's winners' leg, an all-on-the-winning-tile
+ * round's losers' leg). Matches the announcement exactly.
+ */
+export const TOKEN_SPLIT_WINNERS_BPS = fact(6400, "bps of mint", {
+  kind: "stated", by: "@satrush/client@0.1.15 RoundRevealed doc; V2 announcement", at: "2026-09-10",
+});
+export const TOKEN_SPLIT_LOSERS_BPS = fact(1600, "bps of mint", {
+  kind: "stated", by: "@satrush/client@0.1.15 RoundRevealed doc; V2 announcement", at: "2026-09-10",
+});
+export const TOKEN_SPLIT_STRIKE_BPS = fact(1400, "bps of mint", {
+  kind: "stated", by: "@satrush/client@0.1.15 RoundRevealed doc; V2 announcement", at: "2026-09-10",
+});
+export const TOKEN_SPLIT_EPOCH_BPS = fact(600, "bps of mint", {
+  kind: "stated", by: "@satrush/client@0.1.15 RoundRevealed doc; V2 announcement", at: "2026-09-10",
+});
+
+/** RUSH maximum supply. Only the announcement says so; the mint program is not in the SDK. */
+export const RUSH_MAX_SUPPLY = fact(2_100_000, "RUSH", {
+  kind: "stated", by: "game owner, V2 announcement", at: "2026-09-10",
+});
+
+/**
+ * Epoch winners per draw, each paid the same fixed share under V2
+ * (`EpochWinnerSelected.rank` "does not affect the pot share"). The 21-rank
+ * curve in vault.ts is V1's; V2 uses the flat one.
+ */
+export const EPOCH_WINNER_SLOTS = fact(21, "winners", {
+  kind: "stated", by: "@satrush/client@0.1.15 EpochWinnerSelected doc", at: "2026-09-10",
+});
+
 /** Mainnet slot time, for turning slot counts into wall clock. */
 export const SLOT_SECONDS = fact(0.4, "seconds", {
   kind: "measured",
@@ -253,6 +351,16 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   EPOCH_LAST_CLOSE_TICKETS,
   EPOCH_LAST_CLOSE_POOL_USD,
   SLOT_SECONDS,
+  STREAK_GRACE_ROUNDS,
+  V2_LOSING_TILE_REFUND_BPS,
+  V2_DEPLOY_FEE_LAYER_BPS,
+  V2_VAULT_EXIT_FEE_BPS,
+  TOKEN_SPLIT_WINNERS_BPS,
+  TOKEN_SPLIT_LOSERS_BPS,
+  TOKEN_SPLIT_STRIKE_BPS,
+  TOKEN_SPLIT_EPOCH_BPS,
+  RUSH_MAX_SUPPLY,
+  EPOCH_WINNER_SLOTS,
 });
 
 // ── staleness ────────────────────────────────────────────────────────────────

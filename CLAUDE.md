@@ -140,6 +140,22 @@ Operational lesson (see FINDINGS.md interlude): the owner's settle crank can be
 offline for long stretches — SELF_SETTLE=true is load-bearing, not an optimization:
 it is how deployment rent and winnings come back.
 
+## V2 (program upgrade, cutover 2026-09-11) — READ V2-STRATEGY.md
+- The program is upgraded IN PLACE (same address) with account migrations. The
+  "Game facts" section above describes V1 and `satrush.json` is the V1 IDL:
+  until the V2 IDL is loaded the decoders halt on the migrated layouts (by design).
+- `@satrush/client@0.1.15` (published 2026-09-10) is the V2 SDK and is pinned.
+  It settled the fee layer, the 89% losing-tile refund, the 5% sats leg, the
+  RUSH 64/16/14/6 split, the coupled 10% vault exit fee, equal epoch prizes and
+  the 2-round streak grace — see FINDINGS.md § E-v2-sdk. It does NOT contain the
+  mint program: the RUSH emission rule and price are measured, never assumed.
+- The V2 economics live in `src/strategy/ev-v2.ts` (`v2Model` plugs into the
+  unchanged selector through the `EvModel` swap point in `ev.ts`); the numbers
+  are `pnpm v2-strategy`. Sizing is on the 11% toll at risk, not the stake.
+- Not built until the upgrade is observable: adapter/IDL, orchestrator wiring
+  (`GAME_VERSION`), share-marked P&L, the V2 reconcile tripwire, preflight
+  re-baseline. Do not trade V2 live before those land (V2-STRATEGY.md § 6).
+
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned
   later, possibly transitioning to full-private. Launch is public-only. Therefore:

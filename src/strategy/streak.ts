@@ -30,6 +30,49 @@
  * round, which is a different (and wrong) claim.
  */
 import { REWARD_MAX_STREAK } from "./hashrate.js";
+import { STREAK_GRACE_ROUNDS as STREAK_GRACE_ROUNDS_FACT } from "./facts.js";
+
+/**
+ * Rounds a miner may skip without losing the streak. SDK-sourced (facts.ts);
+ * 2 under V2, and effectively 0 under V1 where E5 measured one missed round
+ * resetting 28 → 1. Callers on the V1 program must pass `graceRounds: 0`.
+ */
+export const STREAK_GRACE_ROUNDS = STREAK_GRACE_ROUNDS_FACT.value;
+
+/**
+ * The multiplier a deploy into `nextRoundId` would freeze onto its
+ * deployment, mirroring the SDK's `nextStreakMultiplier` (itself a mirror of
+ * `Miner::record_play`): a play `gap` rounds after the last one continues the
+ * streak iff `1 <= gap <= grace + 1`, otherwise the counter restarts at 1.
+ * `test/streak-grace.test.ts` pins this against the SDK across a grid.
+ */
+export function nextStreakMultiplier(
+  currentStreakCount: number,
+  lastMinedRoundId: number,
+  nextRoundId: number,
+  graceRounds = STREAK_GRACE_ROUNDS,
+  cap = REWARD_MAX_STREAK,
+): number {
+  const gap = Math.max(nextRoundId - lastMinedRoundId, 0);
+  const streak = gap >= 1 && gap <= graceRounds + 1 ? currentStreakCount + 1 : 1;
+  return Math.min(streak, cap);
+}
+
+/**
+ * Would sitting out `roundId` cost the streak? Only when the next possible
+ * play (`roundId + 1`) would already be past the grace gap — i.e. when the
+ * grace has been used up by the rounds already skipped since
+ * `lastMinedRoundId`. While it has not, a skip is free THIS round, and the
+ * presence credit below must be zero or the bot would pay a toll to protect
+ * something the program is not about to take.
+ */
+export function skipBreaksStreak(
+  roundId: number,
+  lastMinedRoundId: number,
+  graceRounds = STREAK_GRACE_ROUNDS,
+): boolean {
+  return roundId + 1 - lastMinedRoundId > graceRounds + 1;
+}
 
 /**
  * Raw hashrate units per (dollar per round) forgone by breaking a streak of
@@ -61,6 +104,15 @@ export interface StreakOptionInput {
    * keeps a large speculative term from dominating a decision about real money.
    */
   discount: number;
+  /**
+   * Grace-window inputs. When all three are given, the credit is zero for a
+   * round whose skip the grace still absorbs (see `skipBreaksStreak`); when
+   * omitted every skip is treated as a break, which is V1's rule. Pass
+   * `graceRounds: 0` on the V1 program even when the ids are known.
+   */
+  roundId?: number | undefined;
+  lastMinedRoundId?: number | undefined;
+  graceRounds?: number | undefined;
 }
 
 /**
@@ -73,6 +125,14 @@ export function streakOptionValueUsd(input: StreakOptionInput): number {
   const { streak, deployPerRoundUsd, valueUsdPerRawUnit, liquidFraction, discount } = input;
   if (!(valueUsdPerRawUnit > 0) || !(deployPerRoundUsd > 0)) return 0;
   if (!(liquidFraction > 0) || !(discount > 0)) return 0;
+  if (
+    input.roundId !== undefined &&
+    input.lastMinedRoundId !== undefined &&
+    input.graceRounds !== undefined &&
+    !skipBreaksStreak(input.roundId, input.lastMinedRoundId, input.graceRounds)
+  ) {
+    return 0;
+  }
   const rawLoss = streakBreakRawLoss(streak);
   if (rawLoss <= 0) return 0;
   return rawLoss * deployPerRoundUsd * liquidFraction * valueUsdPerRawUnit * discount;

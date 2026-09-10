@@ -1021,3 +1021,88 @@ if the protocol leg is cut, which is what v2 proposes.** Previous verdicts of
 - **It decays as the field learns**, being funded entirely by claimers.
 
 Both need a time series on the vault ratio before any of this is sized.
+
+---
+
+## E-v2-sdk: the V2 SDK shipped a day early, and it settles most of the announcement (2026-09-10)
+
+The owner's V2 announcement (confidential, cutover 2026-09-11) arrived with no
+IDL. Per the E-sdk rule — check for a first-party package before modelling
+anything — `npm view @satrush/client time` showed 0.1.13 (09-04), 0.1.14
+(09-08) and **0.1.15 published 2026-09-10T01:29Z**, against the repo's 0.1.12.
+The 0.1.15 typings are 747 KB against 0.1.12's 488 KB and carry the V2
+program: `migrate_board/miner/satrush_config/treasury`, `TokenVault`,
+`Affiliate`, `GrubstakeAirdrop`, `airdrop_token`, `buyback_burn_token`,
+`claim_token`, `distribute_epoch_reward`, `settle_one_btc_draw`, the RNG
+program address, `STREAK_GRACE_ROUNDS`, `nextStreakMultiplier`, and errors
+6060–6090. Both packages are now pinned (`@satrush/client@0.1.15`,
+`@satrush/api@0.1.21`); `test/sdk-parity.test.ts` still passes, so the
+hashrate and share formulas are unchanged.
+
+### What the SDK settles
+
+```
+  announcement                       SDK
+  fee 8% → 6%                        whole deploy layer; new buybacks_fee_bps leg; split read at boot
+  losers get remaining USDC back     wonUsdAmount = "losing-tile refunds (89% of gross per losing tile)"
+  winning block's Sats Fee → BTC     satsVaultRoundFeeBps DEPRECATED, "swap budget derived per round";
+                                     1 − 6% − 89% = 5% of gross funds the winning tile's BTC pool
+  RUSH 64/16/14/6                    Round.mintedTokenAmount; RoundRevealed doc gives exactly this split;
+                                     empty-winner and all-on-winner legs reroute to the strike pot
+  same 10% claim tax                 vaultExitFeeBps, both vaults; claim_sats and claim_token are coupled
+  epoch equal prizes                 EpochWinnerSelected.rank "does not affect the pot share"
+  streak grace                       STREAK_GRACE_ROUNDS = 2; continues iff 1 ≤ gap ≤ 3
+  commit-reveal RNG                  rotor program SatRngpc6hC9uMXqS4dRk4trqhySktoxMXYSSRbjemd,
+                                     armed at end_slot; deploy cutoff unchanged (6005)
+```
+
+Not in the SDK: the mint program (emission rule, RUSH price), the exact
+swap-budget formula, whether the RUSH legs are pro-rata by stake. Those are
+day-one measurements, not assumptions — the model credits the token at zero
+until they exist.
+
+### The ledger per dollar, and what it does to the strategy
+
+```
+  fee layer   6.00%   losing tile back  89.00%   sats leg  5.00%   exit fee 10.00%
+  blanket at a uniform board:  1 − f + 0.80·y   (y = RUSH minted × price / gross volume)
+  break-even yield:  7.50% (whole layer as toll) … 1.34% (protocol leg only, scaled from V1's 142/800)
+  most a dollar can lose on the board in one round:  11%   (V1: 100%)
+  same dollars at risk:  $110 → V1 stake $110, V2 stake $1,000
+```
+
+The contested pool keyed to the winning tile is `C = 0.05·V + 0.64·M·P +
+E_strike`, shared pro-rata as V1's pot was — the water-filler is unchanged,
+it is handed `v2Model` instead of the V1 context (`EvModel` swap point in
+ev.ts). Against today's live board (last 99 rounds, `pnpm v2-strategy`):
+
+```
+  $219.87 gross/round · 31.0 miners · 98.9% of miners paid per round (the field blankets)
+  V2 contested pool at that volume: $10.99 of BTC per round plus 64% of the mint
+  $1 on an empty tile: +39.1% of stake · $10: −5.8% · $100: −10.3%   (token at zero)
+  sats vault APR reported by the API: 119.7% (7-day projected, annualized)
+```
+
+So the board edge is worth about a dollar a round at current volume; the
+token yield is the whole question, and it is a timing game if the mint is
+fixed per round (the bot sees `V` at cutoff). The rest of the strategy —
+hold both vaults, concentrate for hashrate (121 vs 101 raw/$), keep the
+streak with a minimum deploy every third round ($0.11 per three rounds),
+lower the epoch ticket share (a 10% share takes 0.58x of V1's) — is in
+V2-STRATEGY.md with the launch-day runbook.
+
+### Discrepancy to measure first
+
+"Significantly increased BTC for winning blocks" does not follow from a 5%
+pool at uniform occupancy (a blanket takes 9.2% of stake in BTC per round vs
+V1's 11%). Either the winning tile's pool is bigger than the ledger implies
+or the claim is per-winner. First V2 settlements: `won_shares × vault ratio ×
+price` against the winning-tile stake, and `RoundStakeSwapped.deployedUsdAmount`
+against `0.05·V + 0.89·W_win`.
+
+### Method note
+
+Everything above came from reading a package that had been on npm for
+fifteen hours. The alternative was modelling three readings of a marketing
+paragraph. The rule from E-sdk held again: the SDK before the measurement,
+the measurement before the model.

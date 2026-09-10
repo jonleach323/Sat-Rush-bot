@@ -44,12 +44,13 @@
     "strike-concentration": "tsx scripts/strike-concentration.ts",
     "v2-edge": "tsx scripts/v2-edge.ts",
     "carry-check": "tsx scripts/carry-check.ts",
-    "full-accounting": "tsx scripts/full-accounting.ts"
+    "full-accounting": "tsx scripts/full-accounting.ts",
+    "v2-strategy": "tsx scripts/v2-strategy.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
-    "@satrush/api": "^0.1.14",
-    "@satrush/client": "^0.1.12",
+    "@satrush/api": "^0.1.21",
+    "@satrush/client": "^0.1.15",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8",
     "@triton-one/yellowstone-grpc": "^5.0.9",

@@ -12,11 +12,11 @@ importers:
         specifier: ^0.30.1
         version: 0.30.1(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@satrush/api':
-        specifier: ^0.1.14
-        version: 0.1.14(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
+        specifier: ^0.1.21
+        version: 0.1.21(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@satrush/client':
-        specifier: ^0.1.12
-        version: 0.1.12(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
+        specifier: ^0.1.15
+        version: 0.1.15(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@solana/spl-token':
         specifier: ^0.4.9
         version: 0.4.15(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
@@ -543,11 +543,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@satrush/api@0.1.14':
-    resolution: {integrity: sha512-/6RQKtY/iUtaA+Fw3mB+vKYu+FE+giypkrhLfZZ87y9ch7UNkXCQ2X5s6nqjK+bb8uWmBPDY4o+YcJ3hJt7vOA==}
+  '@satrush/api@0.1.21':
+    resolution: {integrity: sha512-25E6UE74PCnXB6WzvVQ0977zx7SZxJosbY7wv+PsuT44xXkHr6fThowEfR4QEVwJarfkrmWBDY6X/SChDwDMDg==}
 
-  '@satrush/client@0.1.12':
-    resolution: {integrity: sha512-KRBt2SIXpsTLpCfEMMV2TgXEPyS8/hzsl/Xz+vXbaH1a+slzrN3UOSxxySK64ROWcsKUZJvJ6bnLL19DvLzBbg==}
+  '@satrush/client@0.1.15':
+    resolution: {integrity: sha512-ZcHDxVesAtYYynhQ+8OX9/5i+jIkjbKxmsIWPDXef6f9LhmCuNEHKKqVzg8IBLzhwRbKymZFkfwE1NGTKVAkcg==}
 
   '@solana-program/system@0.12.2':
     resolution: {integrity: sha512-MaBeOxlvTruQhA7UYkOb3hVTEHPPagOtd+PvTm6a8rGgvEAP0kD4BbC37NceOaR4ABNqdaCmD5OMVRKgrE6KAg==}
@@ -2050,9 +2050,9 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.4':
     optional: true
 
-  '@satrush/api@0.1.14(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)':
+  '@satrush/api@0.1.21(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
-      '@satrush/client': 0.1.12(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
+      '@satrush/client': 0.1.15(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
       zod: 4.4.3
     transitivePeerDependencies:
       - bufferutil
@@ -2060,7 +2060,7 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@satrush/client@0.1.12(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)':
+  '@satrush/client@0.1.15(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)':
     dependencies:
       '@solana-program/token': 0.14.0(@solana/kit@6.10.0(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@solana/kit': 6.10.0(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
