@@ -49,6 +49,17 @@ is shared pro-rata exactly the way V1's pot was. So:
    the "+0.9% all-in" above: that figure assumes the epoch leg recycles,
    which it only does with the wallet set (§7).
 
+**The one-page ledger (`pnpm v2-ledger`, every leg per dollar of volume, in
+expectation, before the vault carry):** at $10 with 21 wallets the net is
+−0.07%, i.e. break-even; with one wallet −1.9%. Break-even RUSH price
+$10.36 with the strike leg at its 70% payout, $7.50 if the strike buffer
+returns too; $20 for a single wallet. Left out and only additive: the vault
+carry, the board edge. Left out and only subtractive: a buybacks leg carved
+from the 6%, Jito tips, RUSH slippage, the mint rate falling. The strike
+and 1-BTC legs are 2.8% of volume paid in lumps, so any one iteration swings
+±2 points around the expectation. So: not +EV on the stated numbers alone;
++EV if the price holds above ~$10, or the carry is real, or both.
+
 Nothing above is a reason to trade on day one. The client cannot decode the
 migrated accounts until the V2 IDL is loaded, and the first V2 settlement will
 (correctly) trip the reconcile tripwire and write the KILL file. Day one is

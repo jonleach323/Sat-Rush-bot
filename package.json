@@ -46,7 +46,8 @@
     "carry-check": "tsx scripts/carry-check.ts",
     "full-accounting": "tsx scripts/full-accounting.ts",
     "v2-strategy": "tsx scripts/v2-strategy.ts",
-    "wallet-set": "tsx scripts/wallet-set.ts"
+    "wallet-set": "tsx scripts/wallet-set.ts",
+    "v2-ledger": "tsx scripts/v2-ledger.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
