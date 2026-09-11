@@ -38,6 +38,9 @@ export interface TokenFeedStatus {
   ageMs: number | null;
   /** Rounds the mint rate was averaged over. */
   mintSampleRounds: number;
+  /** App-reported vault carry, simple APR as a fraction; null until read. */
+  satsVaultApr: number | null;
+  tokenVaultApr: number | null;
 }
 
 export interface BoardMintSample {
@@ -52,6 +55,13 @@ export interface ParsedBoard {
   /** Gross-weighted RUSH per USD across the rounds the payload carries. */
   mintRushPerUsd: number | null;
   samples: BoardMintSample[];
+  /**
+   * The app's own vault carry figures, simple APR as fractions (315% → 3.15),
+   * null when absent. Their window and method are not published; the bot
+   * caps them at the measured steady rate before crediting anything.
+   */
+  satsVaultApr: number | null;
+  tokenVaultApr: number | null;
 }
 
 const RUSH_DECIMALS = 9;
@@ -90,7 +100,17 @@ export function parseBoardPayload(payload: unknown): ParsedBoard {
   }
   const gross = samples.reduce((a, s) => a + s.grossUsd, 0);
   const minted = samples.reduce((a, s) => a + s.mintedRush, 0);
-  return { tokenUsd, mintRushPerUsd: gross > 0 ? minted / gross : null, samples };
+  const apr = (v: unknown): number | null => {
+    const x = Number(((v ?? {}) as Record<string, unknown>)["apr"]);
+    return Number.isFinite(x) && x >= 0 ? x / 100 : null;
+  };
+  return {
+    tokenUsd,
+    mintRushPerUsd: gross > 0 ? minted / gross : null,
+    samples,
+    satsVaultApr: apr(d["sats_vault"]),
+    tokenVaultApr: apr(d["token_vault"]),
+  };
 }
 
 export class TokenFeed {
@@ -99,6 +119,8 @@ export class TokenFeed {
   private liveFlag = false;
   private acceptedAtMs: number | null = null;
   private sampleRounds = 0;
+  private satsApr: number | null = null;
+  private tokenApr: number | null = null;
   private timer: NodeJS.Timeout | null = null;
   private lastWarn = "";
 
@@ -135,6 +157,8 @@ export class TokenFeed {
       live: this.liveFlag && ageMs !== null && ageMs <= maxAge,
       ageMs,
       mintSampleRounds: this.sampleRounds,
+      satsVaultApr: this.satsApr,
+      tokenVaultApr: this.tokenApr,
     };
   }
 
@@ -162,6 +186,8 @@ export class TokenFeed {
     this.tokenUsdValue = parsed.tokenUsd as number;
     this.mintRate = parsed.mintRushPerUsd as number;
     this.sampleRounds = parsed.samples.length;
+    this.satsApr = parsed.satsVaultApr;
+    this.tokenApr = parsed.tokenVaultApr;
     this.acceptedAtMs = (this.opts.now ?? Date.now)();
     this.liveFlag = true;
     this.lastWarn = "";

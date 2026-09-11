@@ -134,6 +134,10 @@ describe("V2 game version + token feed knobs", () => {
     expect(cfg.RUSH_USD_ESTIMATE).toBe(0);
     expect(cfg.RUSH_MINT_PER_USD_ESTIMATE).toBe(0);
     expect(cfg.TOKEN_FEED_MAX_AGE_MS).toBeGreaterThan(cfg.TOKEN_FEED_POLL_MS);
+    expect(cfg.VAULT_CARRY_HORIZON_DAYS).toBe(0); // the carry is not credited unless the operator means to hold
+    expect(cfg.VAULT_CARRY_APR_CAP).toBeCloseTo(1.2, 6);
+    expect(loadConfig({ VAULT_CARRY_HORIZON_DAYS: "90" }).VAULT_CARRY_HORIZON_DAYS).toBe(90);
+    expect(() => loadConfig({ VAULT_CARRY_HORIZON_DAYS: "400" })).toThrow();
   });
 
   it("accepts v1 for replay and rejects anything else", () => {

@@ -363,6 +363,47 @@ export const RUSH_MINT_USD_YIELD = fact(0.0137, "USD of RUSH per USD of gross vo
 });
 
 /**
+ * The sats vault carry: BTC-per-share drift from the 10% exit fee that every
+ * `claim_sats` / coupled `claim_token` leaves behind for the holders who do not
+ * claim. Measured as a RATIO series — `btc_earned / sats_shares_earned` of the
+ * API's per-round settlements is the vault ratio at that settle — so it
+ * converges fast. The steady rate is the quiet V1 tail before the V2 cutover:
+ * 0.06–0.33%/day depending on the window (≈20–120% simple APR; the app's
+ * `apr` field read 119.7% then). V2's first day ran +3.95% (28% of the
+ * vault's shares exited at launch; two single-round steps of +1.4% each),
+ * which is churn, not a rate. It is a transfer from leavers and decays as
+ * they run out; the one-day half-life says so. BTC-denominated.
+ */
+export const SATS_VAULT_CARRY_DAILY = fact(0.0025, "fraction of share value per day", {
+  kind: "measured",
+  source: "pnpm vault-carry: settlement ratio series, the two 6 h buckets before the V2 cutover " +
+    "(2026-09-10 03:17–15:17 UTC, rounds 54286–54916) ran +0.057%/day and +0.276%/day; the 14.5 h to the cutover +0.33%/day. " +
+    "V2 day one ran +8–9%/day on 28% of the shares exiting — churn, not a rate (FINDINGS E-v2-carry)",
+  at: "2026-09-11",
+  n: 22,
+  stderr: 0.0012,
+  halfLifeDays: 1,
+  recheck: "pnpm vault-carry",
+});
+
+/**
+ * The token vault carry, same mechanism on RUSH-per-share. Day one of the
+ * vault: +13.2% in 8.5 h with 57% of the shares exiting (airdrop recipients
+ * cashing out through the 10% fee). No steady state exists yet — this is the
+ * launch rate, recorded so the ledger can show what it is worth if it held,
+ * with a half-life that forces a re-measure before it is believed twice.
+ */
+export const TOKEN_VAULT_CARRY_DAILY = fact(0.073, "fraction of share value per day", {
+  kind: "measured",
+  source: "pnpm vault-carry: token settlement ratio series rounds 55124–55574 (2026-09-10/11), base drift excl. >0.5% steps",
+  at: "2026-09-11",
+  n: 16,
+  stderr: 0.03,
+  halfLifeDays: 1,
+  recheck: "pnpm vault-carry",
+});
+
+/**
  * The buybacks fee leg, the part of the 6% layer the API config does not
  * expose. Measured: the treasury received 150 bps against a 100 bps protocol
  * leg in the rotate of round 55435, and round 55437's ledger lists
@@ -442,6 +483,8 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   RUSH_LAUNCH_PRICE_USD,
   RUSH_MINT_PER_USD_VOLUME,
   RUSH_MINT_USD_YIELD,
+  SATS_VAULT_CARRY_DAILY,
+  TOKEN_VAULT_CARRY_DAILY,
   V2_BUYBACKS_FEE_BPS,
   EPOCH_WINNER_SLOTS,
 });

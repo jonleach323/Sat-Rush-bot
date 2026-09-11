@@ -7,6 +7,8 @@ const payload = {
   data: {
     round_id: 55511,
     prices: { btc: 76815.37, sat: 1.52e-6, token: 51.107912, token_share: 6.24e-11 },
+    sats_vault: { btc_amount: "485353146", btc_shares: "245094796174", apr: 315.08 },
+    token_vault: { token_amount: "5759149709532", token_shares: "4715221271006693", apr: 20847.6 },
     previous_round: { id: 55510, total_gross_deployed_usd: "597293451", minted_token_amount: "175264181" },
     previous_rounds: [
       { id: 55510, total_gross_deployed_usd: "597293451", minted_token_amount: "175264181" }, // duplicate
@@ -20,6 +22,8 @@ describe("parseBoardPayload", () => {
   it("reads the oracle price and a gross-weighted mint rate, deduping rounds", () => {
     const p = parseBoardPayload(payload);
     expect(p.tokenUsd).toBeCloseTo(51.107912, 6);
+    expect(p.satsVaultApr).toBeCloseTo(3.1508, 4); // percent → fraction
+    expect(p.tokenVaultApr).toBeCloseTo(208.476, 3);
     expect(p.samples.map((s) => s.roundId)).toEqual([55510, 55509]);
     const gross = 597.293451 + 595.293451;
     const minted = 0.175264181 + 0.174;
@@ -30,7 +34,7 @@ describe("parseBoardPayload", () => {
   });
 
   it("reports nulls, not zeros, for what it cannot read", () => {
-    expect(parseBoardPayload({ data: {} })).toEqual({ tokenUsd: null, mintRushPerUsd: null, samples: [] });
+    expect(parseBoardPayload({ data: {} })).toEqual({ tokenUsd: null, mintRushPerUsd: null, samples: [], satsVaultApr: null, tokenVaultApr: null });
     expect(parseBoardPayload(null).tokenUsd).toBeNull();
     expect(parseBoardPayload({ data: { prices: { token: -1 } } }).tokenUsd).toBeNull();
   });
@@ -57,6 +61,7 @@ describe("TokenFeed", () => {
     const s = feed.status();
     expect(s.live).toBe(true);
     expect(s.mintSampleRounds).toBe(2);
+    expect(s.satsVaultApr).toBeCloseTo(3.1508, 4);
     expect(s.tokenUsd).toBeCloseTo(51.107912, 6);
     // y = price × RUSH/$ ≈ 1.5% — the live figure the ledger runs on
     expect(s.yieldPerVolume).toBeGreaterThan(0.012);

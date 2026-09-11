@@ -873,6 +873,20 @@ export class Orchestrator {
   }
 
   /**
+   * Vault carry credited on the share legs over VAULT_CARRY_HORIZON_DAYS: the
+   * app's live `apr` per vault, capped at VAULT_CARRY_APR_CAP, converted to
+   * the fraction the shares appreciate over the horizon. Null when the
+   * horizon is 0 or the feed is not live — a carry nobody is marking is 0.
+   */
+  private shareCarry(): { sats: number; token: number } | null {
+    const days = this.cfg.VAULT_CARRY_HORIZON_DAYS;
+    const feed = this.tokenFeed?.status();
+    if (!(days > 0) || !feed?.live) return null;
+    const over = (apr: number | null): number => (Math.min(apr ?? 0, this.cfg.VAULT_CARRY_APR_CAP) / 365) * days;
+    return { sats: over(feed.satsVaultApr), token: over(feed.tokenVaultApr) };
+  }
+
+  /**
    * One-line view of the model at the cap, for skip logs: the EV (bps of
    * gross) of an even blanket and of the single emptiest tile at
    * MAX_PER_ROUND. Tells the operator how far from +EV the board sits without
@@ -894,6 +908,7 @@ export class Orchestrator {
         emptiestTile: emptiest,
         emptiestEvBps: bps(model.ev(single), cap),
         tokenYield: this.tokenFeed?.status().live ? this.tokenFeed.status().yieldPerVolume : null,
+        shareCarry: this.shareCarry(),
       };
     } catch {
       return {};
@@ -928,6 +943,7 @@ export class Orchestrator {
       strikeExpectedPot: this.strikeExpectedPotBase(),
       ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
       presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
     };
     return {
       predictedStakes: ctx.predictedStakes,

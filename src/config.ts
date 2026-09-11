@@ -133,6 +133,30 @@ const schema = z
       emptyToUndef,
       z.coerce.number().finite().min(0).max(1).default(0),
     ),
+    /**
+     * Credit the vault carry on the share legs: the BTC and RUSH shares a
+     * deploy earns appreciate while held, because both vaults keep the 10%
+     * exit fee of everyone who claims. This is the holding horizon, in days,
+     * the credit is computed over (carry = daily rate × days). 0 (default) =
+     * not credited: the carry is a transfer from leavers that decays, and it
+     * only accrues to a wallet that never claims — set this only if you mean
+     * to hold, and re-run `pnpm vault-carry` before believing the rate.
+     */
+    VAULT_CARRY_HORIZON_DAYS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().min(0).max(365).default(0),
+    ),
+    /**
+     * Cap on the daily carry rate credited, as a simple APR fraction (1.2 =
+     * 120%/yr ≈ 0.33%/day, the measured pre-launch steady rate). The live
+     * rate comes from the API's vault `apr` fields, which on launch day read
+     * 315% and 20,848% on the back of one-off exits; the cap keeps a spike
+     * from being priced as a rate.
+     */
+    VAULT_CARRY_APR_CAP: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().min(0).max(100).default(1.2),
+    ),
     STRATEGY: z.preprocess(
       emptyToUndef,
       z.enum(["water_filling", "k_emptiest"]).default("water_filling"),
@@ -807,6 +831,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     walletSet: cfg.WALLET_PATHS.length > 0 ? `${cfg.WALLET_PATHS.length} keypairs (aggregate caps)` : "single wallet",
     affiliateAuthority: cfg.AFFILIATE_AUTHORITY ?? "<primary wallet>",
     satrushApiUrl: cfg.SATRUSH_API_URL,
+    vaultCarry: cfg.VAULT_CARRY_HORIZON_DAYS > 0 ? `${cfg.VAULT_CARRY_HORIZON_DAYS} d horizon, APR cap ${cfg.VAULT_CARRY_APR_CAP}` : "not credited",
     tokenFeed: `poll ${cfg.TOKEN_FEED_POLL_MS}ms, max age ${cfg.TOKEN_FEED_MAX_AGE_MS}ms, fallback $${cfg.RUSH_USD_ESTIMATE} × ${cfg.RUSH_MINT_PER_USD_ESTIMATE} RUSH/$`,
     strategy: cfg.STRATEGY,
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,

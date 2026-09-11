@@ -183,8 +183,14 @@ it is how deployment rent and winnings come back.
   their first deploy). Dry-run on mainnet: FINDINGS.md § E-v2-dryrun — the
   selector correctly skips every round at −4% EV.
   Not yet live-tested: a real V2 send (deploy/settle verified against the tape
-  only), the affiliate binding, and the draw triggers' rotor accounts. And on measured
-  numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
+  only), the affiliate binding, and the draw triggers' rotor accounts. On measured
+  numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`)
+  BEFORE the vault carry: both vaults keep the 10% exit fee for holders who do
+  not claim (FINDINGS § E-v2-carry, `pnpm vault-carry`; `SATS_VAULT_CARRY_DAILY`
+  0.25%/day steady, launch day 8–9%/day on exits). Credited via
+  `V2EvContext.shareCarry` only when `VAULT_CARRY_HORIZON_DAYS` states a holding
+  intent, capped at `VAULT_CARRY_APR_CAP`; at the steady rate it covers the
+  fleet's −1% in ~6 weeks of holding, the single wallet's −4% in ~6 months.
 
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned

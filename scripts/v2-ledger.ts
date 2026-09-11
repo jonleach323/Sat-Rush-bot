@@ -27,8 +27,7 @@ import { REWARD_MAX_STREAK, TILE_COUNT, hashrateReward } from "@satrush/client";
 import {
   AFFILIATE_RATE_BPS, RUSH_LAUNCH_PRICE_USD, RUSH_MINT_PER_USD_VOLUME, STRIKE_PAYOUT_FRACTION,
   TOKEN_SPLIT_EPOCH_BPS, TOKEN_SPLIT_LOSERS_BPS, TOKEN_SPLIT_STRIKE_BPS, TOKEN_SPLIT_WINNERS_BPS,
-  V2_BUYBACKS_FEE_BPS, V2_DEPLOY_FEE_LAYER_BPS, VAULT_HASHRATE_PER_TICKET,
-} from "../src/strategy/facts.js";
+  V2_BUYBACKS_FEE_BPS, V2_DEPLOY_FEE_LAYER_BPS, VAULT_HASHRATE_PER_TICKET, SATS_VAULT_CARRY_DAILY, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS } from "../src/strategy/facts.js";
 import { evenSplit, simulateSplitTake } from "../src/strategy/wallet-split.js";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
@@ -43,6 +42,7 @@ const num = (v: unknown): number => Number(v as string);
 interface ApiConfig { strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number; protocol_fee_bps: number;
   buybacks_fee_bps?: number; vault_exit_fee_bps?: number; epoch_vault_iteration_duration: number }
 interface ApiBoard { round_duration: number; prices?: { token?: number | null } | null;
+  sats_vault?: { apr?: number | null } | null;
   previous_round?: { total_gross_deployed_usd: string; minted_token_amount: string; total_deployed_usd?: string } | null }
 interface Iter { id: number; pool_combined_usd_amount: number | null }
 interface Participant { tickets: string }
@@ -119,6 +119,22 @@ console.log("  leg                                                    per $     
 for (const [name, v, note] of base.rows) console.log(`  ${name.padEnd(52)} ${pad(pct(v), 8)}   ${note}`);
 console.log(`  ${"".padEnd(52)} ${"".padEnd(8)}`);
 console.log(`  ${"NET, expectation, before the vault carry".padEnd(52)} ${pad(pct(base.net), 8)}`);
+
+// The carry: both vaults keep the 10% exit fee of every redemption for the
+// holders who stay. Per $ of gross the shares acquired are the sats leg
+// (5% of V plus the refund-sized own stake on the winning tile, pro rata:
+// (0.05·21 + 0.89)/21 ≈ 9.2% at a uniform board, any mask) and the RUSH
+// legs (80% of the yield). Credited per day HELD, never claimed.
+const satsSharesPerUsd = (0.05 * 21 + V2_LOSING_TILE_REFUND_BPS.value / 1e4) / 21;
+const tokenSharesPerUsd = rushBackNow * (liveYield ?? 0);
+const carryPerDay = satsSharesPerUsd * SATS_VAULT_CARRY_DAILY.value + tokenSharesPerUsd * TOKEN_VAULT_CARRY_DAILY.value;
+const appSats = board.sats_vault?.apr ?? null;
+console.log(`
+  ${"+ vault carry per day held (measured steady rates)".padEnd(52)} ${pad(pct(carryPerDay, 4), 8)}   sats ${pct(satsSharesPerUsd)} of gross × ${pct(SATS_VAULT_CARRY_DAILY.value, 2)}/d + RUSH ${pct(tokenSharesPerUsd, 2)} × ${pct(TOKEN_VAULT_CARRY_DAILY.value, 1)}/d`);
+if (base.net < 0 && carryPerDay > 0) {
+  console.log(`  ${"→ holding horizon at which the carry covers the net".padEnd(52)} ${pad(`${(-base.net / carryPerDay).toFixed(0)} d`, 8)}   BTC/RUSH-denominated; before the 10% exit fee; the rate decays as claimers run out`);
+}
+console.log(`  ${"app's sats vault apr today".padEnd(52)} ${pad(appSats === null ? "n/a" : pct(appSats / 100, 0), 8)}   launch-day exits; the measured pre-launch steady rate is ${pct(SATS_VAULT_CARRY_DAILY.value * 365, 0)} (pnpm vault-carry)`);
 
 console.log(`\n══ SENSITIVITY (net per $, expectation) — by token yield, since the mint is not keyed to spot ══`);
 console.log("  token yield    1 wallet, strike 0.70   21 wallets, strike 0.70   21 wallets, strike 0.95");

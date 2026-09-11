@@ -255,3 +255,56 @@ describe("the owner's launch numbers: 1 RUSH per $500 at $10", () => {
     expect(breakEvenTokenPriceUsd(106)).toBeCloseTo(6.625, 6);
   });
 });
+
+describe("vault carry on the share legs", () => {
+  const econ = { feeLayerBps: 600, losingRefundBps: 8900, vaultExitFeeBps: 1000 };
+  const uniform = new Array<bigint>(TILES_COUNT).fill(usdToBase(20));
+  const single = (usd: number) => {
+    const a = new Array<bigint>(TILES_COUNT).fill(0n);
+    a[4] = usdToBase(usd);
+    return a;
+  };
+  const blanket = (usd: number) => new Array<bigint>(TILES_COUNT).fill(usdToBase(usd / TILES_COUNT));
+
+  it("the sats shares a dollar acquires are ≈ (0.05·21 + 0.89)/21 of gross, whatever the mask", () => {
+    // Value with a 100% carry minus value without it = the share legs' size.
+    const base = { predictedStakes: uniform, econ, mintedTokenValueBase: 0 };
+    for (const alloc of [single(1), blanket(21)]) {
+      const without = evOfAllocationV2(base, alloc);
+      const withCarry = evOfAllocationV2({ ...base, shareCarry: { sats: 1, token: 0 } }, alloc);
+      const gross = Number(alloc.reduce((a, b) => a + b, 0n));
+      const sharesPerUsd = (withCarry - without) / gross;
+      expect(sharesPerUsd).toBeGreaterThan(0.085); // 9.24% at a uniform board, minus our own weight
+      expect(sharesPerUsd).toBeLessThan(0.0925);
+    }
+  });
+
+  it("token carry scales only the RUSH legs; zero carry is the identity; negative is refused", () => {
+    const base = { predictedStakes: uniform, econ, mintedTokenValueBase: 0, tokenYieldPerVolume: 0.015 };
+    const alloc = single(5);
+    const plain = evOfAllocationV2(base, alloc);
+    expect(evOfAllocationV2({ ...base, shareCarry: { sats: 0, token: 0 } }, alloc)).toBeCloseTo(plain, 6);
+    const tok = evOfAllocationV2({ ...base, shareCarry: { sats: 0, token: 1 } }, alloc);
+    // RUSH legs ≈ 80% of the 1.5% yield ≈ 1.2% of gross
+    expect((tok - plain) / Number(usdToBase(5))).toBeGreaterThan(0.010);
+    expect((tok - plain) / Number(usdToBase(5))).toBeLessThan(0.013);
+    expect(() => evOfAllocationV2({ ...base, shareCarry: { sats: -0.1, token: 0 } }, alloc)).toThrow(RangeError);
+  });
+
+  it("a long enough hold flips a single tile positive; the measured steady rate needs months", () => {
+    const base = { predictedStakes: uniform, econ, mintedTokenValueBase: 0, tokenYieldPerVolume: 0.015 };
+    const alloc = single(5);
+    const plain = evOfAllocationV2(base, alloc);
+    expect(plain).toBeLessThan(0);
+    // Carry needed = toll / share leg; the share leg is what a unit carry adds.
+    const unit = evOfAllocationV2({ ...base, shareCarry: { sats: 1, token: 0 } }, alloc) - plain;
+    const need = -plain / unit;
+    expect(need).toBeGreaterThan(0.4); // ≈ 4–5% toll on an ≈8–9% share leg
+    expect(need).toBeLessThan(0.8);
+    // At the measured steady 0.25%/day that is months of holding, not days.
+    expect(need / 0.0025).toBeGreaterThan(150);
+    expect(evOfAllocationV2({ ...base, shareCarry: { sats: need * 1.1, token: 0 } }, alloc)).toBeGreaterThan(0);
+    expect(evOfAllocationV2({ ...base, shareCarry: { sats: need * 0.9, token: 0 } }, alloc)).toBeLessThan(0);
+  });
+});
+

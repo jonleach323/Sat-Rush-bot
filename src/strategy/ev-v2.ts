@@ -244,6 +244,17 @@ export interface V2EvContext {
    * claiming, and the bot holds.
    */
   valueNetOfExitFee?: boolean | undefined;
+  /**
+   * The vault carry credited on the share legs: the FRACTION the shares are
+   * expected to appreciate over the holding horizon (daily carry × days), for
+   * the sats vault (BTC leg, strike BTC) and the token vault (RUSH legs).
+   * Both vaults keep the 10% exit fee of every redemption for the holders
+   * who stay, so the ratio ratchets up as others claim (facts.ts
+   * SATS_VAULT_CARRY_DAILY). Undefined = 0: the honest default, since the
+   * carry is a transfer from leavers that decays, and it only exists for a
+   * holder who never claims.
+   */
+  shareCarry?: { sats: number; token: number } | undefined;
 }
 
 function validateContext(ctx: V2EvContext): void {
@@ -258,6 +269,8 @@ function validateContext(ctx: V2EvContext): void {
     ["tokenYieldPerVolume", ctx.tokenYieldPerVolume],
     ["strikeExpectedPot", ctx.strikeExpectedPot],
     ["presenceCreditBase", ctx.presenceCreditBase],
+    ["shareCarry.sats", ctx.shareCarry?.sats],
+    ["shareCarry.token", ctx.shareCarry?.token],
   ] as const) {
     if (v !== undefined && (!Number.isFinite(v) || v < 0)) {
       throw new RangeError(`invalid ${name}: ${v}`);
@@ -293,6 +306,9 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
   const r = ctx.econ.losingRefundBps / BPS;
   const s = satsLegBps(ctx.econ) / BPS;
   const haircut = ctx.valueNetOfExitFee ? 1 - ctx.econ.vaultExitFeeBps / BPS : 1;
+  // Carry on what we HOLD: BTC shares (sats vault) and RUSH shares (token vault).
+  const satsCarry = 1 + (ctx.shareCarry?.sats ?? 0);
+  const tokenCarry = 1 + (ctx.shareCarry?.token ?? 0);
   const winnersLeg = TOKEN_SPLIT_WINNERS_BPS.value / BPS;
   const losersLeg = TOKEN_SPLIT_LOSERS_BPS.value / BPS;
   const strike = ctx.strikeExpectedPot ?? 0;
@@ -324,7 +340,9 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
       const share = aj / wj;
       // Own stake back as BTC, the contested sats pool, the winners' RUSH leg
       // and the jackpot, all by the same pro-rata share.
-      payout += haircut * (r * aj + s * volume * share + winnersLeg * mp * share + strike * share);
+      payout +=
+        haircut * satsCarry * (r * aj + s * volume * share + strike * share) +
+        haircut * tokenCarry * winnersLeg * mp * share;
     }
     // Every other covered tile refunds in USD, no haircut.
     const losing = cost - aj;
@@ -333,7 +351,7 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
     // round sat on the winning tile it goes to the strike pot instead.
     const losingGross = volume - wj;
     if (losing > 0 && losingGross > 0) {
-      payout += haircut * losersLeg * mp * (losing / losingGross);
+      payout += haircut * tokenCarry * losersLeg * mp * (losing / losingGross);
     }
     payouts[j] = payout;
   }

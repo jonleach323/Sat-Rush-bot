@@ -1358,3 +1358,56 @@ Not exercised in dry mode, by design: the deploy/settle sends (verified
 against the tape in E-v2-idl instead), the affiliate binding of a fresh
 wallet, and the vault draw triggers' rotor accounts.
 
+## E-v2-carry: the vault carry, measured under V2 — real, launch-inflated, and not in the EV until now (2026-09-11)
+
+The V2 model held the shares (`valueNetOfExitFee=false`) but credited
+nothing for holding them. E-carry (V1) had already measured the mechanism:
+the 10% exit fee of every redemption stays in the vault, so the BTC-per-share
+of everyone who does not claim ratchets up when someone else does. V2 keeps
+it on both vaults (`vault_exit_fee_bps` 1000, coupled). `pnpm vault-carry`
+now measures it as a ratio series: a settlement's `btc_earned /
+sats_shares_earned` is the vault ratio at that settle, so the API's
+per-round settlements give the share price per round with no RPC.
+
+```
+  sats vault, 44 samples, rounds 54286…55576 (1.02 d)
+    total +3.95% = drift +1.02% + two single-round steps of +1.44% (55126→55156, 55336→55366)
+    implies 28% of the vault's shares exited in the day (a transfer from leavers)
+    6 h buckets:  03:17 +0.057%/d · 09:17 +0.276%/d  ← V1 tail, the steady state
+                  15:17 +9.18%/d  · 21:17 +7.99%/d   ← V2 launch exits
+    app's apr field: 315% today (119.7% before the cutover — it tracks the trailing rate)
+
+  token vault, 16 samples, rounds 55126…55576 (0.35 d, the vault's first day)
+    total +13.2%; steps +7.95%, +1.58%, +0.77%, +0.64%; 57% of the shares exited
+    (the airdrop cashing out through the fee)
+```
+
+What it is worth to a deploy: at a uniform board every dollar of gross
+becomes (0.05·21 + 0.89)/21 ≈ 9.2% sats shares whatever the mask (linear in
+stake — pinned in `test/ev-v2.test.ts`), plus RUSH shares of 80% × the token
+yield (≈1.2%). Credited per day held:
+
+```
+  rate                          sats carry per $ gross per day    covers −4.1% (1 wallet)   covers −1.0% (21 wallets)
+  steady 0.25%/d (fact)                     0.023%                       ~180 d                   ~43 d
+  launch day 3.9%/d                         0.36%                         11 d                     3 d
+```
+
+So: at the steady rate the carry turns a −4% round into break-even only for
+a holder with a half-year horizon, and a 21-wallet fleet at −1% into
+break-even in about six weeks — BTC-denominated, before the 10% fee that
+realising it costs, and only while other players keep claiming. Launch-day
+rates (the app's 315% / 20,848%) are one-off exits and are not to be sized
+on; `VAULT_CARRY_APR_CAP` (default 120%) keeps them out of the selector.
+
+Model: `V2EvContext.shareCarry {sats, token}` multiplies the share legs;
+the orchestrator fills it from the API's vault `apr` (capped) × the
+operator's stated `VAULT_CARRY_HORIZON_DAYS` (default 0 = not credited,
+because the credit is only real for a wallet that never claims — a stated
+intent, not a measurement). The ledger prints the carry row and the
+holding horizon at which it covers the net.
+
+Unchanged: never claiming is strictly better than claiming, and this is the
+one edge that costs no latency. What changed is that it is now a number in
+the model with provenance, instead of a note.
+
