@@ -26,7 +26,7 @@
  */
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
-import { loadConfig } from "../src/config.js";
+import { loadConfig } from "../../src/config.js";
 import {
   decodeAccount,
   type Board,
@@ -37,7 +37,7 @@ import {
   type OneBtcVaultIteration,
   type SatrushConfig,
   type SatsVault,
-} from "../src/adapter/idl.js";
+} from "../../src/adapter/idl.js";
 import {
   boardPda,
   roundPda,
@@ -48,10 +48,10 @@ import {
   oneBtcVaultPda,
   satrushConfigPda,
   satsVaultPda,
-} from "../src/adapter/pdas.js";
-import { epochWinFraction } from "../src/strategy/vault.js";
-import { PriceFeed } from "../src/ingest/prices.js";
-import { loadKeypair } from "../src/exec/tx.js";
+} from "../../src/adapter/pdas.js";
+import { epochWinFraction } from "../../src/strategy/vault.js";
+import { PriceFeed } from "../../src/ingest/prices.js";
+import { loadKeypair } from "../../src/exec/tx.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

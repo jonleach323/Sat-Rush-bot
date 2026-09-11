@@ -191,6 +191,13 @@ it is how deployment rent and winnings come back.
   `V2EvContext.shareCarry` only when `VAULT_CARRY_HORIZON_DAYS` states a holding
   intent, capped at `VAULT_CARRY_APR_CAP`; at the steady rate it covers the
   fleet's −1% in ~6 weeks of holding, the single wallet's −4% in ~6 months.
+- Epoch vault under V2 (FINDINGS § E-v2-epoch): the engine prices 21 EQUAL
+  prizes (`EPOCH_EQUAL_CURVE_BPS`) under `GAME_VERSION=v2`; `pnpm epoch-history`
+  and `pnpm epoch-uplift` read the API, and the epoch facts (last close 458k
+  tickets / $11.5k, banked share 12.8% measured, dedup uplift 3.31x on the
+  85-wallet field) feed the config defaults directly. V1-only research scripts
+  live under `scripts/v1/` (`pnpm v1:<name>`) with a README mapping each to its
+  V2 replacement; do not re-run their conclusions as current.
 
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned

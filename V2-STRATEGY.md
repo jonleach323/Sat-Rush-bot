@@ -233,7 +233,9 @@ observable — and each is a place the bot would trade on wrong numbers:
   aggregate; every wallet's Miner is streamed; settles, sweeps, epoch
   distributes, 1-BTC claims and vault engines run per wallet; extras bind to
   the primary's affiliate at their first deploy. Not built: `set_miner_tag`
-  (register the tag from the app once) and the per-wallet dashboard panel.
+  (register the tag from the app once). The dashboard has the fleet table.
+- ~~**Vault engine curve**~~ DONE 2026-09-11: equal prizes under V2, facts
+  re-measured on the API (FINDINGS § E-v2-epoch).
 - **Dry run** (FINDINGS.md § E-v2-dryrun): boots, cycles rounds, skips at
   −4% EV; no halts.
 

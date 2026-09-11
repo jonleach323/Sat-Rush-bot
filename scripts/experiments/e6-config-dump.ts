@@ -42,6 +42,8 @@ const md = `## E6 — on-chain config dump (${nowIso()})
 | sats_vault_round_fee_bps | ${c.sats_vault_round_fee_bps} |
 | vault_exit_fee_bps | ${c.vault_exit_fee_bps} |
 | protocol_fee_bps | ${c.protocol_fee_bps} |
+| buybacks_fee_bps | ${c.buybacks_fee_bps} |
+| token_mint | \`${c.token_mint.toBase58()}\` |
 | unclaimed_hashrate_bps | ${c.unclaimed_hashrate_bps} |
 | min_deploy_usd_amount | ${fmtUsd(c.min_deploy_usd_amount)} |
 | epoch_vault_iteration_duration | ${c.epoch_vault_iteration_duration.toString()} slots |
@@ -54,7 +56,7 @@ const md = `## E6 — on-chain config dump (${nowIso()})
 | strike last trigger | round ${board.strike_last_trigger_round_id} |
 | sats vault | btc ${vault.btc_amount.toString()} / shares ${vault.btc_shares.toString()} / leftovers ${vault.leftovers.toString()} |
 
-**Conclusion (Q6):** deploy legs = 264+262+132+142 = 800 bps; sats-vault round leg 1200 bps at pot swap; claim fee 1000 bps; 35% hashrate deferral; $1 min deploy; 50-slot rounds. Total per-cycle fee load ≈ 20% of gross before claim fees.
+**Deploy layer:** strike+epoch+one_btc+protocol+buybacks = ${c.strike_fee_bps + c.epoch_fee_bps + c.one_btc_fee_bps + c.protocol_fee_bps + c.buybacks_fee_bps} bps; vault exit fee ${c.vault_exit_fee_bps} bps; ${c.unclaimed_hashrate_bps / 100}% hashrate deferral; ${board.round_duration}-slot rounds. (\`sats_vault_round_fee_bps\` is a V1 field the config still carries; the V2 swap budget is measured, not read from it.)
 `;
 appendFindings(md);
 console.log(md);

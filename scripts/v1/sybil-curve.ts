@@ -25,9 +25,9 @@
 import { createRequire } from "node:module";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
-import { loadConfig } from "../src/config.js";
-import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../src/strategy/vault.js";
-import { EPOCH_LAST_CLOSE_TICKETS } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../../src/strategy/vault.js";
+import { EPOCH_LAST_CLOSE_TICKETS } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

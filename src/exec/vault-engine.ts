@@ -37,6 +37,8 @@ export interface VaultEngineOpts {
   hashrateValueUsd: number;
   /** Epoch dedup uplift (see EPOCH_DEDUP_UPLIFT); 1 = off. */
   epochDedupUplift?: number | undefined;
+  /** Epoch reward curve (bps by rank). V1's rank curve by default; EPOCH_EQUAL_CURVE_BPS under V2. */
+  epochCurve?: readonly number[] | undefined;
   /** Program cost of one ticket in hashrate points (measured devnet = 100). */
   ticketPriceHashrate: number;
   maxTickets: number;
@@ -104,6 +106,7 @@ export class VaultEngine {
         hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
         maxTickets: this.opts.maxTickets,
         dedupUplift: this.opts.epochDedupUplift,
+        curve: this.opts.epochCurve,
       }),
     );
 

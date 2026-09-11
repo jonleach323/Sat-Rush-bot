@@ -16,12 +16,12 @@
  *   pnpm farming-verdict
  */
 import { Connection, PublicKey } from "@solana/web3.js";
-import { loadConfig } from "../src/config.js";
-import { StateDb } from "../src/state/db.js";
+import { loadConfig } from "../../src/config.js";
+import { StateDb } from "../../src/state/db.js";
 import { decodeAccount, type Board, type EpochVault, type SatrushConfig, type SatsVault }
-  from "../src/adapter/idl.js";
-import { boardPda, epochVaultPda, satrushConfigPda, satsVaultPda } from "../src/adapter/pdas.js";
-import { PriceFeed } from "../src/ingest/prices.js";
+  from "../../src/adapter/idl.js";
+import { boardPda, epochVaultPda, satrushConfigPda, satsVaultPda } from "../../src/adapter/pdas.js";
+import { PriceFeed } from "../../src/ingest/prices.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

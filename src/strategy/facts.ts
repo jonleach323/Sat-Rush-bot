@@ -193,11 +193,15 @@ export const STRIKE_BOOST_WINDOW_ROUNDS = fact(STRIKE_BOOST_ROUNDS, "rounds", {
  * Fraction of the epoch field funded by hashrate banked before the iteration
  * opened, and so insensitive to current volume.
  */
-export const EPOCH_FIELD_BANKED_SHARE = fact(0.3, "fraction", {
-  kind: "assumed",
-  why: "idle hashrate across miners is roughly 3x one iteration's draw",
-  risk: "sets the floor under the field when volume falls; too low makes a "
-    + "shrinking pool look like a rising share, which flatters farming",
+export const EPOCH_FIELD_BANKED_SHARE = fact(0.128, "fraction", {
+  kind: "measured",
+  source: "pnpm epoch-history: tickets bought in the first tenth of each iteration over its total, "
+    + "iterations 8–13 (5.0%…23.3%); buying is back-loaded so this proxy is a floor on the banked share",
+  at: "2026-09-11",
+  n: 6,
+  stderr: 0.033,
+  halfLifeDays: 7,
+  recheck: "pnpm epoch-history",
 });
 
 /**
@@ -208,30 +212,33 @@ export const EPOCH_FIELD_BANKED_SHARE = fact(0.3, "fraction", {
  * the field's shape moves. The live field is 52 wallets against 21 winner
  * slots, a far more favourable regime than the 127 this was measured on.
  */
-export const EPOCH_DEDUP_UPLIFT = fact(1.45, "multiple", {
+export const EPOCH_DEDUP_UPLIFT = fact(3.31, "multiple", {
   kind: "measured",
-  source: "21-draw simulation against the live entry distribution",
-  at: "2026-08-15",
-  n: 127,
+  source: "pnpm epoch-uplift: 21-draw simulation on the live V2 field (iteration 14: 85 wallets, top-1 32%, "
+    + "top-10 79%) under the equal-prize curve — 3.47x at 144 tickets, 3.31x at 500, 2.59x at 2000",
+  at: "2026-09-11",
+  n: 85,
+  stderr: 0.10,
   halfLifeDays: 3,
   recheck: "pnpm epoch-uplift",
 });
 
 /** Ticket count at the last COMPLETE epoch draw. Anchors field projection. */
-export const EPOCH_LAST_CLOSE_TICKETS = fact(806_582, "tickets", {
+export const EPOCH_LAST_CLOSE_TICKETS = fact(458_473, "tickets", {
   kind: "measured",
-  source: "EpochDrawTriggered, iteration 4",
-  at: "2026-08-15",
+  source: "pnpm epoch-history: API epoch/history, iteration 13 (triggered 2026-09-09T18:02Z); "
+    + "the six closes before it ranged 174k–693k",
+  at: "2026-09-11",
   n: 1,
   halfLifeDays: 3,
   recheck: "pnpm epoch-history",
 });
 
 /** Pool at that same draw, USD. */
-export const EPOCH_LAST_CLOSE_POOL_USD = fact(46_553, "USD", {
+export const EPOCH_LAST_CLOSE_POOL_USD = fact(11_458, "USD", {
   kind: "measured",
-  source: "EpochVault USD + BTC legs at the iteration-4 draw",
-  at: "2026-08-15",
+  source: "pnpm epoch-history: pool_combined_usd_amount of iteration 13 at its draw (USD + BTC legs)",
+  at: "2026-09-11",
   n: 1,
   halfLifeDays: 3,
   recheck: "pnpm epoch-history",

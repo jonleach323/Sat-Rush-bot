@@ -23,10 +23,10 @@
 import {
   HASHRATE_PER_TICKET, REWARD_MAX_STREAK, TILE_COUNT, hashrateReward,
 } from "@satrush/client";
-import { blanketReturn, blanketToll, type FeeModel } from "../src/strategy/ev.js";
-import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
-import { resampleField } from "../src/ingest/epoch-field.js";
-import { formatEstimate, samplesNeeded, significant, type Estimate } from "../src/strategy/facts.js";
+import { blanketReturn, blanketToll, type FeeModel } from "../../src/strategy/ev.js";
+import { EPOCH_REWARD_CURVE_BPS } from "../../src/strategy/vault.js";
+import { resampleField } from "../../src/ingest/epoch-field.js";
+import { formatEstimate, samplesNeeded, significant, type Estimate } from "../../src/strategy/facts.js";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
 const WALLET = process.env["OPERATOR_WALLET"]

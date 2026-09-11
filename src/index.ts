@@ -101,6 +101,7 @@ import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
+import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
 import { STREAK_GRACE_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
 import { TokenFeed } from "./ingest/token-feed.js";
 import { WalletSet, type WalletState } from "./exec/wallets.js";
@@ -1064,6 +1065,15 @@ export class Orchestrator {
    * So: bound the quantity economically (VAULT_MAX_SHARE of the projected final
    * field) and price that block at its AVERAGE value, not its first ticket's.
    */
+  /**
+   * The epoch prize curve the ticket engine prices against: 21 equal slots
+   * under V2 (one wallet can hold at most one), V1's rank curve otherwise.
+   * Undefined lets the vault module default to V1.
+   */
+  private epochCurve(): readonly number[] | undefined {
+    return this.cfg.GAME_VERSION === "v2" ? EPOCH_EQUAL_CURVE_BPS : undefined;
+  }
+
   private epochTicketEconomics(): {
     capTickets: number;
     avgTicketUsd: number;
@@ -1113,7 +1123,7 @@ export class Orchestrator {
 
     const uplift = this.cfg.EPOCH_DEDUP_UPLIFT;
     const at = (mine: number): number =>
-      expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift);
+      expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift, this.epochCurve());
     const avgTicketUsd = (at(epoch.myTickets + capTickets) - at(epoch.myTickets)) / capTickets;
     if (!(avgTicketUsd > 0)) return null;
 
@@ -1878,6 +1888,7 @@ export class Orchestrator {
         dry: this.cfg.EXECUTION_MODE === "dry",
         hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
         epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
+        epochCurve: this.epochCurve(),
         ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
         maxTickets: this.cfg.VAULT_MAX_TICKETS,
         hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
@@ -1984,9 +1995,10 @@ export class Orchestrator {
       ): number => {
         const others = Math.max(0, total - mine);
         const up = this.cfg.EPOCH_DEDUP_UPLIFT;
+        const curve = this.epochCurve();
         return (
-          expectedWinningsUsd(mine + 1, others, pool, kind, up) -
-          expectedWinningsUsd(mine, others, pool, kind, up)
+          expectedWinningsUsd(mine + 1, others, pool, kind, up, curve) -
+          expectedWinningsUsd(mine, others, pool, kind, up, curve)
         );
       };
       this.vaultPoolCache = {
@@ -2016,6 +2028,7 @@ export class Orchestrator {
     this.vaultManager = new VaultManager({
       engines,
       readState,
+      epochCurve: this.epochCurve(),
       epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
       epochLateFraction: this.cfg.VAULT_EPOCH_LATE_FRACTION,
       oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,

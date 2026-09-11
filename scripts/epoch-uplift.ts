@@ -8,50 +8,45 @@
  * the pool as static, which understates EV by a factor that depends entirely on
  * how concentrated the field currently is.
  *
- * This reads every EpochVaultEntry for the live iteration and simulates the 21
- * draws to measure that factor. Re-run it when concentration shifts.
+ * Reads the live iteration's participants from the public API (no RPC) and
+ * simulates the 21 draws under the curve in force — V2's 21 equal slots by
+ * default, V1's rank curve with `--v1` — to measure that factor. Re-run when
+ * concentration shifts; the fact carries a 3-day half-life for that reason.
  *
- *   pnpm epoch-uplift
+ *   pnpm epoch-uplift [--v1] [trials=120000]
  */
-import { Connection, PublicKey } from "@solana/web3.js";
-import { createHash } from "node:crypto";
-import { loadConfig } from "../src/config.js";
-import { EPOCH_REWARD_CURVE_BPS, epochWinFraction } from "../src/strategy/vault.js";
+import { EPOCH_EQUAL_CURVE_BPS, EPOCH_REWARD_CURVE_BPS, epochWinFraction } from "../src/strategy/vault.js";
 
-const cfg = loadConfig();
-const connection = new Connection(cfg.RPC_HTTP_URL, "confirmed");
-const programId = new PublicKey(cfg.PROGRAM_ID);
-const disc = createHash("sha256").update("account:EpochVaultEntry").digest().subarray(0, 8);
+const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
+const useV1 = process.argv.includes("--v1");
+const trials = Number(process.argv.find((a) => /^\d+$/.test(a)) ?? 120_000);
+const curve = useV1 ? EPOCH_REWARD_CURVE_BPS : EPOCH_EQUAL_CURVE_BPS;
+const get = async <T>(p: string): Promise<T> =>
+  ((await (await fetch(`${BASE}/${p}`, { signal: AbortSignal.timeout(20_000) })).json()) as { data: T }).data;
 
-const accounts = await connection.getProgramAccounts(programId, {
-  commitment: "confirmed",
-  filters: [{ memcmp: { offset: 0, bytes: Buffer.from(disc).toString("base64"), encoding: "base64" } }],
-});
-
-// 8 disc | version u16 | bump u8 | iteration_id u32 | authority 32 | page u16 | tickets u64
-const byIteration = new Map<number, number[]>();
-for (const { account } of accounts) {
-  const iteration = account.data.readUInt32LE(11);
-  const tickets = Number(account.data.readBigUInt64LE(49));
-  if (tickets > 0) byIteration.set(iteration, [...(byIteration.get(iteration) ?? []), tickets]);
-}
-const iteration = Math.max(...byIteration.keys());
-const field = (byIteration.get(iteration) ?? []).sort((a, b) => b - a);
+const hist = await get<{ id: number; total_tickets: string; total_participants: number; ended_at: string | null }[]>("epoch/history?limit=3");
+const live = hist.find((h) => h.ended_at === null) ?? hist[0]!;
+const parts = await get<{ authority: string; tickets: string }[]>(`epoch/iterations/${live.id}/participants?limit=500`);
+// One block per wallet — the API lists entries; a wallet that topped up has several.
+const byWallet = new Map<string, number>();
+for (const p of parts) byWallet.set(p.authority, (byWallet.get(p.authority) ?? 0) + Number(p.tickets));
+const field = [...byWallet.values()].filter((t) => t > 0).sort((a, b) => b - a);
 const total = field.reduce((a, b) => a + b, 0);
 const share = (n: number) => field.slice(0, n).reduce((a, b) => a + b, 0) / total;
 
-console.log(`iteration ${iteration}: ${field.length} participants, ${total.toLocaleString()} tickets`);
+console.log(`iteration ${live.id} (${useV1 ? "V1 rank curve" : "V2 equal prizes"}): ${field.length} wallets, ${total.toLocaleString()} tickets` +
+  ` (API: ${live.total_participants} participants, ${Number(live.total_tickets).toLocaleString()} tickets)`);
 console.log(`concentration: top1 ${(100 * share(1)).toFixed(1)}%  top10 ${(100 * share(10)).toFixed(1)}%`);
 
-/** One draw sequence; returns the reward-curve fraction we captured. */
-function simulate(mine: number, trials: number): number {
+/** One draw sequence; returns the curve fraction we captured. */
+function simulate(mine: number, n: number): number {
   const pool = [...field, mine];
   const me = pool.length - 1;
   let captured = 0;
-  for (let t = 0; t < trials; t++) {
+  for (let t = 0; t < n; t++) {
     const alive = pool.map((_, i) => i);
     let remaining = pool.reduce((a, b) => a + b, 0);
-    for (let rank = 0; rank < EPOCH_REWARD_CURVE_BPS.length && remaining > 0; rank++) {
+    for (let rank = 0; rank < curve.length && remaining > 0 && alive.length > 0; rank++) {
       let r = Math.random() * remaining;
       let picked = -1;
       for (const idx of alive) {
@@ -59,24 +54,27 @@ function simulate(mine: number, trials: number): number {
         if (r < 0) { picked = idx; break; }
       }
       if (picked < 0) break;
-      if (picked === me) { captured += (EPOCH_REWARD_CURVE_BPS[rank] ?? 0) / 10_000; break; }
+      if (picked === me) { captured += (curve[rank] ?? 0) / 10_000; break; }
       remaining -= pool[picked] as number;
       alive.splice(alive.indexOf(picked), 1);
     }
   }
-  return captured / trials;
+  return captured / n;
 }
 
-console.log("\n  tickets      modelled         true      uplift");
+console.log("\n  tickets      modelled         true      uplift   (true = 21-draw simulation, whale blocks removed as drawn)");
 const ratios: number[] = [];
 for (const mine of [144, 500, 2000]) {
-  const modelled = epochWinFraction(mine / (total + mine));
-  const truth = simulate(mine, 120_000);
+  const modelled = epochWinFraction(mine / (total + mine), 1, curve);
+  const truth = simulate(mine, trials);
   const ratio = modelled > 0 ? truth / modelled : 0;
   ratios.push(ratio);
-  console.log(
-    `  ${String(mine).padStart(7)}   ${modelled.toExponential(3)}   ${truth.toExponential(3)}   ${ratio.toFixed(2)}x`,
-  );
+  console.log(`  ${String(mine).padStart(7)}   ${modelled.toExponential(3)}   ${truth.toExponential(3)}   ${ratio.toFixed(2)}x`);
 }
-const mid = ratios.sort((a, b) => a - b)[Math.floor(ratios.length / 2)] as number;
-console.log(`\nEPOCH_DEDUP_UPLIFT=${mid.toFixed(2)}`);
+const sorted = [...ratios].sort((a, b) => a - b);
+const mid = sorted[Math.floor(sorted.length / 2)] as number;
+// Binomial SE of the simulated capture at the mid size, propagated to the ratio.
+const pMid = epochWinFraction(500 / (total + 500), 1, curve) * mid;
+const se = Math.sqrt((pMid * (1 - pMid)) / trials) / (epochWinFraction(500 / (total + 500), 1, curve) || 1);
+console.log(`\nEPOCH_DEDUP_UPLIFT=${mid.toFixed(2)} ± ${se.toFixed(2)} (n=${field.length} wallets, ${trials.toLocaleString()} trials)`);
+console.log(`With ${field.length} wallets against 21 slots, ${(100 * Math.min(1, 21 / field.length)).toFixed(0)}% of wallets win something each draw; a small holder's odds are mostly set by the field count, not its ticket share.`);

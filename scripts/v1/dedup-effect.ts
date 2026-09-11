@@ -25,12 +25,12 @@
 import { createRequire } from "node:module";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { createHash } from "node:crypto";
-import { loadConfig } from "../src/config.js";
-import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../src/strategy/vault.js";
-import { blanketToll, feeModelFromConfig } from "../src/strategy/ev.js";
-import { decodeAccount, type SatrushConfig } from "../src/adapter/idl.js";
-import { satrushConfigPda } from "../src/adapter/pdas.js";
-import { EPOCH_LAST_CLOSE_TICKETS, UNCLAIMED_HASHRATE_UPLIFT } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { EPOCH_REWARD_CURVE_BPS, EPOCH_PAYOUT_FRACTION } from "../../src/strategy/vault.js";
+import { blanketToll, feeModelFromConfig } from "../../src/strategy/ev.js";
+import { decodeAccount, type SatrushConfig } from "../../src/adapter/idl.js";
+import { satrushConfigPda } from "../../src/adapter/pdas.js";
+import { EPOCH_LAST_CLOSE_TICKETS, UNCLAIMED_HASHRATE_UPLIFT } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

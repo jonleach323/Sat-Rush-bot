@@ -30,7 +30,7 @@
  *
  *   pnpm strike-concentration
  */
-import { TILES } from "../src/strategy/facts.js";
+import { TILES } from "../../src/strategy/facts.js";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
 const N = TILES.value;

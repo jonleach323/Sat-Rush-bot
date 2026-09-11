@@ -27,8 +27,8 @@
  *
  *   pnpm redesign-model
  */
-import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
-import { TILES } from "../src/strategy/facts.js";
+import { EPOCH_REWARD_CURVE_BPS } from "../../src/strategy/vault.js";
+import { TILES } from "../../src/strategy/facts.js";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
 const USD = 1e6;

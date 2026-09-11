@@ -24,15 +24,15 @@
  */
 import { createRequire } from "node:module";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { loadConfig } from "../src/config.js";
-import { decodeAccount, type Board, type Round, type SatrushConfig } from "../src/adapter/idl.js";
-import { boardPda, roundPda, satrushConfigPda } from "../src/adapter/pdas.js";
-import { PriceFeed } from "../src/ingest/prices.js";
-import { readEpochField, resampleField } from "../src/ingest/epoch-field.js";
-import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
-import { hashrateRawPerUsd, REWARD_MAX_STREAK } from "../src/strategy/hashrate.js";
-import { blanketToll, feeModelFromConfig, TILES_COUNT } from "../src/strategy/ev.js";
-import { UNCLAIMED_HASHRATE_UPLIFT, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { decodeAccount, type Board, type Round, type SatrushConfig } from "../../src/adapter/idl.js";
+import { boardPda, roundPda, satrushConfigPda } from "../../src/adapter/pdas.js";
+import { PriceFeed } from "../../src/ingest/prices.js";
+import { readEpochField, resampleField } from "../../src/ingest/epoch-field.js";
+import { EPOCH_REWARD_CURVE_BPS } from "../../src/strategy/vault.js";
+import { hashrateRawPerUsd, REWARD_MAX_STREAK } from "../../src/strategy/hashrate.js";
+import { blanketToll, feeModelFromConfig, TILES_COUNT } from "../../src/strategy/ev.js";
+import { UNCLAIMED_HASHRATE_UPLIFT, VAULT_HASHRATE_PER_TICKET } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

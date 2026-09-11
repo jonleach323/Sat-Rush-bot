@@ -7,11 +7,11 @@
  *   pnpm wait:launch -- --once  # single check, exit 0/1
  */
 import { Connection, PublicKey } from "@solana/web3.js";
-import type { SatrushConfig } from "../src/adapter/idl.js";
-import { decodeAccount } from "../src/adapter/idl.js";
-import { boardPda, satrushConfigPda } from "../src/adapter/pdas.js";
-import { loadConfig } from "../src/config.js";
-import { compareEconomics } from "../src/ops/preflight.js";
+import type { SatrushConfig } from "../../src/adapter/idl.js";
+import { decodeAccount } from "../../src/adapter/idl.js";
+import { boardPda, satrushConfigPda } from "../../src/adapter/pdas.js";
+import { loadConfig } from "../../src/config.js";
+import { compareEconomics } from "../../src/ops/preflight.js";
 
 const cfg = loadConfig();
 const once = process.argv.includes("--once");

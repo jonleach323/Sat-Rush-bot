@@ -29,12 +29,12 @@
  */
 import { Connection, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
-import { loadConfig } from "../src/config.js";
-import { decodeAccount, type SatrushConfig } from "../src/adapter/idl.js";
-import { roundPda, satrushConfigPda } from "../src/adapter/pdas.js";
-import { parseCpiEventData } from "../src/ingest/events.js";
-import { blanketToll, feeModelFromConfig, TILES_COUNT } from "../src/strategy/ev.js";
-import { formatEstimate, significant, type Estimate } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { decodeAccount, type SatrushConfig } from "../../src/adapter/idl.js";
+import { roundPda, satrushConfigPda } from "../../src/adapter/pdas.js";
+import { parseCpiEventData } from "../../src/ingest/events.js";
+import { blanketToll, feeModelFromConfig, TILES_COUNT } from "../../src/strategy/ev.js";
+import { formatEstimate, significant, type Estimate } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

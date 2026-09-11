@@ -36,16 +36,16 @@
 import { createRequire } from "node:module";
 import { Connection, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
-import { loadConfig } from "../src/config.js";
-import { decodeAccount, type Board, type SatrushConfig } from "../src/adapter/idl.js";
-import { parseCpiEventData } from "../src/ingest/events.js";
-import { boardPda, satrushConfigPda } from "../src/adapter/pdas.js";
-import { PriceFeed } from "../src/ingest/prices.js";
-import { EPOCH_REWARD_CURVE_BPS } from "../src/strategy/vault.js";
-import { evOfAllocation, feeModelFromConfig, STRIKE_PAYOUT_FRACTION, TILES_COUNT, type EvContext } from "../src/strategy/ev.js";
-import { selectAllocation } from "../src/strategy/selector.js";
-import { readEpochField, resampleField } from "../src/ingest/epoch-field.js";
-import { UNCLAIMED_HASHRATE_UPLIFT } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { decodeAccount, type Board, type SatrushConfig } from "../../src/adapter/idl.js";
+import { parseCpiEventData } from "../../src/ingest/events.js";
+import { boardPda, satrushConfigPda } from "../../src/adapter/pdas.js";
+import { PriceFeed } from "../../src/ingest/prices.js";
+import { EPOCH_REWARD_CURVE_BPS } from "../../src/strategy/vault.js";
+import { evOfAllocation, feeModelFromConfig, STRIKE_PAYOUT_FRACTION, TILES_COUNT, type EvContext } from "../../src/strategy/ev.js";
+import { selectAllocation } from "../../src/strategy/selector.js";
+import { readEpochField, resampleField } from "../../src/ingest/epoch-field.js";
+import { UNCLAIMED_HASHRATE_UPLIFT } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");
@@ -77,7 +77,7 @@ const SOL = prices.solUsd();
 // roughly a third of them and reconstructs a board that never existed. Walk the
 // round PDAs directly instead: one signature query per round, complete by
 // construction.
-const { roundPda } = await import("../src/adapter/pdas.js");
+const { roundPda } = await import("../../src/adapter/pdas.js");
 const headRound = board.round_id;
 const roundIds: number[] = [];
 for (let i = 1; i <= ROUNDS_WANTED; i++) if (headRound - i > 0) roundIds.push(headRound - i);

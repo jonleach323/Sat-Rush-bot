@@ -99,13 +99,13 @@ export function oneBtcEntryReady(o: OneBtcReadState, minFillBps: number): boolea
  * average one, and any error is identical across vaults so it cannot flip the
  * comparison.
  */
-export function marginalTicketUsd(v: {
-  kind: VaultSnapshot["kind"];
-  state: EpochReadState | OneBtcReadState;
-}): number {
+export function marginalTicketUsd(
+  v: { kind: VaultSnapshot["kind"]; state: EpochReadState | OneBtcReadState },
+  epochCurve?: readonly number[] | undefined,
+): number {
   const { poolValueUsd, totalTickets } = v.state;
   if (!(poolValueUsd > 0) || !(totalTickets > 0)) return 0;
-  return expectedWinningsUsd(1, totalTickets, poolValueUsd, v.kind);
+  return expectedWinningsUsd(1, totalTickets, poolValueUsd, v.kind, 1, epochCurve);
 }
 
 export interface VaultManagerOpts {
@@ -119,6 +119,8 @@ export interface VaultManagerOpts {
   /** Fraction of the iteration to treat as "late" — the real driver on mainnet. */
   epochLateFraction: number;
   oneBtcMinFillBps: number;
+  /** Epoch reward curve for ranking vaults by marginal ticket value (V2: equal prizes). */
+  epochCurve?: readonly number[] | undefined;
   pollMs: number;
   killSwitchEngaged: () => boolean;
   /** Claim/crank pass, run after entry evaluation each tick (optional). */
@@ -182,7 +184,7 @@ export class VaultManager {
     if (state.oneBtc && oneBtcEntryReady(state.oneBtc, this.opts.oneBtcMinFillBps)) {
       eligible.push({ kind: "one_btc", state: state.oneBtc });
     }
-    eligible.sort((a, b) => marginalTicketUsd(b) - marginalTicketUsd(a));
+    eligible.sort((a, b) => marginalTicketUsd(b, this.opts.epochCurve) - marginalTicketUsd(a, this.opts.epochCurve));
     for (const v of eligible) await this.evaluate(v.kind, v.state);
 
     // Claim/crank pass — collect resolved winnings (and crank draws if enabled).

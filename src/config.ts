@@ -9,6 +9,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
+import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS } from "./strategy/facts.js";
 import { PROGRAM_ADDRESS } from "./adapter/idl.js";
 
 const emptyToUndef = (v: unknown) =>
@@ -507,7 +508,7 @@ const schema = z
      * field means less uplift. 1 disables it (the old conservative model). */
     EPOCH_DEDUP_UPLIFT: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(1).max(5).default(1.45),
+      z.coerce.number().min(1).max(5).default(EPOCH_DEDUP_UPLIFT.value),
     ),
     /** Hashrate points per vault ticket (measured on devnet = 100). */
     VAULT_HASHRATE_PER_TICKET: z.preprocess(
@@ -632,13 +633,13 @@ const schema = z
      * ticket buying is back-loaded. Re-measure with `pnpm epoch-history`. */
     EPOCH_LAST_CLOSE_TICKETS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().positive().default(806_582),
+      z.coerce.number().positive().default(EPOCH_LAST_CLOSE_TICKETS.value),
     ),
     /** Pool value at that same draw, USD. Used only as the denominator of the
      * volume ratio, so only its size RELATIVE to the live pool matters. */
     EPOCH_LAST_CLOSE_POOL_USD: z.preprocess(
       emptyToUndef,
-      z.coerce.number().positive().default(46_553),
+      z.coerce.number().positive().default(EPOCH_LAST_CLOSE_POOL_USD.value),
     ),
     /** Fraction of the field funded by hashrate banked before the iteration
      * started, and so insensitive to current volume. Measured idle hashrate
@@ -647,7 +648,7 @@ const schema = z
      * projection assuming rivals vanish along with the pool. */
     EPOCH_FIELD_BANKED_SHARE: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.3),
+      z.coerce.number().min(0).max(1).default(EPOCH_FIELD_BANKED_SHARE.value),
     ),
     HASHRATE_DEPLOY_CREDIT_ENABLED: boolFromEnv(false),
     STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),

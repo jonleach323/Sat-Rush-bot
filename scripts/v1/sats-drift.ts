@@ -18,11 +18,11 @@
  */
 import { Connection, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
-import { loadConfig } from "../src/config.js";
-import { decodeAccount, type SatrushConfig, type SatsVault } from "../src/adapter/idl.js";
-import { parseCpiEventData } from "../src/ingest/events.js";
-import { satrushConfigPda, satsVaultPda } from "../src/adapter/pdas.js";
-import { SLOT_SECONDS as SLOT_SECONDS_FACT } from "../src/strategy/facts.js";
+import { loadConfig } from "../../src/config.js";
+import { decodeAccount, type SatrushConfig, type SatsVault } from "../../src/adapter/idl.js";
+import { parseCpiEventData } from "../../src/ingest/events.js";
+import { satrushConfigPda, satsVaultPda } from "../../src/adapter/pdas.js";
+import { SLOT_SECONDS as SLOT_SECONDS_FACT } from "../../src/strategy/facts.js";
 
 const cfg = loadConfig();
 const conn = new Connection(cfg.RPC_HTTP_URL, "confirmed");

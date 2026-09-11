@@ -220,3 +220,20 @@ describe("vault ordering by ticket value", () => {
     expect(marginalTicketUsd({ kind: "one_btc", state: oneBtc({ poolValueUsd: 0 }) })).toBe(0);
   });
 });
+
+describe("marginalTicketUsd under the V2 equal-prize curve", () => {
+  it("prices the marginal epoch ticket on the curve it is handed", async () => {
+    const { EPOCH_EQUAL_CURVE_BPS, EPOCH_REWARD_CURVE_BPS, expectedWinningsUsd } = await import("../src/strategy/vault.js");
+    const state = { iterationId: 1, open: true, totalTickets: 1000, poolValueUsd: 10_000, lastTriggerSlot: 0, iterationDurationSlots: 1000 };
+    const ranked = marginalTicketUsd({ kind: "epoch", state });
+    const flat = marginalTicketUsd({ kind: "epoch", state }, EPOCH_EQUAL_CURVE_BPS);
+    // Same 90% payout fraction, so one marginal ticket is worth the same to
+    // first order (within 1% at a 0.1% share); the curve only reshapes the
+    // take of a LARGE holding.
+    expect(Math.abs(flat / ranked - 1)).toBeLessThan(0.01);
+    const bigRanked = expectedWinningsUsd(300, 700, 10_000, "epoch", 1, EPOCH_REWARD_CURVE_BPS);
+    const bigFlat = expectedWinningsUsd(300, 700, 10_000, "epoch", 1, EPOCH_EQUAL_CURVE_BPS);
+    expect(bigFlat).toBeLessThan(bigRanked); // one wallet can no longer take rank 1's 32%
+  });
+});
+

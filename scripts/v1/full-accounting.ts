@@ -27,7 +27,7 @@
  *
  *   pnpm full-accounting
  */
-import { formatEstimate, type Estimate } from "../src/strategy/facts.js";
+import { formatEstimate, type Estimate } from "../../src/strategy/facts.js";
 import { hashrateReward, REWARD_MAX_STREAK, TILE_COUNT } from "@satrush/client";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";

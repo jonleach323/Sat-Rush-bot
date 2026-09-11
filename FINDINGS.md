@@ -1411,3 +1411,55 @@ Unchanged: never claiming is strictly better than claiming, and this is the
 one edge that costs no latency. What changed is that it is now a number in
 the model with provenance, instead of a note.
 
+## E-v2-epoch: the epoch vault re-measured for V2 — equal prizes, a 3.3x dedup uplift, and 27-day-old anchors replaced (2026-09-11)
+
+The ticket engine was still handing `expectedWinningsUsd` V1's rank curve
+(32% / 14% / 8% …) although V2 pays 21 equal prizes, and its field anchors
+were the iteration-4 draw of 2026-08-15. Both scripts now read the public
+API instead of scanning RPC signatures.
+
+```
+  pnpm epoch-history (API epoch/history + participants)
+  iter   status   wallets   tickets     pool      duration   first-tenth buys   prizes (21 winners)
+    14   LIVE        85     155,554     open      1.43 d       14.0%
+    13   closed      90     458,473   $11,458     3.17 d        5.0%           $176 … $3,667
+    12   closed      88     175,131    $7,564     3.16 d       18.6%           $116 … $2,421
+    11   closed      82     174,415    $6,625     2.37 d       23.3%           $102 … $2,120
+    10   closed      79     604,426   $10,732     2.38 d        5.2%           $165 … $3,434
+     9   closed      75     464,370   $13,232     2.59 d        6.3%           $204 … $4,234
+     8   closed     107     692,636   $19,168     2.74 d       18.2%           $295 … $6,134
+```
+
+Facts, all re-sourced: `EPOCH_LAST_CLOSE_TICKETS` 458,473 and
+`EPOCH_LAST_CLOSE_POOL_USD` $11,458 (iteration 13, the last close; the six
+before it ranged 174k–693k tickets and $6.6k–$19.2k, so the 3-day half-life
+stands). `EPOCH_FIELD_BANKED_SHARE` is no longer assumed: the tickets bought
+in the first tenth of an iteration over its total run 5–23% (mean 12.8% ±
+3.3, n=6) — a floor on the banked share, since buying is back-loaded — and
+the config defaults now read the facts instead of carrying a second copy.
+No assumed fact remains in `facts.ts`.
+
+Iterations 8–13 closed under V1 (ranked prizes, $102…$6,134 per winner);
+iteration 14 straddles the cutover and is the first that will pay equal
+prizes. The engine now prices against `EPOCH_EQUAL_CURVE_BPS` under
+`GAME_VERSION=v2` everywhere the epoch is valued (ticket economics, the
+per-wallet engines, the vault manager's ranking, the dashboard's ticket EV).
+
+`pnpm epoch-uplift`, re-run on the live field under the flat curve:
+
+```
+  iteration 14: 85 wallets, top-1 32.1%, top-10 79.4%
+  tickets   modelled    true (21-draw sim)   uplift
+      144   8.25e-4        2.86e-3             3.47x
+      500   2.79e-3        9.26e-3             3.31x
+     2000   1.01e-2        2.61e-2             2.59x
+  EPOCH_DEDUP_UPLIFT = 3.31 ± 0.10
+```
+
+Why so much larger than V1's 1.45: with 85 wallets against 21 equal slots a
+quarter of the field wins something every draw, and each whale drawn takes
+a third of the tickets out of the pool with it, so a small holder's odds are
+set far more by the wallet count than by its ticket share. That is the
+mechanism the wallet set is built on (§ E-v2-sdk, `pnpm wallet-set`).
+Sensitive to concentration; the fact keeps its 3-day half-life.
+

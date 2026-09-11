@@ -22,7 +22,7 @@
  *
  *   pnpm carry-check
  */
-import { formatEstimate, significant, type Estimate } from "../src/strategy/facts.js";
+import { formatEstimate, significant, type Estimate } from "../../src/strategy/facts.js";
 
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
 const OURS = process.env["OPERATOR_WALLET"]
