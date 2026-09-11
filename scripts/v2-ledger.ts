@@ -127,14 +127,14 @@ console.log(`  ${"NET, expectation, before the vault carry".padEnd(52)} ${pad(pc
 // legs (80% of the yield). Credited per day HELD, never claimed.
 const satsSharesPerUsd = (0.05 * 21 + V2_LOSING_TILE_REFUND_BPS.value / 1e4) / 21;
 const tokenSharesPerUsd = rushBackNow * (liveYield ?? 0);
-const carryPerDay = satsSharesPerUsd * SATS_VAULT_CARRY_DAILY.value + tokenSharesPerUsd * TOKEN_VAULT_CARRY_DAILY.value;
+const satsCarryPerDay = satsSharesPerUsd * SATS_VAULT_CARRY_DAILY.value;
+const tokenCarryPerDay = tokenSharesPerUsd * TOKEN_VAULT_CARRY_DAILY.value;
 const appSats = board.sats_vault?.apr ?? null;
-console.log(`
-  ${"+ vault carry per day held (measured steady rates)".padEnd(52)} ${pad(pct(carryPerDay, 4), 8)}   sats ${pct(satsSharesPerUsd)} of gross × ${pct(SATS_VAULT_CARRY_DAILY.value, 2)}/d + RUSH ${pct(tokenSharesPerUsd, 2)} × ${pct(TOKEN_VAULT_CARRY_DAILY.value, 1)}/d`);
-if (base.net < 0 && carryPerDay > 0) {
-  console.log(`  ${"→ holding horizon at which the carry covers the net".padEnd(52)} ${pad(`${(-base.net / carryPerDay).toFixed(0)} d`, 8)}   BTC/RUSH-denominated; before the 10% exit fee; the rate decays as claimers run out`);
-}
-console.log(`  ${"app's sats vault apr today".padEnd(52)} ${pad(appSats === null ? "n/a" : pct(appSats / 100, 0), 8)}   launch-day exits; the measured pre-launch steady rate is ${pct(SATS_VAULT_CARRY_DAILY.value * 365, 0)} (pnpm vault-carry)`);
+const horizon = (perDay: number): string => (base.net < 0 && perDay > 0 ? `${(-base.net / perDay).toFixed(0)} d` : "n/a");
+console.log(`\n  ${"+ sats carry per day held (steady rate, pre-launch)".padEnd(52)} ${pad(pct(satsCarryPerDay, 4), 8)}   ${pct(satsSharesPerUsd)} of gross in BTC shares × ${pct(SATS_VAULT_CARRY_DAILY.value, 2)}/d — covers the net in ${horizon(satsCarryPerDay)}`);
+console.log(`  ${"+ token carry per day held (LAUNCH rate, day one)".padEnd(52)} ${pad(pct(tokenCarryPerDay, 4), 8)}   ${pct(tokenSharesPerUsd, 2)} of gross in RUSH shares × ${pct(TOKEN_VAULT_CARRY_DAILY.value, 1)}/d — airdrop exits, no steady state yet; both: ${horizon(satsCarryPerDay + tokenCarryPerDay)}`);
+console.log(`  ${"app's sats vault apr today".padEnd(52)} ${pad(appSats === null ? "n/a" : pct(appSats / 100, 0), 8)}   launch-day exits; measured pre-launch steady ${pct(SATS_VAULT_CARRY_DAILY.value * 365, 0)} simple APR (pnpm vault-carry)`);
+console.log(`  The carry is BTC/RUSH-denominated, costs the 10% exit fee to realise, and is a transfer from claimers that decays as they run out.`);
 
 console.log(`\n══ SENSITIVITY (net per $, expectation) — by token yield, since the mint is not keyed to spot ══`);
 console.log("  token yield    1 wallet, strike 0.70   21 wallets, strike 0.70   21 wallets, strike 0.95");
