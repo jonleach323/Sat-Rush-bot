@@ -11,6 +11,7 @@ import type {
   Round,
   SatrushConfig,
   SatsVault,
+  TokenVault,
 } from "../adapter/idl.js";
 import { PROGRAM_ID } from "../adapter/idl.js";
 import {
@@ -19,6 +20,7 @@ import {
   roundPda,
   satrushConfigPda,
   satsVaultPda,
+  tokenVaultPda,
 } from "../adapter/pdas.js";
 import {
   HaltError,
@@ -36,6 +38,7 @@ export type AppliedKind =
   | "Board"
   | "Round"
   | "Miner"
+  | "TokenVault"
   | "SatsVault"
   | "SatrushConfig";
 
@@ -48,6 +51,8 @@ export class GameState {
   board: Board | null = null;
   satrushConfig: SatrushConfig | null = null;
   satsVault: SatsVault | null = null;
+  /** V2 RUSH vault (token_amount / token_shares marks unclaimed token shares). */
+  tokenVault: TokenVault | null = null;
   miner: Miner | null = null;
   currentSlot = 0;
   /** 0 for now — becomes a live estimate in the private-deployment era. */
@@ -101,6 +106,9 @@ export class GameState {
       case "SatsVault":
         this.satsVault = decodeAccountOrHalt<SatsVault>("SatsVault", data);
         return { kind: "SatsVault" };
+      case "TokenVault":
+        this.tokenVault = decodeAccountOrHalt<TokenVault>("TokenVault", data);
+        return { kind: "TokenVault" };
       case "SatrushConfig":
         this.satrushConfig = decodeAccountOrHalt<SatrushConfig>("SatrushConfig", data);
         return { kind: "SatrushConfig" };
@@ -212,6 +220,7 @@ export async function bootstrapGameState(
     satrushConfigPda(programId),
     boardPda(programId),
     satsVaultPda(programId),
+    tokenVaultPda(programId),
     ...(minerAddress ? [minerAddress] : []),
   ];
   const infos = await connection.getMultipleAccountsInfo(staticKeys, "processed");
@@ -224,7 +233,9 @@ export async function bootstrapGameState(
   state.applyAccount(staticKeys[1] as PublicKey, boardInfo.data);
   const vaultInfo = infos[2];
   if (vaultInfo) state.applyAccount(staticKeys[2] as PublicKey, vaultInfo.data);
-  const minerInfo = infos[3];
+  const tokenVaultInfo = infos[3]; // absent on a V1 chain — fine, stays null
+  if (tokenVaultInfo) state.applyAccount(staticKeys[3] as PublicKey, tokenVaultInfo.data);
+  const minerInfo = infos[4];
   if (minerAddress && minerInfo) state.applyAccount(minerAddress, minerInfo.data);
 
   const bootSlot = await connection.getSlot("processed");

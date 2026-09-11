@@ -7,6 +7,7 @@
 import type { Miner, Round, SatrushConfig, SatsVault } from "../adapter/idl.js";
 import { TILES_COUNT } from "../ingest/decode.js";
 import type { PriceStatus } from "../ingest/prices.js";
+import type { TokenFeedStatus } from "../ingest/token-feed.js";
 import { buildIntel, type IntelJson } from "./intel.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
@@ -42,7 +43,17 @@ export interface StatusJson {
    * reports only `usd` understates the position by that much — the single
    * easiest way to mistake a profitable bot for a losing one.
    */
-  unclaimed: { usd: number; shares: string; sharesUsd: number };
+  unclaimed: {
+    usd: number;
+    shares: string;
+    sharesUsd: number;
+    /** V2 RUSH vault shares and their marked value (0 when unpriced). */
+    tokenShares: string;
+    tokenSharesUsd: number;
+  };
+  /** Net today with the day's won shares marked — the figure the daily cap runs on. */
+  markedNetTodayUsd: number;
+  tokenFeed: TokenFeedStatus | null;
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
   /** Oracle prices actually in force; `live: false` means a fallback is in use. */
   prices: PriceStatus;
@@ -160,6 +171,10 @@ export interface MonitorContext {
   fireOffsetSlots: () => number;
   /** USD value of ONE sats-vault BTC share, net of the claim fee. 0 if unknown. */
   shareValueUsd: () => number;
+  /** USD value of ONE RUSH-vault share, net of the exit fee. 0 unless the token feed is live. */
+  tokenShareValueUsd: () => number;
+  /** V2 token feed (price, mint rate, yield); null under V1. */
+  tokenFeedStatus: () => TokenFeedStatus | null;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -227,7 +242,11 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
           usd: baseToUsd(big(miner?.unclaimed_usd_amount)),
           shares: big(miner?.unclaimed_btc_shares).toString(),
           sharesUsd: Number(big(miner?.unclaimed_btc_shares)) * ctx.shareValueUsd(),
+          tokenShares: big(miner?.unclaimed_token_shares).toString(),
+          tokenSharesUsd: Number(big(miner?.unclaimed_token_shares)) * ctx.tokenShareValueUsd(),
         },
+        markedNetTodayUsd: baseToUsd(ctx.pnl.markedNetToday()),
+        tokenFeed: ctx.tokenFeedStatus(),
         caps: {
           maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
           dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase),

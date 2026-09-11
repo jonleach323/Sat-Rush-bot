@@ -41,6 +41,9 @@ export interface SettlementRecord {
   wonUsd: bigint;
   wonShares: bigint;
   hashrateEarned: bigint;
+  /** V2 RUSH leg: tokens credited (base units, 9 dec) and the vault shares they became. */
+  wonTokenAmount?: bigint | undefined;
+  wonTokenShares?: bigint | undefined;
   sig: string;
 }
 
@@ -99,6 +102,8 @@ CREATE TABLE IF NOT EXISTS settlements (
   won_usd TEXT NOT NULL,
   won_shares TEXT NOT NULL,
   hashrate_earned TEXT NOT NULL,
+  won_token_amount TEXT NOT NULL DEFAULT '0',
+  won_token_shares TEXT NOT NULL DEFAULT '0',
   sig TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -191,6 +196,15 @@ export class StateDb {
       // Per-wallet attribution. Without it a fleet's rows are indistinguishable,
       // so per-wallet streak reconstruction and P&L both silently merge.
       this.db.exec(`ALTER TABLE my_deploys ADD COLUMN wallet TEXT`);
+    }
+    // V2 settlements carry a RUSH leg; V1-era rows read 0.
+    const scols = this.db
+      .prepare(`SELECT name FROM pragma_table_info('settlements')`)
+      .all() as { name: string }[];
+    for (const col of ["won_token_amount", "won_token_shares"]) {
+      if (!scols.some((c) => c.name === col)) {
+        this.db.exec(`ALTER TABLE settlements ADD COLUMN ${col} TEXT NOT NULL DEFAULT '0'`);
+      }
     }
   }
 
@@ -324,8 +338,9 @@ export class StateDb {
       this.db
         .prepare(
           `INSERT OR IGNORE INTO settlements
-             (round_id, winning_stake, won_usd, won_shares, hashrate_earned, sig)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (round_id, winning_stake, won_usd, won_shares, hashrate_earned,
+              won_token_amount, won_token_shares, sig)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           s.roundId,
@@ -333,6 +348,8 @@ export class StateDb {
           s.wonUsd.toString(),
           s.wonShares.toString(),
           s.hashrateEarned.toString(),
+          (s.wonTokenAmount ?? 0n).toString(),
+          (s.wonTokenShares ?? 0n).toString(),
           s.sig,
         ),
     );

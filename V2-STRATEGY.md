@@ -216,9 +216,13 @@ observable — and each is a place the bot would trade on wrong numbers:
   `candidates.ts` takes a model factory for its excluded-tile variants;
   the presence credit carries the 2-round grace; the strike pot values the
   BTC and RUSH legs. Still open: the vault engine's flat curve.
-- **Accounting**: `settlements` needs `won_token_shares`; `pnl.ts` must mark
-  shares; `reconcile.ts` must model refunds + sats slice; `bankroll.ts` and
-  `guards.ts` need the loss fraction.
+- ~~**Accounting**~~ DONE 2026-09-11: `settlements` carries
+  `won_token_amount/won_token_shares` (additive migration); `Pnl.markedNetToday`
+  marks the day's won shares through an injected marker (vault rate × live
+  price × (1 − exit fee), RUSH at 0 unless the token feed is live) and feeds
+  `realizedLossToday`; `reconcileRoundOutcomeV2` checks the exact refund and
+  the BTC/RUSH leg directions; the bankroll and send guards count
+  `tollAtRiskFraction` of a stake against the daily cap.
 - ~~**Preflight**~~ DONE: `MEASURED_ECONOMICS` re-baselined to the live V2
   config.
 - **Token price feed** for `mintedTokenValueBase` (API oracle spot).

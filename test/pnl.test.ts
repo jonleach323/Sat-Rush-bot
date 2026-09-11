@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { BN } from "../src/adapter/idl.js";
-import type { Miner, SatsVault } from "../src/adapter/idl.js";
+import type { Miner, SatsVault, TokenVault } from "../src/adapter/idl.js";
 import { StateDb } from "../src/state/db.js";
 import { Pnl, utcDate } from "../src/state/pnl.js";
 import { usdToBase } from "../src/units.js";
@@ -203,3 +203,65 @@ describe("Pnl — fee attribution (audit finding #6)", () => {
     db.close();
   });
 });
+
+describe("Pnl — V2 share marking", () => {
+  it("a winning V2 day is not a loss once the won shares are marked", () => {
+    const { db } = setup();
+    // Marker (USD base units): $0.50 per 1000 sats shares, $0.10 per 1000 token shares.
+    const pnl = new Pnl(db, {
+      markShares: (sats, token) => (sats * 500_000n) / 1000n + (token * 100_000n) / 1000n,
+    });
+    seedDeploy(db, 1, 10, 0.1, "landed");
+    // Won the tile: nothing back in USD, everything in shares.
+    db.recordSettlement({
+      roundId: 1,
+      winningStake: usdToBase(10),
+      wonUsd: 0n,
+      wonShares: 30_000n, // → $15
+      hashrateEarned: 1n,
+      wonTokenAmount: 5n,
+      wonTokenShares: 10_000n, // → $1
+      sig: "win",
+    });
+    expect(pnl.todayNet()).toBe(usdToBase(-10)); // the USD-only view
+    expect(pnl.sharesWonToday()).toEqual({ satsShares: 30_000n, tokenShares: 10_000n });
+    expect(pnl.markedNetToday()).toBe(usdToBase(6)); // −10 + 15 + 1
+    expect(pnl.realizedLossToday()).toBe(0n); // the cap sees no loss
+    expect(pnl.reconcileRound(1).wonTokenShares).toBe(10_000n);
+    db.close();
+  });
+
+  it("without a marker (V1) the USD net stands; a marker can never hide a USD loss", () => {
+    const { db } = setup();
+    const unmarked = new Pnl(db);
+    const marked = new Pnl(db, { markShares: () => -1_000_000n }); // hostile marker
+    seedDeploy(db, 2, 4, null, "landed");
+    db.recordSettlement({ roundId: 2, winningStake: 0n, wonUsd: usdToBase(3.56), wonShares: 0n, hashrateEarned: 0n, sig: "lose" });
+    expect(unmarked.realizedLossToday()).toBe(usdToBase(0.44)); // the 11% toll
+    expect(marked.realizedLossToday()).toBe(usdToBase(0.44));
+    db.close();
+  });
+
+  it("values unclaimed RUSH shares at the token-vault rate, and at nothing when unpriced", () => {
+    const { pnl, db } = setup();
+    const miner = {
+      unclaimed_usd_amount: new BN(0),
+      unclaimed_btc_shares: new BN(0),
+      unclaimed_token_shares: new BN(2_000_000_000), // 2e9 shares
+    } as unknown as Miner;
+    const satsVault = { btc_amount: new BN(0), btc_shares: new BN(0) } as unknown as SatsVault;
+    const tokenVault = {
+      token_amount: new BN("4000000000000"), // 4,000 RUSH (9 dec)
+      token_shares: new BN("8000000000000"), // 0.5 RUSH per share
+    } as unknown as TokenVault;
+    const v = pnl.unclaimedValue({ miner, satsVault, btcUsdPrice: 100_000, btcDecimals: 8, tokenVault, tokenUsdPrice: 50 });
+    expect(v.tokenShares).toBe(2_000_000_000n);
+    expect(v.tokenBaseUnits).toBe(1_000_000_000n); // 1 RUSH
+    expect(v.tokenUsd).toBe(usdToBase(50));
+    expect(v.totalUsd).toBe(usdToBase(50));
+    const unpriced = pnl.unclaimedValue({ miner, satsVault, btcUsdPrice: 100_000, btcDecimals: 8, tokenVault });
+    expect(unpriced.tokenUsd).toBe(0n);
+    db.close();
+  });
+});
+

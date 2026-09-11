@@ -28,6 +28,7 @@ import type {
   PublicAutomation,
   PublicDeployCreated,
   PublicDeploySettled,
+  Round,
   RoundRevealed,
 } from "./adapter/idl.js";
 import { decodeAccount } from "./adapter/idl.js";
@@ -53,6 +54,7 @@ import {
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
   satsVaultPda,
+  tokenVaultPda,
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
@@ -82,7 +84,7 @@ import { assembleTx, loadKeypair } from "./exec/tx.js";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
-import { reconcileRoundOutcome, reconcileWalletDrift } from "./strategy/reconcile.js";
+import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
 import { PriceFeed } from "./ingest/prices.js";
@@ -98,7 +100,7 @@ import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, type EvContext, type FeeModel } from "./strategy/ev.js";
-import { v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
+import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { STREAK_GRACE_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
 import { TokenFeed } from "./ingest/token-feed.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
@@ -253,6 +255,8 @@ export class Orchestrator {
       vaultPools: () => this.vaultPoolCache,
       fireOffsetSlots: () => this.currentFireOffset(),
       shareValueUsd: () => this.satsShareValueUsd(),
+      tokenShareValueUsd: () => this.tokenShareValueUsd(),
+      tokenFeedStatus: () => this.tokenFeed?.status() ?? null,
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -281,11 +285,36 @@ export class Orchestrator {
     const fees = feeModelFromConfig(state.satrushConfig);
     // Fee bps read LIVE from chain (they are updatable on-chain), so the daily
     // fee column tracks reality instead of a devnet-era constant.
+    // Share marking for the daily loss figure (V2 only): a win pays in BTC and
+    // RUSH vault shares, not USD, so an unmarked ledger books wins as losses.
+    // Prices are wired after the feeds exist (below); until then the marker
+    // values shares at the config fallbacks (token at 0).
+    const marks = { btcUsd: () => cfg.BTC_USD_ESTIMATE, tokenUsd: () => 0 };
+    const v2Econ =
+      cfg.GAME_VERSION === "v2"
+        ? v2EconomicsFromConfig(state.satrushConfig, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value })
+        : null;
+    const markShares = (satsShares: bigint, tokenShares: bigint): bigint => {
+      const exit = 1 - (state.satrushConfig?.vault_exit_fee_bps ?? 0) / 10_000;
+      let usd = 0;
+      const sv = state.satsVault;
+      if (sv && satsShares > 0n && Number(sv.btc_shares.toString()) > 0) {
+        const btc = (Number(satsShares) * Number(sv.btc_amount.toString())) / Number(sv.btc_shares.toString()) / 1e8;
+        usd += btc * marks.btcUsd() * exit;
+      }
+      const tv = state.tokenVault;
+      if (tv && tokenShares > 0n && Number(tv.token_shares.toString()) > 0) {
+        const rush = (Number(tokenShares) * Number(tv.token_amount.toString())) / Number(tv.token_shares.toString()) / 1e9;
+        usd += rush * marks.tokenUsd() * exit;
+      }
+      return BigInt(Math.floor(Math.max(0, usd) * 1e6));
+    };
     const pnl = new Pnl(db, {
       deployFeeBps: () =>
         state.satrushConfig
           ? feeModelFromConfig(state.satrushConfig).deployFeeBps
           : DEFAULT_DEPLOY_FEE_BPS,
+      ...(v2Econ ? { markShares } : {}),
     });
     const ixCtx: InstructionContext = {
       usdMint: state.satrushConfig.usd_mint,
@@ -300,8 +329,15 @@ export class Orchestrator {
         dailyLossCap: usdToBase(cfg.DAILY_LOSS_CAP_USD),
         minDeploy: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
         killSwitchFile: cfg.KILL_SWITCH_FILE,
+        // V2: the board can take at most the toll of a stake (1 − refund);
+        // V1: the whole stake. MAX_PER_ROUND stays on gross in both.
+        lossFractionAtRisk: v2Econ ? tollAtRiskFraction(v2Econ) : 1,
       },
       { realizedLossToday: () => pnl.realizedLossToday() },
+    );
+    logger.info(
+      { lossFractionAtRisk: bankroll.lossFractionAtRisk, sharesMarked: v2Econ !== null },
+      "daily loss cap: at-risk fraction per stake",
     );
 
     // Restart recovery: re-arm the one-deploy latch for every round already
@@ -365,6 +401,11 @@ export class Orchestrator {
     } else {
       logger.warn("GAME_VERSION=v1: pricing the pre-upgrade parimutuel — wrong against the live V2 program");
     }
+    marks.btcUsd = () => prices.btcUsd();
+    marks.tokenUsd = () => {
+      const st = tokenFeed?.status();
+      return st?.live ? st.tokenUsd : 0; // unpriced RUSH marks at nothing
+    };
 
     const jitoTip =
       tipAccounts.length > 0
@@ -395,7 +436,7 @@ export class Orchestrator {
       mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
     });
 
-    const watch = [satsVaultPda(programId), minerPda(payer.publicKey, programId)];
+    const watch = [satsVaultPda(programId), tokenVaultPda(programId), minerPda(payer.publicKey, programId)];
     const source: IngestSource = cfg.GRPC_URL
       ? new YellowstoneIngest({
           endpoint: cfg.GRPC_URL,
@@ -1028,6 +1069,21 @@ export class Orchestrator {
    * actually worth to us; gross would overstate a position we can only realise
    * by paying the exit fee.
    */
+  /**
+   * USD value of ONE RUSH-vault share, net of the exit fee — 0 unless the
+   * token feed is live, so an unpriced RUSH position never inflates a mark.
+   */
+  private tokenShareValueUsd(): number {
+    const vault = this.state.tokenVault;
+    const feed = this.tokenFeed?.status();
+    if (!vault || !feed?.live) return 0;
+    const shares = Number(vault.token_shares.toString());
+    const tokens = Number(vault.token_amount.toString());
+    if (!(shares > 0) || !(tokens > 0)) return 0;
+    const exitFeeBps = this.state.satrushConfig?.vault_exit_fee_bps ?? 0;
+    return (tokens / shares / 1e9) * feed.tokenUsd * (1 - exitFeeBps / 10_000);
+  }
+
   private satsShareValueUsd(): number {
     const vault = this.state.satsVault;
     if (!vault) return 0;
@@ -1387,6 +1443,7 @@ export class Orchestrator {
         maxPerRoundBase: this.effectiveMaxPerRoundBase(),
         dailyLossCapBase: this.bankroll.dailyLossCapBase,
         realizedLossTodayBase: this.bankroll.realizedLossToday(),
+        lossFractionAtRisk: this.bankroll.lossFractionAtRisk,
         priorityFeeMicroLamports: candidate.feeMicroLamports,
         maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
         tipLamports: candidate.tipLamports,
@@ -1537,6 +1594,10 @@ export class Orchestrator {
   private reconcileSettlement(data: PublicDeploySettled): void {
     const round = this.state.round(data.round_id);
     if (!round) return; // can't reconcile without the round account
+    if (this.cfg.GAME_VERSION === "v2") {
+      this.reconcileSettlementV2(data, round);
+      return;
+    }
     const res = reconcileRoundOutcome({
       ourStakeOnWinnerBase: BigInt(data.winning_stake.toString()),
       totalStakeOnWinnerBase: BigInt(round.deployed_usd_on_winning_tile_amount.toString()),
@@ -1550,6 +1611,45 @@ export class Orchestrator {
       this.engageKillSwitch(
         `reconcile tripwire round ${data.round_id}: ${res.reason} ` +
           `(modeled $${(Number(res.modeledUsdBase) / 1e6).toFixed(2)} vs realized $${(Number(data.won_usd_amount.toString()) / 1e6).toFixed(2)})`,
+      );
+    }
+  }
+
+  /**
+   * V2 tripwire: the refund rule is exact per deployment, so this checks the
+   * USD leg against 89% of our losing-tile gross, BTC shares only on a covered
+   * winner, and a RUSH leg on every minting round. Needs our deploy row for
+   * the gross and mask; without one there is nothing to check against.
+   */
+  private reconcileSettlementV2(data: PublicDeploySettled, round: Round): void {
+    const mine = this.db.queryOne<{ amount: string; mask: number }>(
+      `SELECT amount, mask FROM my_deploys
+       WHERE round_id = ? AND status IN ('fired','landed') ORDER BY id DESC LIMIT 1`,
+      data.round_id,
+    );
+    if (!mine) {
+      this.log.warn({ roundId: data.round_id }, "settled a round with no deploy row — reconcile skipped");
+      return;
+    }
+    const tiles = maskToTiles(mine.mask);
+    const winner = round.winning_tile;
+    const res = reconcileRoundOutcomeV2({
+      ourGrossBase: BigInt(mine.amount),
+      tilesCovered: tiles.length,
+      coveredWinner: winner !== null && tiles.includes(winner),
+      refundBps: V2_LOSING_TILE_REFUND_BPS.value,
+      realizedWonUsdBase: BigInt(data.won_usd_amount.toString()),
+      realizedWonShares: BigInt(data.won_shares_amount.toString()),
+      realizedWonTokenShares: BigInt(data.won_token_shares.toString()),
+      roundMintedToken: BigInt(round.minted_token_amount.toString()) > 0n,
+      strikeTriggered: BigInt(round.strike_bonus_usd.toString()) > 0n,
+      toleranceFrac: this.cfg.RECONCILE_TOLERANCE,
+      floorBase: usdToBase(0.01),
+    });
+    if (!res.ok) {
+      this.engageKillSwitch(
+        `reconcile tripwire (V2) round ${data.round_id}: ${res.reason} ` +
+          `(modeled $${(Number(res.modeledUsdBase) / 1e6).toFixed(4)} vs realized $${(Number(data.won_usd_amount.toString()) / 1e6).toFixed(4)})`,
       );
     }
   }
@@ -2169,8 +2269,10 @@ export class Orchestrator {
       satsVault: vault,
       btcUsdPrice: this.prices.btcUsd(),
       btcDecimals: 8, // cbBTC-style; read from mint before mainnet
+      tokenVault: this.state.tokenVault,
+      tokenUsdPrice: this.tokenShareValueUsd() > 0 ? (this.tokenFeed?.status().tokenUsd ?? 0) : 0,
     });
-    const sharesUsd = value.totalUsd - value.usd; // BTC-share value only
+    const sharesUsd = value.btcUsd; // BTC-share value only — claim_sats redeems these
     if (sharesUsd <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
     if (!this.cfg.SWEEP_ENABLED) {
       this.skipOnce("sweep_disabled", { unclaimedSharesUsd: sharesUsd.toString() });
@@ -2307,7 +2409,7 @@ export class Orchestrator {
             });
           }
         }
-        if (applied.kind === "Miner" || applied.kind === "SatsVault") {
+        if (applied.kind === "Miner" || applied.kind === "SatsVault" || applied.kind === "TokenVault") {
           void this.maybeSweep();
         }
       } catch (err) {
@@ -2355,6 +2457,8 @@ export class Orchestrator {
                 wonUsd: BigInt(data.won_usd_amount.toString()),
                 wonShares: BigInt(data.won_shares_amount.toString()),
                 hashrateEarned: BigInt(data.hashrate_earned.toString()),
+                wonTokenAmount: BigInt(data.won_token_amount.toString()),
+                wonTokenShares: BigInt(data.won_token_shares.toString()),
                 sig: event.signature,
               });
               this.pnl.refreshDaily();

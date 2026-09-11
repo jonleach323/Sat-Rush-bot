@@ -172,7 +172,12 @@ it is how deployment rent and winnings come back.
   that is not live prices the RUSH leg at the configured fallback, default 0),
   strike pot valued across USD/BTC/RUSH legs, streak grace in the presence
   credit, and preflight gates `game_version_matches_chain` / `token_feed_live`.
-  Not built: wallet-set wiring, share-marked P&L, the V2 reconcile tripwire.
+  Accounting/risk: settlements carry the RUSH leg, the daily-loss figure marks
+  the day's won shares (vault rate × live price × (1 − exit fee); unpriced RUSH
+  at 0) so V2 wins are not booked as losses, the tripwire checks the exact 89%
+  refund per deployment (`reconcileRoundOutcomeV2`), and the daily cap counts
+  the toll (`tollAtRiskFraction`, 11%) per stake while MAX_PER_ROUND stays on
+  gross. Not built: wallet-set wiring, the dry run against mainnet.
   Do not trade V2 live before those land (V2-STRATEGY.md § 6) — and on measured
   numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
 
