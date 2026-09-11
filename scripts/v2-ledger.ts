@@ -27,7 +27,7 @@ import { REWARD_MAX_STREAK, TILE_COUNT, hashrateReward } from "@satrush/client";
 import {
   AFFILIATE_RATE_BPS, RUSH_LAUNCH_PRICE_USD, RUSH_MINT_PER_USD_VOLUME, STRIKE_PAYOUT_FRACTION,
   TOKEN_SPLIT_EPOCH_BPS, TOKEN_SPLIT_LOSERS_BPS, TOKEN_SPLIT_STRIKE_BPS, TOKEN_SPLIT_WINNERS_BPS,
-  V2_DEPLOY_FEE_LAYER_BPS, VAULT_HASHRATE_PER_TICKET,
+  V2_BUYBACKS_FEE_BPS, V2_DEPLOY_FEE_LAYER_BPS, VAULT_HASHRATE_PER_TICKET,
 } from "../src/strategy/facts.js";
 import { evenSplit, simulateSplitTake } from "../src/strategy/wallet-split.js";
 
@@ -41,8 +41,9 @@ const pad = (s: string, w: number): string => s.padStart(w);
 const num = (v: unknown): number => Number(v as string);
 
 interface ApiConfig { strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number; protocol_fee_bps: number;
-  buybacks_fee_bps?: number; epoch_vault_iteration_duration: number }
-interface ApiBoard { round_duration: number }
+  buybacks_fee_bps?: number; vault_exit_fee_bps?: number; epoch_vault_iteration_duration: number }
+interface ApiBoard { round_duration: number; prices?: { token?: number | null } | null;
+  previous_round?: { total_gross_deployed_usd: string; minted_token_amount: string; total_deployed_usd?: string } | null }
 interface Iter { id: number; pool_combined_usd_amount: number | null }
 interface Participant { tickets: string }
 const get = async <T>(p: string): Promise<T> =>
@@ -52,13 +53,21 @@ const [conf, board, hist] = await Promise.all([get<ApiConfig>("config"), get<Api
 const closed = hist.find((h) => h.pool_combined_usd_amount !== null)!;
 const field = (await get<Participant[]>(`epoch/iterations/${closed.id}/participants?limit=500`)).map((p) => num(p.tickets)).filter((t) => t > 0);
 
-// Fee legs: the live (V1) split scaled to the announced layer until the V2 config is read.
+// Fee legs: live V2 config when the exit-fee field is served (the API omits
+// the buybacks leg, so it is the measured V2_BUYBACKS_FEE_BPS); else V1's split
+// scaled to the announced layer.
 const v1Layer = conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps + conf.protocol_fee_bps;
-const isV2 = conf.buybacks_fee_bps !== undefined;
+const isV2 = conf.vault_exit_fee_bps !== undefined;
 const scale = isV2 ? 1 : V2_DEPLOY_FEE_LAYER_BPS.value / v1Layer;
 const leg = { strike: conf.strike_fee_bps * scale, epoch: conf.epoch_fee_bps * scale, oneBtc: conf.one_btc_fee_bps * scale,
-  protocol: conf.protocol_fee_bps * scale, buybacks: conf.buybacks_fee_bps ?? 0 };
+  protocol: conf.protocol_fee_bps * scale, buybacks: isV2 ? (conf.buybacks_fee_bps ?? V2_BUYBACKS_FEE_BPS.value) : 0 };
 const layer = leg.strike + leg.epoch + leg.oneBtc + leg.protocol + leg.buybacks;
+// Live token yield: the previous round's mint at the oracle spot, else the stated launch numbers.
+const prev = board.previous_round;
+const spot = board.prices?.token ?? null;
+const liveYield = prev && spot && Number(prev.total_gross_deployed_usd) > 0
+  ? (Number(prev.minted_token_amount) / 1e9) * spot / (Number(prev.total_gross_deployed_usd) / 1e6)
+  : null;
 
 // Epoch recovery from the wallet-set simulation at this volume.
 const rounds = Math.round(conf.epoch_vault_iteration_duration / board.round_duration);
@@ -81,8 +90,8 @@ console.log(`══ V2 LEDGER per $1 of gross volume · $${USD_PER_ROUND}/round 
   `fee split ${isV2 ? "from the V2 config" : `scaled from V1's ${v1Layer} bps to ${layer.toFixed(0)}`} ══`);
 console.log(`  field: iteration ${closed.id}, ${field.length} wallets; our ticket share ${(100 * ticketShare).toFixed(1)}%\n`);
 
-function ledger(opts: { price: number; wallets: number; strikeRecovery: number; buybacksLeak: boolean }): { rows: [string, number, string][]; net: number } {
-  const y = RUSH_MINT_PER_USD_VOLUME.value * opts.price;
+function ledger(opts: { price: number; wallets: number; strikeRecovery: number; buybacksLeak: boolean; yieldOverride?: number }): { rows: [string, number, string][]; net: number } {
+  const y = opts.yieldOverride ?? RUSH_MINT_PER_USD_VOLUME.value * opts.price;
   const rec = recovery(opts.wallets);
   const rows: [string, number, string][] = [
     ["USD/BTC legs back (refunds, own stake, sats slice)", 1 - layer / 1e4, "exact at a uniform board"],
@@ -100,26 +109,32 @@ function ledger(opts: { price: number; wallets: number; strikeRecovery: number; 
   return { rows, net };
 }
 
-const base = ledger({ price: RUSH_LAUNCH_PRICE_USD.value, wallets: WALLETS, strikeRecovery: STRIKE_PAYOUT_FRACTION.value, buybacksLeak: true });
+const base = liveYield !== null
+  ? ledger({ price: spot as number, wallets: WALLETS, strikeRecovery: STRIKE_PAYOUT_FRACTION.value, buybacksLeak: true, yieldOverride: liveYield })
+  : ledger({ price: RUSH_LAUNCH_PRICE_USD.value, wallets: WALLETS, strikeRecovery: STRIKE_PAYOUT_FRACTION.value, buybacksLeak: true });
+console.log(liveYield !== null
+  ? `  token leg: LIVE — previous round minted at spot $${(spot as number).toFixed(2)} = ${(100 * liveYield).toFixed(3)}% of gross (stated launch: 2.00%)\n`
+  : `  token leg: STATED launch numbers (1 RUSH per $500 at $${RUSH_LAUNCH_PRICE_USD.value})\n`);
 console.log("  leg                                                    per $      note");
 for (const [name, v, note] of base.rows) console.log(`  ${name.padEnd(52)} ${pad(pct(v), 8)}   ${note}`);
 console.log(`  ${"".padEnd(52)} ${"".padEnd(8)}`);
 console.log(`  ${"NET, expectation, before the vault carry".padEnd(52)} ${pad(pct(base.net), 8)}`);
 
-console.log(`\n══ SENSITIVITY (net per $, expectation) ══`);
-console.log("  RUSH price     1 wallet, strike 0.70   21 wallets, strike 0.70   21 wallets, strike 0.95");
-for (const price of [0, 5, 7, 10, 15, 20]) {
-  const a = ledger({ price, wallets: 1, strikeRecovery: 0.70, buybacksLeak: true }).net;
-  const b = ledger({ price, wallets: 21, strikeRecovery: 0.70, buybacksLeak: true }).net;
-  const c = ledger({ price, wallets: 21, strikeRecovery: 0.95, buybacksLeak: true }).net;
-  console.log(`  ${pad(`$${price}`, 10)}     ${pad(pct(a), 20)}   ${pad(pct(b), 22)}   ${pad(pct(c), 22)}`);
+console.log(`\n══ SENSITIVITY (net per $, expectation) — by token yield, since the mint is not keyed to spot ══`);
+console.log("  token yield    1 wallet, strike 0.70   21 wallets, strike 0.70   21 wallets, strike 0.95");
+for (const y of [0, 0.005, 0.01, liveYield ?? 0.0137, 0.02, 0.03]) {
+  const a = ledger({ price: 0, wallets: 1, strikeRecovery: 0.70, buybacksLeak: true, yieldOverride: y }).net;
+  const b = ledger({ price: 0, wallets: 21, strikeRecovery: 0.70, buybacksLeak: true, yieldOverride: y }).net;
+  const c = ledger({ price: 0, wallets: 21, strikeRecovery: 0.95, buybacksLeak: true, yieldOverride: y }).net;
+  console.log(`  ${pad(pct(y, 2), 10)}     ${pad(pct(a), 20)}   ${pad(pct(b), 22)}   ${pad(pct(c), 22)}` + (y === liveYield ? "   ← live" : ""));
 }
 const be = (wallets: number, strike: number): number => {
-  let lo = 0, hi = 200;
-  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (ledger({ price: mid, wallets, strikeRecovery: strike, buybacksLeak: true }).net < 0) lo = mid; else hi = mid; }
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (ledger({ price: 0, wallets, strikeRecovery: strike, buybacksLeak: true, yieldOverride: mid }).net < 0) lo = mid; else hi = mid; }
   return (lo + hi) / 2;
 };
-console.log(`\n  break-even RUSH price: 1 wallet $${be(1, 0.7).toFixed(2)} · 21 wallets $${be(21, 0.7).toFixed(2)} (strike 0.70) · $${be(21, 0.95).toFixed(2)} (strike 0.95)`);
+console.log(`\n  break-even token yield: 1 wallet ${pct(be(1, 0.7), 2)} · 21 wallets ${pct(be(21, 0.7), 2)} (strike 0.70) · ${pct(be(21, 0.95), 2)} (strike 0.95)`);
+console.log(`  live yield ${liveYield === null ? "n/a" : pct(liveYield, 2)}; if the mint targets 2% at a lagging reference price, the yield converges to 2% as that price settles.`);
 console.log(`\n  Left out, each can only ADD: the vault carry (claimers' 10% exit fees accrue to holders; the API`);
 console.log(`  reports a sats-vault APR but our share of it is unmeasured), the strike buffer's eventual return,`);
 console.log(`  and any board edge. Left out, each can only SUBTRACT: a buybacks leg carved from the 6%, Jito tips`);

@@ -265,9 +265,14 @@ export const STREAK_GRACE_ROUNDS = fact(SDK_STREAK_GRACE_ROUNDS, "rounds", {
  * 500 bps of gross is what the winning tile's BTC pool is funded with.
  */
 export const V2_LOSING_TILE_REFUND_BPS = fact(8900, "bps of gross", {
-  kind: "stated",
-  by: "@satrush/client@0.1.15, PublicDeploySettled.wonUsdAmount doc",
-  at: "2026-09-10",
+  kind: "measured",
+  source: "V2 mainnet rounds 55431/55435/55436/55437: post-swap USD = 0.89·(gross − winning-tile gross) "
+    + "and swap = 0.05·gross + 0.89·winning-tile gross, both to ±$0.00002; per-deployment usd_earned "
+    + "= 0.89 × gross on losing tiles (E-v2-live)",
+  at: "2026-09-11",
+  n: 4,
+  halfLifeDays: null,
+  recheck: "pnpm v2-strategy (live section)",
 });
 
 /**
@@ -336,6 +341,43 @@ export const RUSH_MINT_PER_USD_VOLUME = fact(1 / 500, "RUSH per USD of gross vol
 });
 
 /**
+ * What the mint program actually issues, valued at the oracle spot: minted ×
+ * price / gross, measured on live V2 rounds. 1.37% of volume, NOT the 2% the
+ * stated 1-per-$500-at-$10 implies. Tokens per dollar (0.279 per $1,000, i.e.
+ * 1 RUSH per ~$3,600) rise smoothly by ~0.09% per round while spot moves both
+ * ways, so the mint is not keyed to spot; 2% ÷ rate implies a reference price
+ * of ~$72, near the day's high — consistent with a 2%-of-volume target priced
+ * at a lagging average. HYPOTHESIS, not a fact: the mint program has no
+ * public IDL. Re-measure every run; a one-day half-life because the
+ * reference price and the owner's "complex algo" both move it.
+ */
+export const RUSH_MINT_USD_YIELD = fact(0.0137, "USD of RUSH per USD of gross volume", {
+  kind: "measured",
+  source: "minted_token_amount × prices.token / total_gross_deployed_usd over V2 rounds 55440–55446 (spot at read)",
+  at: "2026-09-11",
+  n: 6,
+  stderr: 0.00005,
+  halfLifeDays: 1,
+  recheck: "pnpm v2-strategy",
+});
+
+/**
+ * The buybacks fee leg, the part of the 6% layer the API config does not
+ * expose. Measured: the treasury received 150 bps against a 100 bps protocol
+ * leg in the rotate of round 55435, and round 55437's ledger lists
+ * buybacks_fee_usd = 50 bps of gross exactly. Half buys and burns RUSH, half
+ * funds staking rewards (BUYBACKS_TO_TOKEN_BPS / _TO_STAKING_BPS, unexported).
+ */
+export const V2_BUYBACKS_FEE_BPS = fact(50, "bps of gross", {
+  kind: "measured",
+  source: "round 55437 buybacks_fee_usd / total_gross_deployed_usd; rotate tx 3N5JbUniM9aC… treasury delta",
+  at: "2026-09-11",
+  n: 2,
+  halfLifeDays: null,
+  recheck: "curl api.satrush.io/api/v1/rounds/<id> → buybacks_fee_usd",
+});
+
+/**
  * Affiliate share of the protocol fee leg on referred plays, bps. The
  * announcement says "10% of Sat Rush's protocol gross profit"; the SDK's
  * `Affiliate.rateBps` is admin-set per affiliate (`set_affiliate_rate`, max
@@ -398,6 +440,8 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   AFFILIATE_RATE_BPS,
   RUSH_LAUNCH_PRICE_USD,
   RUSH_MINT_PER_USD_VOLUME,
+  RUSH_MINT_USD_YIELD,
+  V2_BUYBACKS_FEE_BPS,
   EPOCH_WINNER_SLOTS,
 });
 

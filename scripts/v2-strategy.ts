@@ -41,6 +41,7 @@ import {
   RUSH_LAUNCH_PRICE_USD,
   RUSH_MINT_PER_USD_VOLUME,
   STREAK_GRACE_ROUNDS,
+  V2_BUYBACKS_FEE_BPS,
   TOKEN_SPLIT_EPOCH_BPS,
   TOKEN_SPLIT_LOSERS_BPS,
   TOKEN_SPLIT_STRIKE_BPS,
@@ -80,6 +81,8 @@ interface ApiConfig {
 }
 interface ApiBoard {
   round_id: number; round_duration: number;
+  previous_round?: { id: number; total_gross_deployed_usd: string; minted_token_amount: string;
+    deployed_usd_amount: string; deployed_usd_on_winning_tile_amount: string; miners_count: number; winners_count: number | null } | null;
   prices?: { btc?: number; token?: number | null; token_share?: number | null } | null;
   token_vault?: { apr?: number | null; token_amount?: string; token_shares?: string } | null;
   sats_vault?: { apr?: number | null } | null;
@@ -107,8 +110,7 @@ const [conf, board, rounds] = await Promise.all([
   get<ApiRound[]>(`rounds?limit=${SAMPLE}`),
 ]);
 const finished = (rounds ?? []).filter((r) => r.state === "finished" || r.state === "settled");
-const v2Live = finished.some((r) => r.minted_token_amount != null && Number(r.minted_token_amount) > 0)
-  || (conf?.vault_exit_fee_bps !== undefined && conf.token_mint != null);
+const v2Live = conf?.vault_exit_fee_bps !== undefined;
 const regime = conf === null ? "OFFLINE" : v2Live ? "V2 API" : "V1 API";
 
 // ── the economics in force ──────────────────────────────────────────────────
@@ -118,7 +120,7 @@ if (conf && v2Live) {
   econ = v2EconomicsFromConfig({
     strike_fee_bps: conf.strike_fee_bps, epoch_fee_bps: conf.epoch_fee_bps,
     one_btc_fee_bps: conf.one_btc_fee_bps, protocol_fee_bps: conf.protocol_fee_bps,
-    buybacks_fee_bps: conf.buybacks_fee_bps, vault_exit_fee_bps: conf.vault_exit_fee_bps,
+    buybacks_fee_bps: conf.buybacks_fee_bps ?? V2_BUYBACKS_FEE_BPS.value, vault_exit_fee_bps: conf.vault_exit_fee_bps,
   });
   econSource = "DERIVED from the live SatrushConfig";
 }
@@ -324,6 +326,20 @@ if (!conf || !board) {
 } else {
   const price = board.prices?.token ?? null;
   const priced = finished.filter((rd) => rd.minted_token_amount != null && Number(rd.total_gross_deployed_usd ?? 0) > 0);
+  const pr = board.previous_round;
+  if (pr && Number(pr.total_gross_deployed_usd) > 0) {
+    const g = Number(pr.total_gross_deployed_usd) / 1e6;
+    const minted = Number(pr.minted_token_amount) / 10 ** RUSH_DECIMALS;
+    const wNet = Number(pr.deployed_usd_on_winning_tile_amount) / 1e6;
+    const post = Number(pr.deployed_usd_amount) / 1e6;
+    const swapPred = s * g + r * (wNet / (1 - f));
+    const swapAct = g * (1 - f) - post;
+    console.log(`  previous round ${pr.id}: ${usd(g)} gross · ${pr.miners_count} miners, ${pr.winners_count ?? "?"} paid · minted ${minted.toFixed(6)} RUSH ` +
+      `= ${(1000 * minted / g).toFixed(4)} per $1,000 (stated ${(1000 * RUSH_MINT_PER_USD_VOLUME.value).toFixed(4)})` +
+      (price == null ? "" : ` · at $${price.toFixed(2)} = ${pct(minted * price / g, 3)} of gross`));
+    console.log(`  swap check: actual ${usd(swapAct)} vs 0.05·V + 0.89·W_win ${usd(swapPred)} (Δ ${(swapAct - swapPred).toFixed(4)}) — ` +
+      `${Math.abs(swapAct - swapPred) < 0.01 ? "READING A HOLDS" : "MISMATCH — stop and re-derive"}`);
+  }
   console.log(`  V2 live (round ${board.round_id}). RUSH oracle price: ${price == null ? "NOT LOADED — token credited at $0" : `$${price}`}` +
     ` · token vault APR ${board.token_vault?.apr == null ? "n/a" : `${board.token_vault.apr.toFixed(1)}%`}` +
     ` · sats vault APR ${board.sats_vault?.apr == null ? "n/a" : `${board.sats_vault.apr.toFixed(1)}%`}`);

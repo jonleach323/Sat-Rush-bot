@@ -1159,3 +1159,110 @@ Everything above came from reading a package that had been on npm for
 fifteen hours. The alternative was modelling three readings of a marketing
 paragraph. The rule from E-sdk held again: the SDK before the measurement,
 the measurement before the model.
+
+---
+
+## E-v2-live: V2 is live — every leg of the model verified on mainnet settlements (2026-09-11)
+
+The upgrade landed on 2026-09-10 (RUSH pool created 04:44Z; V2 config live by
+round ~55400). No docs exist outside the app: `docs.satrush.io` does not
+resolve, `satrush.io` is a SPA whose "How it works" is a client route, the
+API serves no OpenAPI, and none of the three programs publishes an on-chain
+IDL. Everything below is measured off the API and the chain.
+
+### Programs and accounts
+
+```
+  game      satRushGBRY2vgapeTAkoxz26vL2cYqyPi6CnBj7Tco   upgraded in place, accounts migrated
+  mint      sAtmiNt6gsZ9GmaABzuUfTufpBtbQCuTiQN8yGJzeH6   CPI'd by rotate_round; is handed the Orca pool
+  rng       SatRngpc6hC9uMXqS4dRk4trqhySktoxMXYSSRbjemd   rotors ['rotor','round'|'epoch'|'btc']
+  RUSH      SATqS9DYpLQsM2z51P4QCoqJRHa5wboV4qjJerJRUSH   9 decimals; mint authority PDA 6jH2zPwY…
+  staking   treasury BdJVbMKd… — stake RUSH (9 dec), earn cbBTC
+  token vault BfwR6ray…   sats vault 5ATZbUaB…   Orca pool AFdizLL2…
+```
+
+The deploy instructions ARM the round rotor by CPI and expect four remaining
+accounts `[rotor, rng config, rng program, SlotHashes]` (SDK
+`getRngRemainingAccounts`); the adapter's deploy builder must append them.
+
+### Config (live) and the fee legs, to the cent
+
+```
+  strike 208 · epoch 194 · one_btc 48 · protocol 100 · buybacks 50 (not in the API; measured)  = 600 bps
+  vault_exit_fee_bps 1000 · min deploy $1 · rounds 200 slots (~80 s, 1,080/day) · epoch 864,000 slots (3 days)
+  round 55437, gross $580.86: strike 12.08 / epoch 11.27 / 1-BTC 2.79 / protocol 5.75 + affiliate 0.05 / buybacks 2.90
+  rotate tx 3N5JbUniM9aC…: board USDC −73.85 = swap 51.83 + epoch 10.90 + treasury 8.43 (150 bps) + 1-BTC 2.70
+```
+
+### The board model (reading A), exact on four rounds
+
+```
+  round   gross    post-swap USD   swap actual   0.05·V + 0.89·W_win   Δ
+  55431   582.86        494.33         53.557          53.557        0.0000
+  55435   561.86        476.32         51.827          51.827       +0.000012
+  55436   581.86        491.24         55.715          55.715       +0.000012
+  55437   580.86        493.44         52.568          52.568       +0.000014
+  refund: post-swap USD = 0.89·(gross − W_win) on every round, same precision
+```
+
+Per deployment (round 55437, a $64.38 blanket automation at the streak
+cap): usd_earned 54.57 = 0.89 × 64.38 × 20/21; BTC $6.09 vs predicted 6.10;
+tokens 0.014744 RUSH = 64% × mint × 0.11599 (winning-tile stake share)
++ 16% × mint × 0.11060 (losing-stake share) = 0.014744 — the RUSH legs are
+pro-rata by stake, exactly; hashrate 6,502 raw = $64.38 gross × (100 + 21/21)
+— on GROSS dollars, at the cap. `pnpm v2-strategy` re-checks the swap on
+every run and says MISMATCH if it ever moves.
+
+### The mint: 1 RUSH per ~$3,600, not per $500 — and it is not keyed to spot
+
+```
+  rounds 55394–55433 (n=40):  0.2696 ± 0.0033 RUSH per $1,000 gross → 1 per $3,709
+  rounds 55440–55446 (n=6), with spot at read:
+    RUSH/$1,000  0.2772 → 0.2787   smooth, +0.09%/round, monotonic
+    spot         $49.07 … $50.16   both directions
+    USD yield    1.364% … 1.397%   jitters with spot
+  → tokens/$ is a smooth function of time, not of spot. 2% ÷ rate = $71.6 implied
+    reference price, near the day's high ($75 printed on a side pool).
+```
+
+Hypothesis, stated as such: the mint targets ~2% of volume in USD at a
+lagging reference price (the Orca pool is passed to the mint program; a
+TWAP would do this). If so the yield converges to 2% as the reference falls
+to spot; if the rate simply drifts, it does not. `RUSH_MINT_USD_YIELD` is a
+one-day-half-life fact; the script re-measures it. The mint config account
+(3JNuLyfQ…, 272 bytes) holds a 52,500 RUSH figure the DEX reports as total
+supply; undecodable without the IDL.
+
+### Market and supply
+
+```
+  RUSH $49.9 (oracle) · Orca $814k liquidity, $5.66M 24h volume, 9,337 buys / 5,857 sells
+  supply 44,763 RUSH: 23.4% one wallet (AEeAcZse…), 15.3% Orca pool, 13.2% token vault,
+  13.1% one wallet (Hk4ZhjM1…), 5.1% staking (2,267 RUSH, 89 stakers, 0.0042 BTC paid so far)
+  token vault: 5,898 RUSH; the $100k airdrop was 10,000 at $10 → ~4,100 already claimed,
+  their 10% left behind for holders. Our miner: 11.21e12 token shares ≈ 13.7 RUSH ≈ $675,
+  unrealised +0.83 RUSH already (the carry), streak 1, last play round 50491.
+```
+
+### The verdict, on measured numbers (`pnpm v2-ledger 1000 21`)
+
+```
+  USD/BTC legs back 94.00% · RUSH now 1.10% · RUSH later 0.27% · strike ×0.70 1.46%
+  epoch ×87% (21 wallets) 1.69% · 1-BTC ×92% 0.44% · affiliate 0.07% · fees −0.02%
+  NET −1.00% per dollar, expectation, before the vault carry (−0.48% if the strike buffer returns)
+  break-even token yield: 2.38% (21 wallets) · 4.20% (one wallet); live 1.38%
+```
+
+Not +EV as the program pays today, even with the wallet set. It reaches
+break-even only if the mint converges to 2% AND the strike buffer returns,
+or if the vault carry — real, already visible on our own shares — is worth
+more than a point of volume. The field (82–87 miners, 76–84 paid per round)
+still blankets, so the contested pool is untouched.
+
+### Method note
+
+The exact swap match on the first round was the moment the model stopped
+being a reading of a press release. Four rounds and one per-deployment ledger
+later every constant in ev-v2.ts is `measured`; the one that is not — the
+mint rule — is the one that decides the sign, and it lives in a program with
+no IDL. That is the question for the owner.
