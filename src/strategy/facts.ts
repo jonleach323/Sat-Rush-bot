@@ -342,14 +342,15 @@ export const RUSH_MINT_PER_USD_VOLUME = fact(1 / 500, "RUSH per USD of gross vol
 
 /**
  * What the mint program actually issues, valued at the oracle spot: minted ×
- * price / gross, measured on live V2 rounds. 1.37% of volume, NOT the 2% the
- * stated 1-per-$500-at-$10 implies. Tokens per dollar (0.279 per $1,000, i.e.
- * 1 RUSH per ~$3,600) rise smoothly by ~0.09% per round while spot moves both
- * ways, so the mint is not keyed to spot; 2% ÷ rate implies a reference price
- * of ~$72, near the day's high — consistent with a 2%-of-volume target priced
- * at a lagging average. HYPOTHESIS, not a fact: the mint program has no
- * public IDL. Re-measure every run; a one-day half-life because the
- * reference price and the owner's "complex algo" both move it.
+ * price / gross, measured on live V2 rounds. 1.37% of volume. Tokens per
+ * dollar were 0.279 per $1,000 (1 RUSH per ~$3,600) a day after launch,
+ * against the owner's "initially 1 token per $500" — a 7x fall in a day. The
+ * owner also stated that an algorithm sets the volume-to-RUSH ratio and that
+ * it DECREASES over time; the program has no public IDL, so the schedule's
+ * shape is unknown. Within an hour the rate drifted UP ~0.09% per round while
+ * spot moved both ways, so whatever it is, it is not keyed to spot and it is
+ * not monotone at the round scale. Treat the yield as falling until a day of
+ * readings says otherwise: a one-day half-life, re-measured every run.
  */
 export const RUSH_MINT_USD_YIELD = fact(0.0137, "USD of RUSH per USD of gross volume", {
   kind: "measured",

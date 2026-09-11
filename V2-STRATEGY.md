@@ -11,11 +11,13 @@ per-deployment ledger; the mint measured, not stated). Numbers:
 ~$3,600 of volume (0.279 per $1,000), a 1.38% yield at the $49 oracle,
 against the 2% the stated "1 per $500 at $10" implied. With 21 wallets the
 expectation is −1.00% per dollar of volume before the vault carry; break-even
-needs a 2.38% yield. The mint is not keyed to spot: tokens per dollar rise
-~0.09% per round while spot moves both ways, consistent with a 2%-of-volume
-target at a lagging reference price (~$72 implied). If that is the rule the
-yield converges to 2% and the position approaches break-even; if not, it
-does not. That is the open question for the owner, and the only one left.
+needs a 2.38% yield. The owner says an algorithm sets the volume-to-RUSH
+ratio and that it decreases over time; 1 per $500 at launch to 1 per $3,600
+a day later is that decrease. The rate is not keyed to spot (it drifted up
+~0.09% per round over an hour while spot moved both ways), so the yield is
+rate × price with the rate on a falling schedule of unknown shape. Nothing in
+that points toward the 2.38% break-even; it points away from it. The launch
+window was the best the token leg will ever be, and it has mostly passed.
 
 ## 0. The answer
 
