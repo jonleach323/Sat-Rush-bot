@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import type { SatrushConfig } from "../adapter/idl.js";
+import { TokenFeed } from "../ingest/token-feed.js";
 import { decodeAccount, PROGRAM_ADDRESS } from "../adapter/idl.js";
 import { satrushConfigPda } from "../adapter/pdas.js";
 import type { Config } from "../config.js";
@@ -149,6 +150,33 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
         ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of the mainnet V2 baseline`
         : `ECONOMICS CHANGED — EV model is stale: ${econ.deviations.join("; ")}`,
     );
+    // 5b. the model version must match the program on chain. A V2 config
+    // carries a real token_mint; V1's layout decodes that slot as zeros.
+    const chainIsV2 = !satrushConfig.token_mint.equals(PublicKey.default);
+    gate(
+      "game_version_matches_chain",
+      (cfg.GAME_VERSION === "v2") === chainIsV2,
+      `GAME_VERSION=${cfg.GAME_VERSION}, on-chain config is ${chainIsV2 ? "V2 (token_mint set)" : "V1 (no token_mint)"}`,
+    );
+    // 5c. the RUSH leg is priced from the public API; without it the token
+    // yield is the configured fallback (default 0 — conservative, so not fatal).
+    if (cfg.GAME_VERSION === "v2") {
+      const feed = new TokenFeed({
+        apiUrl: cfg.SATRUSH_API_URL,
+        fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
+        pollMs: 0,
+      });
+      await feed.refresh();
+      const st = feed.status();
+      gate(
+        "token_feed_live",
+        st.live,
+        st.live
+          ? `RUSH $${st.tokenUsd.toFixed(2)} × ${(st.mintRushPerUsd * 1000).toFixed(3)} RUSH/$1k over ${st.mintSampleRounds} rounds → yield ${(st.yieldPerVolume * 100).toFixed(2)}% of volume`
+          : `API ${cfg.SATRUSH_API_URL} not answering — token leg priced at the fallback (${(st.yieldPerVolume * 100).toFixed(2)}%)`,
+        false,
+      );
+    }
     const minDeploy = BigInt(satrushConfig.min_deploy_usd_amount.toString());
     gate(
       "min_deploy_vs_caps",

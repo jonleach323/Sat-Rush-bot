@@ -209,11 +209,13 @@ observable — and each is a place the bot would trade on wrong numbers:
   SDK codecs (`pnpm idl:gen`) and verified on mainnet (`pnpm idl:verify`,
   FINDINGS.md § E-v2-idl); builders carry `is_grubstake_funded`, the
   affiliate slot, the rotor and token-leg remaining accounts.
-- **Orchestrator wiring** (`GAME_VERSION=v1|v2`): `evContext()` → `v2Model`
-  with `mintedTokenValueBase` from a mint estimate × `prices.token`;
-  `candidates.ts` builds fallbacks from an `EvContext` spread and needs a
-  model factory; `presenceCreditBase()` passes `roundId`, `lastMinedRoundId`,
-  `graceRounds`; the vault engine passes the flat curve.
+- ~~**Orchestrator wiring**~~ DONE 2026-09-11 (`GAME_VERSION=v2` default):
+  `evSource()` → `v2Model` with `tokenYieldPerVolume` from the token feed
+  (`src/ingest/token-feed.ts`: API `prices.token` × RUSH-per-$ over the last
+  settled rounds, fail-closed to the configured fallback, default 0);
+  `candidates.ts` takes a model factory for its excluded-tile variants;
+  the presence credit carries the 2-round grace; the strike pot values the
+  BTC and RUSH legs. Still open: the vault engine's flat curve.
 - **Accounting**: `settlements` needs `won_token_shares`; `pnl.ts` must mark
   shares; `reconcile.ts` must model refunds + sats slice; `bankroll.ts` and
   `guards.ts` need the loss fraction.

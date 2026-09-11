@@ -56,11 +56,14 @@ export interface FeeModel {
 /** Fee legs read from the on-chain SatrushConfig. */
 export function feeModelFromConfig(config: SatrushConfig): FeeModel {
   return {
+    // V2 added buybacks_fee_bps to the deploy layer (50 bps live); a V1
+    // config decodes it as 0, so the sum is right for both.
     deployFeeBps:
       config.strike_fee_bps +
       config.epoch_fee_bps +
       config.one_btc_fee_bps +
-      config.protocol_fee_bps,
+      config.protocol_fee_bps +
+      (config.buybacks_fee_bps ?? 0),
     satsVaultRoundBps: config.sats_vault_round_fee_bps,
     satsVaultClaimBps: config.vault_exit_fee_bps,
   };

@@ -7,6 +7,7 @@ import {
 } from "../src/exec/candidates.js";
 import { FeeEstimator } from "../src/exec/fees.js";
 import { TILES_COUNT, type EvContext } from "../src/strategy/ev.js";
+import { v2Model } from "../src/strategy/ev-v2.js";
 import type { SelectorConfig } from "../src/strategy/selector.js";
 import { usdToBase } from "../src/units.js";
 import { seededRng } from "./helpers.js";
@@ -19,6 +20,20 @@ function chaseCtx(): EvContext {
   return { predictedStakes: stakes, fees: FEES, multiplier: 1, semantics: "raw" };
 }
 
+/** The same chase board through the V2 economics, as a model factory. */
+function chaseV2Source() {
+  const stakes = chaseCtx().predictedStakes;
+  return {
+    predictedStakes: stakes,
+    model: (predictedStakes: bigint[]) =>
+      v2Model({
+        predictedStakes,
+        econ: { feeLayerBps: 600, losingRefundBps: 8900, vaultExitFeeBps: 1000 },
+        mintedTokenValueBase: 0,
+        tokenYieldPerVolume: 0.015,
+      }),
+  };
+}
 function selCfg(): SelectorConfig {
   return {
     strategy: "water_filling",
@@ -219,5 +234,29 @@ describe("CandidateSet", () => {
     await set.refresh(2, chaseCtx(), selCfg());
     expect(set.current(1)).toEqual([]);
     expect(set.current(2).length).toBeGreaterThan(0);
+  });
+});
+
+describe("computeCandidateSelections with a V2 model factory", () => {
+  it("rebuilds the model per excluded-tile variant and yields distinct masks", () => {
+    const src = chaseV2Source();
+    const built: bigint[][] = [];
+    const spied = {
+      predictedStakes: src.predictedStakes,
+      model: (stakes: bigint[]) => {
+        built.push(stakes);
+        return src.model(stakes);
+      },
+    };
+    const picks = computeCandidateSelections(spied, selCfg());
+    expect(picks.length).toBeGreaterThan(0);
+    expect(new Set(picks.map((p) => p.mask)).size).toBe(picks.length);
+    // first build sees the raw prediction; later ones carry the exclusion sentinel
+    expect(built[0]).toEqual(src.predictedStakes);
+    if (built.length > 1) expect(built[1]!.some((s) => s >= 10n ** 15n)).toBe(true);
+    // the V2 chase and the V1 chase agree on the emptiest tiles
+    const v1 = computeCandidateSelections(chaseCtx(), selCfg());
+    expect(picks[0]!.tiles.every((t) => t < 3)).toBe(true);
+    expect(v1[0]!.tiles.every((t) => t < 3)).toBe(true);
   });
 });

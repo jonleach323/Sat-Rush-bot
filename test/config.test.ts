@@ -125,3 +125,20 @@ describe("redacted summary", () => {
     expect(text).toContain("https://rpc.example.com");
   });
 });
+
+describe("V2 game version + token feed knobs", () => {
+  it("defaults to the live V2 economics with an unpriced token leg", () => {
+    const cfg = loadConfig({});
+    expect(cfg.GAME_VERSION).toBe("v2");
+    expect(cfg.SATRUSH_API_URL).toBe("https://api.satrush.io/api/v1");
+    expect(cfg.RUSH_USD_ESTIMATE).toBe(0);
+    expect(cfg.RUSH_MINT_PER_USD_ESTIMATE).toBe(0);
+    expect(cfg.TOKEN_FEED_MAX_AGE_MS).toBeGreaterThan(cfg.TOKEN_FEED_POLL_MS);
+  });
+
+  it("accepts v1 for replay and rejects anything else", () => {
+    expect(loadConfig({ GAME_VERSION: "v1" }).GAME_VERSION).toBe("v1");
+    expect(() => loadConfig({ GAME_VERSION: "v3" })).toThrow();
+    expect(() => loadConfig({ RUSH_MINT_PER_USD_ESTIMATE: "2" })).toThrow();
+  });
+});

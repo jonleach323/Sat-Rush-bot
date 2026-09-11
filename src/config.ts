@@ -98,6 +98,41 @@ const schema = z
       emptyToUndef,
       z.enum(["raw", "effective"]).default("raw"),
     ),
+    /**
+     * Which program economics the selector runs on. V2 (live on mainnet since
+     * 2026-09-11) prices the 89% losing-tile refund, the 5% sats leg and the
+     * RUSH mint (src/strategy/ev-v2.ts); v1 is the pre-upgrade parimutuel and
+     * is WRONG against the live program — keep it for replaying V1 history.
+     */
+    GAME_VERSION: z.preprocess(emptyToUndef, z.enum(["v1", "v2"]).default("v2")),
+    /** Public API root (no trailing slash) — RUSH oracle price + mint rate. */
+    SATRUSH_API_URL: z.preprocess(
+      emptyToUndef,
+      z.string().url().default("https://api.satrush.io/api/v1"),
+    ),
+    TOKEN_FEED_POLL_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(0).default(30_000),
+    ),
+    /** Older than this and the token leg is priced at the fallback, not the held quote. */
+    TOKEN_FEED_MAX_AGE_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().positive().default(300_000),
+    ),
+    /**
+     * Fallbacks when the API has never answered: RUSH/USD and RUSH minted per
+     * USD of gross volume. Both default 0 — a token leg nobody can price is
+     * worth nothing to the EV, which is the honest prior. Never set these to
+     * the launch numbers; the live rate is ~7× below the stated 1 per $500.
+     */
+    RUSH_USD_ESTIMATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().min(0).default(0),
+    ),
+    RUSH_MINT_PER_USD_ESTIMATE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().finite().min(0).max(1).default(0),
+    ),
     STRATEGY: z.preprocess(
       emptyToUndef,
       z.enum(["water_filling", "k_emptiest"]).default("water_filling"),
@@ -758,6 +793,9 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     jitoTipLamports: `${cfg.JITO_TIP_LAMPORTS}..${cfg.JITO_TIP_MAX_LAMPORTS} (EV frac ${cfg.JITO_TIP_EV_FRACTION})`,
     solUsdEstimate: cfg.SOL_USD_ESTIMATE,
     stakeSemantics: cfg.STAKE_SEMANTICS,
+    gameVersion: cfg.GAME_VERSION,
+    satrushApiUrl: cfg.SATRUSH_API_URL,
+    tokenFeed: `poll ${cfg.TOKEN_FEED_POLL_MS}ms, max age ${cfg.TOKEN_FEED_MAX_AGE_MS}ms, fallback $${cfg.RUSH_USD_ESTIMATE} × ${cfg.RUSH_MINT_PER_USD_ESTIMATE} RUSH/$`,
     strategy: cfg.STRATEGY,
     strikeSizeBoost: cfg.STRIKE_SIZE_BOOST,
     strikeBoostThresholdUsd: cfg.STRIKE_BOOST_THRESHOLD_USD,

@@ -18,7 +18,7 @@ import {
   buildDeployPublic,
   type InstructionContext,
 } from "../adapter/instructions.js";
-import { TILES_COUNT, type EvContext } from "../strategy/ev.js";
+import { TILES_COUNT, type EvContext, type EvModel } from "../strategy/ev.js";
 import {
   selectAllocation,
   type Selection,
@@ -68,20 +68,38 @@ const BLOCKHASH_MAX_AGE_MS = 15_000;
 const EXCLUDE_STAKE = 10n ** 15n; // $1B in base units
 
 /**
+ * What the selector prices against: the V1 context, or a model factory (V2)
+ * that rebuilds the economics for a modified stake vector — the fallback
+ * variants below need to re-run the selector with tiles excluded.
+ */
+export type EvSource =
+  | EvContext
+  | { predictedStakes: bigint[]; model: (predictedStakes: bigint[]) => EvModel };
+
+function isModelSource(
+  src: EvSource,
+): src is { predictedStakes: bigint[]; model: (predictedStakes: bigint[]) => EvModel } {
+  return typeof (src as { model?: unknown }).model === "function";
+}
+
+/**
  * Best allocation + up to 2 next-best mask variants. Fallbacks re-run the
  * selector with the strongest tile(s) of the previous pick made
  * unattractive, yielding genuinely different masks (deduped).
  */
 export function computeCandidateSelections(
-  ctx: EvContext,
+  src: EvSource,
   cfg: SelectorConfig,
 ): DeploySelection[] {
   const out: DeploySelection[] = [];
   const seenMasks = new Set<number>();
-  let stakes = ctx.predictedStakes;
+  let stakes = src.predictedStakes;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const selection = selectAllocation({ ...ctx, predictedStakes: stakes }, cfg);
+    const selection = selectAllocation(
+      isModelSource(src) ? src.model(stakes) : { ...src, predictedStakes: stakes },
+      cfg,
+    );
     if (selection.kind !== "deploy") break;
     if (!seenMasks.has(selection.mask)) {
       seenMasks.add(selection.mask);
@@ -151,7 +169,7 @@ export class CandidateSet {
    */
   async refresh(
     roundId: number,
-    ctx: EvContext,
+    ctx: EvSource,
     selectorCfg: SelectorConfig,
   ): Promise<BuiltCandidate[]> {
     const now = this.opts.now ?? Date.now;

@@ -75,7 +75,7 @@ import {
   type OneBtcStateName,
 } from "./strategy/vault-claim.js";
 import { loadConfig, type Config } from "./config.js";
-import { CandidateSet } from "./exec/candidates.js";
+import { CandidateSet, type EvSource } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
@@ -98,6 +98,9 @@ import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
+import { STREAK_GRACE_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { TokenFeed } from "./ingest/token-feed.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
@@ -181,6 +184,8 @@ export class Orchestrator {
     private readonly ixCtx: InstructionContext,
     private readonly fees: FeeModel,
     private readonly prices: PriceFeed,
+    /** RUSH price + mint rate (V2 only; null under GAME_VERSION=v1). */
+    private readonly tokenFeed: TokenFeed | null,
   ) {
     this.health = new HealthMonitor(
       {
@@ -343,6 +348,24 @@ export class Orchestrator {
     await prices.start();
     logger.info(prices.status(), "price feed primed");
 
+    // V2 token leg: RUSH oracle price × measured mint rate, from the public
+    // API. Primed here so the first round is priced on a live yield or on
+    // the (default 0) fallback — never on the announced numbers.
+    let tokenFeed: TokenFeed | null = null;
+    if (cfg.GAME_VERSION === "v2") {
+      tokenFeed = new TokenFeed({
+        apiUrl: cfg.SATRUSH_API_URL,
+        fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
+        pollMs: cfg.TOKEN_FEED_POLL_MS,
+        maxAgeMs: cfg.TOKEN_FEED_MAX_AGE_MS,
+        log: (obj, msg) => logger.warn(obj, msg),
+      });
+      await tokenFeed.start();
+      logger.info(tokenFeed.status(), "token feed primed (V2 economics)");
+    } else {
+      logger.warn("GAME_VERSION=v1: pricing the pre-upgrade parimutuel — wrong against the live V2 program");
+    }
+
     const jitoTip =
       tipAccounts.length > 0
         ? {
@@ -403,6 +426,7 @@ export class Orchestrator {
       ixCtx,
       fees,
       prices,
+      tokenFeed,
     );
   }
 
@@ -587,7 +611,7 @@ export class Orchestrator {
     try {
       const built = await this.candidates.refresh(
         this.roundId,
-        this.evContext(),
+        this.evSource(),
         this.selectorConfig(),
       );
       if (built.length > 0 && (this.botState === "ROUND_OPEN" || this.botState === "ARMED")) {
@@ -771,6 +795,41 @@ export class Orchestrator {
   }
 
   /**
+   * What the selector prices against. V2 swaps the parimutuel for the
+   * refund/sats/RUSH economics (`v2Model`) on the same occupancy prediction;
+   * the model factory lets candidates rebuild it for excluded-tile variants.
+   */
+  private evSource(): EvSource {
+    const ctx = this.evContext();
+    if (this.cfg.GAME_VERSION !== "v2") return ctx;
+    const config = this.state.satrushConfig;
+    if (!config) return ctx; // unreachable after boot (config is required to start)
+    const econ = v2EconomicsFromConfig(config, {
+      losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value,
+    });
+    // The token yield is priced only while the feed is live: a stale or
+    // never-answered feed falls back to the configured estimate (default 0),
+    // so the selector never chases a RUSH leg nobody is currently marking.
+    const feed = this.tokenFeed?.status();
+    const tokenYieldPerVolume =
+      feed && feed.live
+        ? feed.yieldPerVolume
+        : this.cfg.RUSH_USD_ESTIMATE * this.cfg.RUSH_MINT_PER_USD_ESTIMATE;
+    const base: Omit<V2EvContext, "predictedStakes"> = {
+      econ,
+      mintedTokenValueBase: 0,
+      tokenYieldPerVolume,
+      strikeExpectedPot: this.strikeExpectedPotBase(),
+      ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
+      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+    };
+    return {
+      predictedStakes: ctx.predictedStakes,
+      model: (predictedStakes) => v2Model({ ...base, predictedStakes }),
+    };
+  }
+
+  /**
    * Fixed credit (base units) for deploying at all this round: the streak
    * option value. See strategy/streak.ts — one missed round resets the accrual
    * counter to 1, and nothing was pricing that.
@@ -782,13 +841,23 @@ export class Orchestrator {
    */
   private presenceCreditBase(): number {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
+    const miner = this.state.miner;
     const usd = streakOptionValueUsd({
-      streak: this.state.miner?.current_streak_count ?? 1,
+      streak: miner?.current_streak_count ?? 1,
       deployPerRoundUsd: this.cfg.MAX_PER_ROUND_USD,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
       liquidFraction:
         1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
       discount: this.cfg.STREAK_OPTION_DISCOUNT,
+      // V2: a skip inside the 2-round grace costs nothing, so the option is
+      // worth nothing until the round that would actually break the streak.
+      ...(this.cfg.GAME_VERSION === "v2" && miner && this.roundId !== null
+        ? {
+            roundId: this.roundId,
+            lastMinedRoundId: miner.last_mined_round_id,
+            graceRounds: STREAK_GRACE_ROUNDS.value,
+          }
+        : {}),
     });
     return usd > 0 ? usd * 1e6 : 0;
   }
@@ -1064,9 +1133,19 @@ export class Orchestrator {
     // Not the whole pool reaches the winning tile: a reserve is retained at
     // trigger (see STRIKE_PAYOUT_FRACTION). Crediting the full pool overstates
     // the jackpot leg of every round's EV.
-    return (
-      (Number(this.state.strikePoolUsd()) * this.cfg.STRIKE_PAYOUT_FRACTION) / modulus
-    );
+    let poolBase = Number(this.state.strikePoolUsd());
+    if (this.cfg.GAME_VERSION === "v2" && this.state.board) {
+      // V2 strike pool carries USD + BTC + RUSH legs; value the other two at
+      // the live prices (the RUSH leg at 0 while the token feed is not live).
+      const b = this.state.board;
+      const btcUsd = (Number(b.strike_btc_amount.toString()) / 1e8) * this.prices.btcUsd();
+      const feed = this.tokenFeed?.status();
+      const rushUsd = feed?.live
+        ? (Number(b.strike_token_amount.toString()) / 1e9) * feed.tokenUsd
+        : 0;
+      poolBase += (btcUsd + rushUsd) * 1e6;
+    }
+    return (poolBase * this.cfg.STRIKE_PAYOUT_FRACTION) / modulus;
   }
 
   /** Slots before cutoff to fire: the self-calibrated offset if available, else
@@ -2336,6 +2415,7 @@ export class Orchestrator {
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     this.vaultManager?.stop();
     this.prices.stop();
+    this.tokenFeed?.stop();
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
     await this.api?.stop().catch(() => undefined);

@@ -166,10 +166,15 @@ it is how deployment rent and winnings come back.
   should be rebuilt on it. No docs exist outside the app; nothing publishes an IDL.
 - Built: adapter/IDL + builders (deploy with rotor accounts, settle with the
   token leg, claim_token, distribute_epoch_reward replacing claim_epoch_reward),
-  preflight re-baseline. Not built: orchestrator wiring (`GAME_VERSION`),
-  wallet-set wiring, share-marked P&L, the V2 reconcile tripwire. Do not trade
-  V2 live before those land (V2-STRATEGY.md § 6) — and on measured numbers the
-  game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
+  preflight re-baseline, orchestrator wiring: `GAME_VERSION=v2` (default) routes
+  the selector through `v2Model` with the token yield from `src/ingest/token-feed.ts`
+  (API oracle price × mint rate measured over the last settled rounds; a feed
+  that is not live prices the RUSH leg at the configured fallback, default 0),
+  strike pot valued across USD/BTC/RUSH legs, streak grace in the presence
+  credit, and preflight gates `game_version_matches_chain` / `token_feed_live`.
+  Not built: wallet-set wiring, share-marked P&L, the V2 reconcile tripwire.
+  Do not trade V2 live before those land (V2-STRATEGY.md § 6) — and on measured
+  numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
 
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned
