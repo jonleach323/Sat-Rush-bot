@@ -27,6 +27,29 @@ export interface StatusReport {
   strikePoolUsd?: number | undefined;
   myStakeUsd?: number | undefined;
   ingestFresh?: boolean | undefined;
+  // V2 (shown if present)
+  gameVersion?: string | undefined;
+  /** Net today with the day's won shares marked — what the daily cap runs on. */
+  markedNet?: bigint | undefined;
+  unclaimedSharesUsd?: number | undefined;
+  unclaimedTokenShares?: bigint | undefined;
+  unclaimedTokenUsd?: number | undefined;
+  /** USD of RUSH per USD of volume the selector credits; null when the feed is down. */
+  tokenYield?: number | null | undefined;
+  rushUsd?: number | null | undefined;
+  satsVaultApr?: number | null | undefined;
+  carryCredited?: { sats: number; token: number } | null | undefined;
+  walletCount?: number | undefined;
+}
+
+export interface WalletRow {
+  pubkey: string;
+  streak: number;
+  hashrate: number;
+  tickets: number;
+  usdc: number;
+  sol: number;
+  disabled: string | null;
 }
 
 export interface DeployRow {
@@ -93,6 +116,7 @@ export interface TelegramDeps {
   getHealth?(): HealthReport | Promise<HealthReport>;
   getDeploys?(limit: number): DeployRow[] | Promise<DeployRow[]>;
   getVault?(): VaultReport | Promise<VaultReport>;
+  getWallets?(): WalletRow[] | Promise<WalletRow[]>;
 }
 
 export interface VaultReport {
@@ -135,10 +159,14 @@ const tilesOfMask = (mask: number): number[] => {
 export function formatStatus(s: StatusReport): string {
   const flags = `${s.paused ? " ⏸PAUSED" : ""}${s.killSwitch ? " ⛔KILL" : ""}`;
   const ingest = s.ingestFresh === undefined ? "" : s.ingestFresh ? " · ingest live" : " · ⚠INGEST STALE";
+  const game = s.gameVersion ? ` · ${s.gameVersion.toUpperCase()}` : "";
+  const fleet = s.walletCount && s.walletCount > 1 ? ` · ${s.walletCount} wallets` : "";
   const lines = [
-    `⛏ SAT RUSH — ${s.mode.toUpperCase()}${flags}${ingest}`,
+    `⛏ SAT RUSH — ${s.mode.toUpperCase()}${game}${fleet}${flags}${ingest}`,
     `round ${s.roundId ?? "?"} · ${s.roundState ?? "—"} · cutoff ${s.slotsToCutoff ?? "—"}`,
-    `today: ${usd(s.todayNet)} net · streak ${s.streak ?? "?"}`,
+    s.markedNet !== undefined
+      ? `today: ${usd(s.markedNet)} net (shares marked; USD-only ${usd(s.todayNet)}) · streak ${s.streak ?? "?"}`
+      : `today: ${usd(s.todayNet)} net · streak ${s.streak ?? "?"}`,
   ];
   if (s.boardTotalUsd !== undefined) {
     lines.push(
@@ -146,10 +174,26 @@ export function formatStatus(s: StatusReport): string {
         (s.strikePoolUsd !== undefined ? ` · strike ${usdn(s.strikePoolUsd)}` : ""),
     );
   }
-  lines.push(
-    `unclaimed: ${usd(s.unclaimedUsd)} + ${s.unclaimedShares} shares`,
-    `caps left: ${usd(s.perRoundCapLeft)}/round · ${usd(s.dailyLossCapLeft)} daily loss`,
-  );
+  if (s.unclaimedSharesUsd !== undefined) {
+    lines.push(
+      `unclaimed: ${usd(s.unclaimedUsd)} USDC · ${s.unclaimedShares} BTC shares ≈ ${usdn(s.unclaimedSharesUsd)}` +
+        (s.unclaimedTokenShares !== undefined
+          ? ` · ${s.unclaimedTokenShares} RUSH shares ≈ ${usdn(s.unclaimedTokenUsd ?? 0)}`
+          : ""),
+    );
+  } else {
+    lines.push(`unclaimed: ${usd(s.unclaimedUsd)} + ${s.unclaimedShares} shares`);
+  }
+  if (s.tokenYield !== undefined) {
+    const y = s.tokenYield === null ? "feed down → 0" : `${(100 * s.tokenYield).toFixed(2)}% of volume`;
+    const px = s.rushUsd === null || s.rushUsd === undefined ? "" : ` · RUSH ${usdn(s.rushUsd)}`;
+    const apr = s.satsVaultApr === null || s.satsVaultApr === undefined ? "" : ` · sats vault apr ${(100 * s.satsVaultApr).toFixed(0)}%`;
+    const carry = s.carryCredited
+      ? ` · carry credited ${(100 * s.carryCredited.sats).toFixed(1)}%/${(100 * s.carryCredited.token).toFixed(1)}%`
+      : " · carry not credited";
+    lines.push(`token yield: ${y}${px}${apr}${carry}`);
+  }
+  lines.push(`caps left: ${usd(s.perRoundCapLeft)}/round · ${usd(s.dailyLossCapLeft)} daily loss`);
   return lines.join("\n");
 }
 
@@ -304,13 +348,32 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(lines.join("\n"));
   });
 
+  bot.command("wallets", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getWallets) return void ctx.reply("wallet data unavailable");
+    const rows = await opts.deps.getWallets();
+    if (rows.length === 0) return void ctx.reply("no wallets");
+    const totalUsdc = rows.reduce((a, w) => a + w.usdc, 0);
+    await ctx.reply(
+      [
+        `👛 ${rows.length} wallet${rows.length > 1 ? "s" : ""} · ${usdn(totalUsdc)} USDC total (caps are aggregate)`,
+        ...rows.map(
+          (w, i) =>
+            `${i === 0 ? "★" : " "} ${short(w.pubkey)} ${usdn(w.usdc)} · ${w.sol.toFixed(3)} SOL · streak ${w.streak} · hr ${w.hashrate} · tix ${w.tickets}` +
+            (w.disabled ? ` · ⚠ ${w.disabled}` : ""),
+        ),
+      ].join("\n"),
+    );
+  });
+
   bot.command("help", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     await ctx.reply(
       [
-        "⛏ SAT RUSH commands",
-        "view: /status /board /me /pnl /rounds /competitors /vault /health",
+        "⛏ SAT RUSH commands (V2)",
+        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /health",
         "control: /pause /resume /kill",
+        "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),
     );
   });

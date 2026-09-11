@@ -116,6 +116,8 @@ export interface IntelJson {
     realizedUsdBps: number | null;
     /** BTC shares won over the same deploys, valued at the live BTC price. */
     realizedSharesBps: number | null;
+    /** V2 RUSH-vault shares won, valued at the token-share rate (0 unless priced). */
+    realizedTokenBps: number | null;
     /**
      * Total realized edge, USD leg + BTC-share leg. THIS is the figure
      * comparable to modeledBps, because the EV model credits the sats-vault
@@ -174,6 +176,8 @@ export interface IntelOptions {
    * which degrades the share leg to zero rather than inventing a value.
    */
   shareValueUsd: number;
+  /** USD value of one RUSH-vault share (V2); omit or 0 to value the token leg at nothing. */
+  tokenShareValueUsd?: number | undefined;
 }
 
 export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
@@ -328,15 +332,18 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
     deployed: number | null;
     won: number | null;
     shares: number | null;
+    tokenShares: number | null;
   }>(
     `SELECT COUNT(*) AS n,
             AVG(d.ev_expected / CAST(d.amount AS REAL)) AS modeled,
             SUM(CAST(d.amount AS REAL)) AS deployed,
             SUM(CAST(s.won_usd AS REAL)) AS won,
-            SUM(CAST(s.won_shares AS REAL)) AS shares
+            SUM(CAST(s.won_shares AS REAL)) AS shares,
+            SUM(CAST(s.won_token_shares AS REAL)) AS tokenShares
      FROM my_deploys d JOIN settlements s ON s.round_id = d.round_id
+       AND (s.wallet IS NULL OR d.wallet IS NULL OR s.wallet = d.wallet)
      WHERE d.status = 'landed' AND CAST(d.amount AS REAL) > 0`,
-  ) ?? { n: 0, modeled: null, deployed: null, won: null, shares: null };
+  ) ?? { n: 0, modeled: null, deployed: null, won: null, shares: null, tokenShares: null };
 
   const deployed = cal.deployed && cal.deployed > 0 ? cal.deployed : null;
   // Base units → USD for the deployed/won legs; shares are a raw count.
@@ -345,12 +352,15 @@ export function buildIntel(db: StateDb, opts: IntelOptions): IntelJson {
     : null;
   const sharesUsdBase = (cal.shares ?? 0) * opts.shareValueUsd * 1e6;
   const sharesBps = deployed != null ? (sharesUsdBase / deployed) * 10_000 : null;
+  const tokenUsdBase = (cal.tokenShares ?? 0) * (opts.tokenShareValueUsd ?? 0) * 1e6;
+  const tokenBps = deployed != null ? (tokenUsdBase / deployed) * 10_000 : null;
   const calibration = {
     landed: cal.n,
     modeledBps: cal.modeled != null ? cal.modeled * 10_000 : null,
     realizedUsdBps: usdBps,
     realizedSharesBps: sharesBps,
-    realizedBps: usdBps != null ? usdBps + (sharesBps ?? 0) : null,
+    realizedTokenBps: tokenBps,
+    realizedBps: usdBps != null ? usdBps + (sharesBps ?? 0) + (tokenBps ?? 0) : null,
     benchmarkBps: PASSIVE_BENCHMARK_BPS,
   };
 

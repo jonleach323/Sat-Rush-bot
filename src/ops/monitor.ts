@@ -57,6 +57,18 @@ export interface StatusJson {
   tokenFeed: TokenFeedStatus | null;
   /** Fleet wallets — one entry in single-wallet mode. */
   wallets: WalletSnapshot[];
+  /** The V2 economics the selector is pricing right now. */
+  game: {
+    version: string;
+    /** USD of RUSH minted per USD of gross volume, when the feed is live. */
+    tokenYield: number | null;
+    /** App-reported vault carry (simple APR fractions), when read. */
+    satsVaultApr: number | null;
+    tokenVaultApr: number | null;
+    /** Carry credited on the share legs over the stated horizon; null = not credited. */
+    carry: { sats: number; token: number } | null;
+    carryHorizonDays: number;
+  };
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
   /** Oracle prices actually in force; `live: false` means a fallback is in use. */
   prices: PriceStatus;
@@ -180,6 +192,10 @@ export interface MonitorContext {
   tokenFeedStatus: () => TokenFeedStatus | null;
   /** The signer fleet (public keys and balances only). */
   wallets: () => WalletSnapshot[];
+  gameVersion: string;
+  /** Carry the selector credits on the share legs right now (null = none). */
+  shareCarry: () => { sats: number; token: number } | null;
+  carryHorizonDays: number;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -253,6 +269,17 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         markedNetTodayUsd: baseToUsd(ctx.pnl.markedNetToday()),
         tokenFeed: ctx.tokenFeedStatus(),
         wallets: ctx.wallets(),
+        game: (() => {
+          const feed = ctx.tokenFeedStatus();
+          return {
+            version: ctx.gameVersion,
+            tokenYield: feed?.live ? feed.yieldPerVolume : null,
+            satsVaultApr: feed?.satsVaultApr ?? null,
+            tokenVaultApr: feed?.tokenVaultApr ?? null,
+            carry: ctx.shareCarry(),
+            carryHorizonDays: ctx.carryHorizonDays,
+          };
+        })(),
         caps: {
           maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
           dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase),
@@ -345,6 +372,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         windowRounds: Math.min(Math.max(1, windowRounds), 5000),
         fireOffsetSlots: ctx.fireOffsetSlots(),
         shareValueUsd: ctx.shareValueUsd(),
+        tokenShareValueUsd: ctx.tokenShareValueUsd(),
       });
     },
 

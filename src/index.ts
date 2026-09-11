@@ -262,6 +262,9 @@ export class Orchestrator {
       tokenShareValueUsd: () => this.tokenShareValueUsd(),
       tokenFeedStatus: () => this.tokenFeed?.status() ?? null,
       wallets: () => this.wallets.snapshot(),
+      gameVersion: cfg.GAME_VERSION,
+      shareCarry: () => this.shareCarry(),
+      carryHorizonDays: cfg.VAULT_CARRY_HORIZON_DAYS,
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -602,6 +605,7 @@ export class Orchestrator {
         getHealth: () => this.monitor.health(),
         getDeploys: (limit) => this.monitor.recentDeploys(limit) as never,
         getVault: () => this.monitor.vault(),
+        getWallets: () => this.wallets.snapshot(),
       },
     });
     this.telegram.start();
@@ -632,7 +636,18 @@ export class Orchestrator {
   private statusReport() {
     const round = this.state.currentRound();
     const m = this.monitor.status();
+    const feed = this.tokenFeed?.status();
     return {
+      gameVersion: this.cfg.GAME_VERSION,
+      markedNet: this.pnl.markedNetToday(),
+      unclaimedSharesUsd: m.unclaimed.sharesUsd,
+      unclaimedTokenShares: BigInt(this.state.miner?.unclaimed_token_shares.toString() ?? "0"),
+      unclaimedTokenUsd: m.unclaimed.tokenSharesUsd,
+      tokenYield: m.game.tokenYield,
+      rushUsd: feed?.live ? feed.tokenUsd : null,
+      satsVaultApr: m.game.satsVaultApr,
+      carryCredited: m.game.carry,
+      walletCount: this.wallets.size,
       mode: this.cfg.EXECUTION_MODE,
       roundId: this.state.board?.round_id ?? null,
       roundState: round ? (Object.keys(round.state)[0] ?? null) : null,

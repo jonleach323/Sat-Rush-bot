@@ -247,7 +247,8 @@ Operational notes:
 Three views of the same read-only data layer (`src/ops/monitor.ts`). None
 can control the bot — deploy/cap/kill are NOT reachable from any of them.
 
-**Telegram** (from your phone): `/status` `/pnl` `/board` `/rounds`
+**Telegram** (from your phone): `/status` (V2: marked net with both share legs,
+token yield, vault carry) `/wallets` (the fleet) `/pnl` `/board` `/rounds`
 `/competitors` `/health` for viewing; `/pause` `/resume` `/kill` for
 control (control is Telegram-only, gated to TELEGRAM_CHAT_ID). Plus the
 unsolicited alerts (HaltError, missed round, daily-cap, cap-bound, low

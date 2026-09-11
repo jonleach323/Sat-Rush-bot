@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Update, UserFromGetMe } from "grammy/types";
 import { Bankroll } from "../src/strategy/bankroll.js";
-import { createTelegramOps, type TelegramDeps } from "../src/ops/telegram.js";
+import { createTelegramOps, formatStatus, type TelegramDeps } from "../src/ops/telegram.js";
 import { usdToBase } from "../src/units.js";
 
 const BOT_INFO = {
@@ -217,3 +217,33 @@ describe("telegram ops (offline)", () => {
     expect(sent[0]!.text).toContain("HaltError");
   });
 });
+
+describe("formatStatus — V2 lines", () => {
+  const base = {
+    mode: "mainnet", roundId: 55600, roundState: "Active", slotsToCutoff: 40, streak: 3,
+    todayNet: usdToBase(-10), unclaimedUsd: usdToBase(2), unclaimedShares: 1_000n,
+    perRoundCapLeft: usdToBase(5), dailyLossCapLeft: usdToBase(20), killSwitch: false, paused: false,
+  };
+  it("stays on the V1 layout when no V2 fields are given", () => {
+    const text = formatStatus(base);
+    expect(text).toContain("today: $-10.00 net · streak 3");
+    expect(text).toContain("unclaimed: $2.00 + 1000 shares");
+    expect(text).not.toContain("token yield");
+  });
+  it("shows the marked net, both share legs, the token yield, the carry and the fleet", () => {
+    const text = formatStatus({
+      ...base, gameVersion: "v2", markedNet: usdToBase(4), unclaimedSharesUsd: 15, unclaimedTokenShares: 500n,
+      unclaimedTokenUsd: 1.25, tokenYield: 0.0153, rushUsd: 50.4, satsVaultApr: 3.15, carryCredited: null, walletCount: 3,
+    });
+    expect(text).toContain("V2 · 3 wallets");
+    expect(text).toContain("today: $4.00 net (shares marked; USD-only $-10.00)");
+    expect(text).toContain("1000 BTC shares ≈ $15.00 · 500 RUSH shares ≈ $1.25");
+    expect(text).toContain("token yield: 1.53% of volume · RUSH $50.40 · sats vault apr 315% · carry not credited");
+  });
+  it("says so when the token feed is down and when carry is credited", () => {
+    const text = formatStatus({ ...base, tokenYield: null, rushUsd: null, carryCredited: { sats: 0.02, token: 0.005 } });
+    expect(text).toContain("token yield: feed down → 0");
+    expect(text).toContain("carry credited 2.0%/0.5%");
+  });
+});
+
