@@ -135,6 +135,25 @@ const be = (wallets: number, strike: number): number => {
 };
 console.log(`\n  break-even token yield: 1 wallet ${pct(be(1, 0.7), 2)} · 21 wallets ${pct(be(21, 0.7), 2)} (strike 0.70) · ${pct(be(21, 0.95), 2)} (strike 0.95)`);
 console.log(`  live yield ${liveYield === null ? "n/a" : pct(liveYield, 2)}; if the mint targets 2% at a lagging reference price, the yield converges to 2% as that price settles.`);
+// ── farm-and-sell as an arbitrage: what does it cost to mint one RUSH? ──────
+// The non-token legs of the ledger leave a toll per dollar of volume; dividing
+// it by the tokens a dollar mints is the all-in cost of a RUSH made through the
+// board. Selling one realises spot less the 10% exit fee and pool slippage.
+if (prev && spot) {
+  const rate = (Number(prev.minted_token_amount) / 1e9) / (Number(prev.total_gross_deployed_usd) / 1e6); // RUSH per $
+  const SLIPPAGE = 0.01; // ASSUMED: pool fee + impact on a modest clip
+  console.log(`\n══ FARM-AND-SELL: COST TO MINT ONE RUSH vs WHAT IT SELLS FOR ══`);
+  console.log("  wallets   toll per $ (non-token legs)   cost to mint 1 RUSH   sells for (spot −10% −1%)   break-even spot");
+  for (const [w, strike] of [[1, 0.70], [21, 0.70], [21, 0.95]] as [number, number][]) {
+    const toll = -ledger({ price: 0, wallets: w, strikeRecovery: strike, buybacksLeak: true, yieldOverride: 0 }).net;
+    const cost = toll / rate;
+    const realised = spot * (1 - (conf.vault_exit_fee_bps ?? 1000) / 1e4) * (1 - SLIPPAGE);
+    console.log(`  ${pad(`${w}${strike === 0.95 ? " (strike 0.95)" : ""}`, 15)}   ${pad(pct(toll), 12)}               ${pad(`$${cost.toFixed(2)}`, 10)}          ${pad(`$${realised.toFixed(2)}`, 12)}              ${pad(`$${(cost / ((1 - (conf.vault_exit_fee_bps ?? 1000) / 1e4) * (1 - SLIPPAGE))).toFixed(2)}`, 8)}`);
+  }
+  console.log(`  at ${(1000 * rate).toFixed(4)} RUSH per $1,000 (previous round). The market has to pay more than the mint cost,`);
+  console.log(`  after the exit fee and slippage, for farming-to-sell to be an arbitrage rather than a bet.`);
+}
+
 console.log(`\n  Left out, each can only ADD: the vault carry (claimers' 10% exit fees accrue to holders; the API`);
 console.log(`  reports a sats-vault APR but our share of it is unmeasured), the strike buffer's eventual return,`);
 console.log(`  and any board edge. Left out, each can only SUBTRACT: a buybacks leg carved from the 6%, Jito tips`);
