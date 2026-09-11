@@ -109,7 +109,7 @@ const legs = {
   oneBtc: conf.one_btc_fee_bps,
   protocol: conf.protocol_fee_bps,
   sats: conf.sats_vault_round_fee_bps,
-  satsClaim: conf.sats_vault_claim_fee_bps,
+  satsClaim: conf.vault_exit_fee_bps,
 };
 const deployLegs = legs.strike + legs.epoch + legs.oneBtc + legs.protocol;
 const netFactor = 1 - deployLegs / BPS;

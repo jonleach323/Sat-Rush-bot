@@ -45,7 +45,7 @@ const num = (v: unknown): number => Number(v as string);
 interface ApiConfig {
   strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number;
   protocol_fee_bps: number; sats_vault_round_fee_bps: number;
-  sats_vault_claim_fee_bps: number;
+  vault_exit_fee_bps: number;
 }
 interface Board {
   round_id: number;
@@ -129,7 +129,7 @@ console.log(`  so the strategy layer is ~${(1 / B(conf.strike_fee_bps) / (1 / 0.
 // ── the fee cut is the part that genuinely adds EV ──────────────────────────
 console.log(`\n══ THE 8% → 6% FEE CUT ══`);
 const SATS = B(conf.sats_vault_round_fee_bps);
-const claim = B(conf.sats_vault_claim_fee_bps);
+const claim = B(conf.vault_exit_fee_bps);
 console.log("  reading                                  player keeps   vs today");
 const today = (1 - 0.08 - SATS) + SATS * (1 - claim) + B(conf.strike_fee_bps) * STRIKE_PAYOUT;
 const rows: [string, number][] = [

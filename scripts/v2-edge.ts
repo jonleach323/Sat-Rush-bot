@@ -45,7 +45,7 @@ const B = (bps: number): number => bps / 1e4;
 interface ApiConfig {
   strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number;
   protocol_fee_bps: number; sats_vault_round_fee_bps: number;
-  sats_vault_claim_fee_bps: number;
+  vault_exit_fee_bps: number;
 }
 interface LbRow { total_usd_deployed: string; total_hashrate_earned: string }
 
@@ -99,7 +99,7 @@ console.log(`  blanketing out of habit and goes to zero when they notice.`);
 
 // ── the absolute question ───────────────────────────────────────────────────
 const SATS = B(conf.sats_vault_round_fee_bps);
-const CLAIM = B(conf.sats_vault_claim_fee_bps);
+const CLAIM = B(conf.vault_exit_fee_bps);
 const POT = 1 - B(conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps
   + conf.protocol_fee_bps) - SATS;
 

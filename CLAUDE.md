@@ -142,8 +142,12 @@ it is how deployment rent and winnings come back.
 
 ## V2 (program upgrade, cutover 2026-09-11) — READ V2-STRATEGY.md
 - The program is upgraded IN PLACE (same address) with account migrations. The
-  "Game facts" section above describes V1 and `satrush.json` is the V1 IDL:
-  until the V2 IDL is loaded the decoders halt on the migrated layouts (by design).
+  "Game facts" section above describes V1 (`satrush-v1.json`). `satrush.json`
+  is now the V2 IDL, REGENERATED from the SDK's Codama codecs by `pnpm idl:gen`
+  (`scripts/idl/gen-idl-from-sdk.ts`, which also emits
+  `src/adapter/generated-types.ts`) — never hand-edit either. `pnpm idl:verify`
+  decodes live mainnet accounts + a settled event through it and diffs the
+  deploy/settle builders against real transactions (FINDINGS.md § E-v2-idl).
 - `@satrush/client@0.1.15` (published 2026-09-10) is the V2 SDK and is pinned.
   It settled the fee layer, the 89% losing-tile refund, the 5% sats leg, the
   RUSH 64/16/14/6 split, the coupled 10% vault exit fee, equal epoch prizes and
@@ -160,8 +164,10 @@ it is how deployment rent and winnings come back.
   Deploys must append the four rotor remaining accounts (`getRngRemainingAccounts`).
   `GET /v1/rounds/{id}` returns per-deployment settlements: the reconcile tripwire
   should be rebuilt on it. No docs exist outside the app; nothing publishes an IDL.
-- Not built: adapter/IDL, orchestrator wiring (`GAME_VERSION`), wallet-set wiring,
-  share-marked P&L, the V2 reconcile tripwire, preflight re-baseline. Do not trade
+- Built: adapter/IDL + builders (deploy with rotor accounts, settle with the
+  token leg, claim_token, distribute_epoch_reward replacing claim_epoch_reward),
+  preflight re-baseline. Not built: orchestrator wiring (`GAME_VERSION`),
+  wallet-set wiring, share-marked P&L, the V2 reconcile tripwire. Do not trade
   V2 live before those land (V2-STRATEGY.md § 6) — and on measured numbers the
   game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
 

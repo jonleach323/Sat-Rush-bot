@@ -95,7 +95,7 @@ export interface V2FeeLegs {
   protocol_fee_bps: number;
   /** New under V2; pre-migration accounts read 0. */
   buybacks_fee_bps?: number | undefined;
-  /** Exit fee on both vaults; V1's `sats_vault_claim_fee_bps` is the same slot. */
+  /** Exit fee on both vaults; V1's `sats_vault_claim_fee_bps` was the same slot. */
   vault_exit_fee_bps?: number | undefined;
 }
 

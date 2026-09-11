@@ -40,7 +40,7 @@ const md = `## E6 — on-chain config dump (${nowIso()})
 | epoch_fee_bps | ${c.epoch_fee_bps} |
 | one_btc_fee_bps | ${c.one_btc_fee_bps} |
 | sats_vault_round_fee_bps | ${c.sats_vault_round_fee_bps} |
-| sats_vault_claim_fee_bps | ${c.sats_vault_claim_fee_bps} |
+| vault_exit_fee_bps | ${c.vault_exit_fee_bps} |
 | protocol_fee_bps | ${c.protocol_fee_bps} |
 | unclaimed_hashrate_bps | ${c.unclaimed_hashrate_bps} |
 | min_deploy_usd_amount | ${fmtUsd(c.min_deploy_usd_amount)} |

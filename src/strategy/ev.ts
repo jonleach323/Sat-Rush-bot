@@ -62,7 +62,7 @@ export function feeModelFromConfig(config: SatrushConfig): FeeModel {
       config.one_btc_fee_bps +
       config.protocol_fee_bps,
     satsVaultRoundBps: config.sats_vault_round_fee_bps,
-    satsVaultClaimBps: config.sats_vault_claim_fee_bps,
+    satsVaultClaimBps: config.vault_exit_fee_bps,
   };
 }
 

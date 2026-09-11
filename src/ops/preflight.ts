@@ -32,14 +32,20 @@ export interface PreflightReport {
   gates: GateResult[];
 }
 
-/** Devnet-measured economics baseline (FINDINGS.md E6, 2026-08-02). */
+/**
+ * Mainnet V2 economics baseline, read from the live SatrushConfig and verified
+ * against settled rounds to the cent (FINDINGS.md E-v2-live, 2026-09-11).
+ * `sats_vault_round_fee_bps` is still 1200 on chain although the V2 swap
+ * budget is 5% of gross — the model reads the swap leg from measurement, not
+ * from this field; the gate only detects the owner changing the config.
+ */
 export const MEASURED_ECONOMICS = {
-  strike_fee_bps: 264,
-  epoch_fee_bps: 262,
-  one_btc_fee_bps: 132,
+  strike_fee_bps: 208,
+  epoch_fee_bps: 194,
+  one_btc_fee_bps: 48,
   sats_vault_round_fee_bps: 1200,
-  sats_vault_claim_fee_bps: 1000,
-  protocol_fee_bps: 142,
+  vault_exit_fee_bps: 1000,
+  protocol_fee_bps: 100,
   unclaimed_hashrate_bps: 3500,
 } as const;
 
@@ -140,7 +146,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
       "economics_within_tolerance",
       econ.ok,
       econ.ok
-        ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of devnet-measured baseline`
+        ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of the mainnet V2 baseline`
         : `ECONOMICS CHANGED — EV model is stale: ${econ.deviations.join("; ")}`,
     );
     const minDeploy = BigInt(satrushConfig.min_deploy_usd_amount.toString());

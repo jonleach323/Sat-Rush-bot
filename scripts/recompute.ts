@@ -60,7 +60,7 @@ function ratioEstimate(pairs: readonly { y: number; x: number }[]): Estimate {
 interface ApiConfig {
   strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number;
   protocol_fee_bps: number; sats_vault_round_fee_bps: number;
-  sats_vault_claim_fee_bps: number; unclaimed_hashrate_bps: number;
+  vault_exit_fee_bps: number; unclaimed_hashrate_bps: number;
   epoch_vault_iteration_duration: number; min_deploy_usd_amount: string;
 }
 const conf = await get<ApiConfig>("config");
@@ -68,10 +68,10 @@ const fees: FeeModel = {
   deployFeeBps: conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps
     + conf.protocol_fee_bps,
   satsVaultRoundBps: conf.sats_vault_round_fee_bps,
-  satsVaultClaimBps: conf.sats_vault_claim_fee_bps,
+  satsVaultClaimBps: conf.vault_exit_fee_bps,
 };
 const TOLL = blanketToll(fees, conf.strike_fee_bps);
-const CLAIM_NET = 1 - conf.sats_vault_claim_fee_bps / 1e4;
+const CLAIM_NET = 1 - conf.vault_exit_fee_bps / 1e4;
 
 console.log("══ 1. THE TOLL ─ arithmetic on live config, no error bar needed ══");
 console.log(`  deploy legs ${fees.deployFeeBps} bps · sats round ${fees.satsVaultRoundBps} ` +
@@ -124,7 +124,7 @@ const net = wonUsd + wonBtc * CLAIM_NET - deployed;
 console.log(`  deployed        $${deployed.toFixed(2)}`);
 console.log(`  USD won         $${wonUsd.toFixed(2)}`);
 console.log(`  BTC won         $${wonBtc.toFixed(2)} gross → $${(wonBtc * CLAIM_NET).toFixed(2)} ` +
-  `net of the ${conf.sats_vault_claim_fee_bps / 100}% claim fee`);
+  `net of the ${conf.vault_exit_fee_bps / 100}% claim fee`);
 console.log(`  NET             ${money(net)}`);
 const roi = ratioEstimate(all);
 console.log(`  ROI             ${formatEstimate(roi, "%")}`);

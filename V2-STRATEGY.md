@@ -205,11 +205,10 @@ Built (pure strategy layer, all tested, 617 tests green):
 Not built, because none of it can be validated before the upgrade is
 observable — and each is a place the bot would trade on wrong numbers:
 
-- **Adapter.** Every layout derives from `satrush.json` (V1). The V2 IDL is
-  not in the SDK tarball (Codama codecs are). Get the IDL from the owner or
-  `anchor idl fetch satRushGBRY2vgapeTAkoxz26vL2cYqyPi6CnBj7Tco` once the
-  upgrade lands. `deploy_public` needs `is_grubstake_funded: false`;
-  `settle_deploy_public` needs `token_vault`, `token_mint`, `affiliate`.
+- ~~**Adapter.**~~ DONE 2026-09-11: `satrush.json` is regenerated from the
+  SDK codecs (`pnpm idl:gen`) and verified on mainnet (`pnpm idl:verify`,
+  FINDINGS.md § E-v2-idl); builders carry `is_grubstake_funded`, the
+  affiliate slot, the rotor and token-leg remaining accounts.
 - **Orchestrator wiring** (`GAME_VERSION=v1|v2`): `evContext()` → `v2Model`
   with `mintedTokenValueBase` from a mint estimate × `prices.token`;
   `candidates.ts` builds fallbacks from an `EvContext` spread and needs a
@@ -218,8 +217,8 @@ observable — and each is a place the bot would trade on wrong numbers:
 - **Accounting**: `settlements` needs `won_token_shares`; `pnl.ts` must mark
   shares; `reconcile.ts` must model refunds + sats slice; `bankroll.ts` and
   `guards.ts` need the loss fraction.
-- **Preflight**: `MEASURED_ECONOMICS` is V1 and will fail the 25% drift gate
-  (as designed). Re-baseline from an E6-style V2 config dump.
+- ~~**Preflight**~~ DONE: `MEASURED_ECONOMICS` re-baselined to the live V2
+  config.
 - **Token price feed** for `mintedTokenValueBase` (API oracle spot).
 
 ## 6. Launch-day runbook

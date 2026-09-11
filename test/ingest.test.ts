@@ -39,12 +39,18 @@ function makeRound(id: number, stakes: number[], deployCounts?: number[]): Round
       stake: new BN(s),
       deploy_count: deployCounts?.[i] ?? 0,
     })),
-    deploy_entropy_acc: new Array<number>(32).fill(0),
+    minted_token_amount: new BN(0),
+    strike_bonus_token: new BN(0),
+    reserved_entropy: new Array<number>(16).fill(0),
     settled_at_slot: new BN(0),
     pending_epoch_fee_usd_amount: new BN(0),
     pending_one_btc_fee_usd_amount: new BN(0),
     pending_protocol_fee_usd_amount: new BN(0),
-    reserved: new Array<number>(40).fill(0),
+    is_hashrate_boosted: false,
+    pending_affiliate_fee_usd_amount: new BN(0),
+    pending_buybacks_fee_usd_amount: new BN(0),
+    deployed_gross_usd_amount: new BN(0),
+    reserved: new Array<number>(15).fill(0),
   };
 }
 

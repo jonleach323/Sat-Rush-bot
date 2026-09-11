@@ -34,7 +34,7 @@ import { decodeAccount } from "./adapter/idl.js";
 import {
   buildBuyEpochTickets,
   buildBuyOneBtcTickets,
-  buildClaimEpochReward,
+  buildDistributeEpochReward,
   buildClaimOneBtcReward,
   buildClaimSats,
   buildClaimUsd,
@@ -285,6 +285,7 @@ export class Orchestrator {
     const ixCtx: InstructionContext = {
       usdMint: state.satrushConfig.usd_mint,
       btcMint: state.satrushConfig.btc_mint,
+      tokenMint: state.satrushConfig.token_mint,
     };
 
     const bankroll = new Bankroll(
@@ -954,7 +955,7 @@ export class Orchestrator {
    * P&L and the realized-edge metric silently omitted the single largest
    * return leg — enough to make a profitable position read as a heavy loss.
    *
-   * Net of sats_vault_claim_fee_bps because that is what the shares are
+   * Net of vault_exit_fee_bps because that is what the shares are
    * actually worth to us; gross would overstate a position we can only realise
    * by paying the exit fee.
    */
@@ -964,7 +965,7 @@ export class Orchestrator {
     const shares = Number(vault.btc_shares.toString());
     const btc = Number(vault.btc_amount.toString());
     if (!(shares > 0) || !(btc > 0)) return 0;
-    const claimFeeBps = this.state.satrushConfig?.sats_vault_claim_fee_bps ?? 0;
+    const claimFeeBps = this.state.satrushConfig?.vault_exit_fee_bps ?? 0;
     const net = 1 - claimFeeBps / 10_000;
     return (btc / shares / 1e8) * this.prices.btcUsd() * net;
   }
@@ -1424,6 +1425,8 @@ export class Orchestrator {
         authority: this.payer.publicKey,
         deploymentAuthority: this.payer.publicKey,
         roundId,
+        // V2: the affiliate leg settles to Miner.affiliate (default pubkey → none).
+        affiliate: this.state.miner?.affiliate,
       });
       const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
         payer: this.payer,
@@ -1843,15 +1846,23 @@ export class Orchestrator {
         this.noteCrankOutcome(key, outcome === "landed");
       }
     } else if (action === "claim") {
-      const outcome = await this.sendVaultClaim(
-        "epoch",
-        iterationId,
-        buildClaimEpochReward(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
-        { kind: "vault_epoch_claim", iterationId },
+      // V2: permissionless distribute_epoch_reward(rank) credits our Miner
+      // (USD → claim_usd pool, BTC → sats-vault shares, RUSH → token vault).
+      // Nothing reaches the wallet ATAs, so this is a plain crank send; the
+      // Miner-side accounting is picked up by the claim path.
+      const rank = epochWinIndex(it.winners, this.payer.publicKey);
+      const outcome = await this.sendVaultIx(
+        buildDistributeEpochReward(this.ixCtx, {
+          authority: this.payer.publicKey,
+          iterationId,
+          rank,
+          winnerAuthority: this.payer.publicKey,
+        }),
+        { kind: "vault_epoch_distribute", iterationId, rank },
       );
       if (outcome === "landed") {
         this.db.markVaultClaimed("epoch", iterationId);
-        this.alert(`🏆 vault WIN — claimed epoch iteration ${iterationId}`);
+        this.alert(`🏆 vault WIN — distributed epoch iteration ${iterationId} (rank ${rank}) to our miner`);
       }
     } else if (action === "done" && live) {
       this.db.markVaultClaimed("epoch", iterationId); // lost or fully resolved

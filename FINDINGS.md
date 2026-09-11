@@ -1266,3 +1266,66 @@ being a reading of a press release. Four rounds and one per-deployment ledger
 later every constant in ev-v2.ts is `measured`; the one that is not — the
 mint rule — is the one that decides the sign, and it lives in a program with
 no IDL. That is the question for the owner.
+
+## E-v2-idl: the V2 IDL, regenerated from the SDK and verified on mainnet (2026-09-11)
+
+Nothing publishes a V2 IDL, but `@satrush/client@0.1.15` ships the Codama
+codecs for every account, instruction and event, plus the discriminators and
+PDA seeds. `scripts/idl/gen-idl-from-sdk.ts` (`pnpm idl:gen`) parses them
+back into an Anchor IDL (`satrush.json`: 61 instructions, 19 accounts, 12
+events, 91 errors, 38 types; the V1 file is kept as `satrush-v1.json`) and
+emits `src/adapter/generated-types.ts`, so the "derive everything from the
+IDL" rule survives the upgrade unchanged. Every discriminator is asserted
+against the Anchor sha256 conventions during generation.
+
+`pnpm idl:verify` (`scripts/idl/verify-idl-live.ts`) then reads mainnet
+through the generated coders and compares against the public API and the
+tape:
+
+- Board, SatrushConfig (208/194/48/100 bps, `vault_exit_fee_bps` 1000,
+  `sats_vault_round_fee_bps` still 1200, `buybacks_fee_bps` 50,
+  `strike_trigger_modulus` 1097), SatsVault, TokenVault, EpochVault, the
+  live Round and our Miner: 40 fields identical to `/board`, `/config`,
+  `/users/{w}/profile`.
+- `PublicDeploySettled` decoded from the `emit_cpi` inner instruction of
+  `wK8UUSqvcDarU1vtUwvagNbsGrPPfscNBq1mrtdvbXLxYCsRGtjbRmjBS3DgBjhVzNmtDCKawXpoLCGbR5sbZf4`
+  (round 55508): winning_stake, won_usd, won_shares, won_token,
+  won_token_shares, hashrate_earned, is_grubstake_funded all equal the
+  API's per-deployment settlement.
+- `buildSettleDeployPublic` reproduces that transaction's 26 accounts (23
+  IDL accounts + the token-leg remaining accounts `[token_mint,
+  board_token_ata, token_vault_token_ata]`) key-for-key with identical
+  flags; `buildDeployPublic` reproduces the 18 accounts (14 + the four
+  rotor accounts) of the direct deploy
+  `3htxqWuAE7vkoa92bihYchAGF5W5VWmEBwM9huv2wb2Mb4yUcfeZXCnHeNr3dPyMR4KjiTtVBVN8iDbt32N2L188`
+  (round 55500, mask 1589003, $30).
+
+What moved under the builders (all in `src/adapter/instructions.ts`,
+pinned by `test/instructions.test.ts` against the IDL):
+
+- `deploy_public`: `is_grubstake_funded` arg (funding ATA becomes the
+  Miner's when true), optional `affiliate` PDA (program id when absent —
+  the SDK's "programId" strategy), four rotor remaining accounts
+  (`src/adapter/rng.ts`, pinned to the SDK's `getRngRemainingAccountsFor`
+  in `test/rng.test.ts`).
+- `settle_deploy_public`: `miner_usd_ata`, optional writable `affiliate`
+  (`Miner.affiliate`, default pubkey → none), `token_vault`, and the three
+  token-leg remaining accounts.
+- `claim_sats` gains the coupled token-vault leg; `claim_token` is new.
+- `claim_epoch_reward` is gone: `distribute_epoch_reward(rank)` is a
+  permissionless crank that credits the winner's Miner (USD to the board
+  pool, BTC to sats-vault shares, RUSH to the token vault) — nothing
+  reaches the wallet, so the orchestrator no longer measures the claim by
+  ATA deltas. `Winner.claimed` is now `Winner.distributed`.
+- `claim_one_btc_reward` takes `satrush_config`, `ticket` and a `winner`
+  (the ticket's owner, whoever signs).
+- The vault draw triggers lose the SlotHashes/event accounts from the IDL
+  list and arm their rotor by CPI, so the epoch/btc rotor sets ride as
+  remaining accounts. This is by analogy to `deploy_public` and the SDK's
+  exported rotor helpers; no trigger transaction has been diffed against
+  the tape yet (the owner's crank has fired every draw so far).
+
+Preflight is re-baselined to the live config (`MEASURED_ECONOMICS`). Not
+yet touched: the orchestrator's V1 economics, accounting and the wallet set
+(V2-STRATEGY.md § 5).
+

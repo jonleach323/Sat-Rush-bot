@@ -76,7 +76,11 @@ export async function setupExperiment(name: string): Promise<Experiment> {
     conn,
     payer,
     programId,
-    ixCtx: { usdMint: satrushConfig.usd_mint, btcMint: satrushConfig.btc_mint },
+    ixCtx: {
+      usdMint: satrushConfig.usd_mint,
+      btcMint: satrushConfig.btc_mint,
+      tokenMint: satrushConfig.token_mint,
+    },
     satrushConfig,
     log,
   };

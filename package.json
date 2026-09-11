@@ -47,7 +47,9 @@
     "full-accounting": "tsx scripts/full-accounting.ts",
     "v2-strategy": "tsx scripts/v2-strategy.ts",
     "wallet-set": "tsx scripts/wallet-set.ts",
-    "v2-ledger": "tsx scripts/v2-ledger.ts"
+    "v2-ledger": "tsx scripts/v2-ledger.ts",
+    "idl:gen": "tsx scripts/idl/gen-idl-from-sdk.ts",
+    "idl:verify": "tsx scripts/idl/verify-idl-live.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

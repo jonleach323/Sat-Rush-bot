@@ -37,7 +37,7 @@ const B = (bps: number): number => bps / 1e4;
 interface ApiConfig {
   strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number;
   protocol_fee_bps: number; sats_vault_round_fee_bps: number;
-  sats_vault_claim_fee_bps: number;
+  vault_exit_fee_bps: number;
 }
 interface BoardT {
   strike: { usd_amount: string; pool_usd_amount: string };

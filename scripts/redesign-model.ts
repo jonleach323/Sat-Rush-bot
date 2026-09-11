@@ -46,7 +46,7 @@ const usd = (x: number): string => `${x < 0 ? "-" : ""}$${Math.abs(x).toFixed(2)
 interface ApiConfig {
   strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number;
   protocol_fee_bps: number; sats_vault_round_fee_bps: number;
-  sats_vault_claim_fee_bps: number; min_deploy_usd_amount: string;
+  vault_exit_fee_bps: number; min_deploy_usd_amount: string;
 }
 interface LbRow {
   authority: string; total_usd_deployed: string; total_hashrate_earned: string;
@@ -76,7 +76,7 @@ const FEE = B(conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps
   + conf.protocol_fee_bps);
 const SATS = B(conf.sats_vault_round_fee_bps);
 const POT = 1 - FEE - SATS;
-const CLAIM_NET = 1 - B(conf.sats_vault_claim_fee_bps);
+const CLAIM_NET = 1 - B(conf.vault_exit_fee_bps);
 const STRIKE_PAYOUT = 0.70; // operator-stated
 
 console.log("══ FEE SPLIT (live) ══");
@@ -99,9 +99,9 @@ for (const btc of [SATS, 0.15, 0.20, 0.25]) {
     `${total >= todayBase ? "+" : ""}${(100 * (total - todayBase)).toFixed(2)} pts`);
 }
 console.log(`\n  Every point moved from USDC to BTC is taxed by the ` +
-  `${(100 * B(conf.sats_vault_claim_fee_bps)).toFixed(0)}% claim fee.`);
+  `${(100 * B(conf.vault_exit_fee_bps)).toFixed(0)}% claim fee.`);
 console.log(`  "More BTC per round" is a directional BTC bet, not extra EV. The lever`);
-console.log(`  that genuinely adds value is cutting sats_vault_claim_fee_bps:`);
+console.log(`  that genuinely adds value is cutting vault_exit_fee_bps:`);
 for (const fee of [1000, 500, 250, 0]) {
   const t = POT + SATS * (1 - B(fee));
   console.log(`    claim fee ${String(fee).padStart(4)} bps → player keeps ${(100 * t).toFixed(2)}% ` +

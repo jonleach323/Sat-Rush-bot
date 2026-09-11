@@ -51,6 +51,7 @@ function candidateSet(conn: Connection, now?: () => number) {
     ixCtx: {
       usdMint: Keypair.generate().publicKey,
       btcMint: Keypair.generate().publicKey,
+      tokenMint: Keypair.generate().publicKey,
     },
     feeEstimator,
     computeUnitLimit: 400_000,
@@ -88,7 +89,7 @@ describe("CandidateSet — Jito tip", () => {
     const set = new CandidateSet({
       connection: conn,
       payer: Keypair.generate(),
-      ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+      ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey, tokenMint: Keypair.generate().publicKey },
       feeEstimator,
       computeUnitLimit: 400_000,
       jitoTip: {
@@ -143,6 +144,7 @@ describe("CandidateSet", () => {
       ixCtx: {
         usdMint: Keypair.generate().publicKey,
         btcMint: Keypair.generate().publicKey,
+        tokenMint: Keypair.generate().publicKey,
       },
       feeEstimator,
       computeUnitLimit: 400_000,
@@ -170,7 +172,7 @@ describe("CandidateSet", () => {
       const set = new CandidateSet({
         connection: conn,
         payer: Keypair.generate(),
-        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey, tokenMint: Keypair.generate().publicKey },
         feeEstimator,
         computeUnitLimit: 400_000,
         blockhashMaxAgeMs: 15_000,
@@ -188,7 +190,7 @@ describe("CandidateSet", () => {
       const set = new CandidateSet({
         connection: conn,
         payer: Keypair.generate(),
-        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+        ixCtx: { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey, tokenMint: Keypair.generate().publicKey },
         feeEstimator,
         computeUnitLimit: 400_000,
         blockhashMaxAgeMs: 15_000,

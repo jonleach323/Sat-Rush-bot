@@ -48,7 +48,7 @@ logger.info(
           epochFeeBps: state.satrushConfig.epoch_fee_bps,
           oneBtcFeeBps: state.satrushConfig.one_btc_fee_bps,
           satsVaultRoundFeeBps: state.satrushConfig.sats_vault_round_fee_bps,
-          satsVaultClaimFeeBps: state.satrushConfig.sats_vault_claim_fee_bps,
+          satsVaultClaimFeeBps: state.satrushConfig.vault_exit_fee_bps,
           protocolFeeBps: state.satrushConfig.protocol_fee_bps,
           unclaimedHashrateBps: state.satrushConfig.unclaimed_hashrate_bps,
         }

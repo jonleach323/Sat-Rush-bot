@@ -47,7 +47,7 @@ for (;;) {
         console.log(`  usd_mint  ${satrushConfig.usd_mint.toBase58()}`);
         console.log(`  btc_mint  ${satrushConfig.btc_mint.toBase58()}`);
         console.log(
-          `  fees bps  strike ${satrushConfig.strike_fee_bps} epoch ${satrushConfig.epoch_fee_bps} 1btc ${satrushConfig.one_btc_fee_bps} svRound ${satrushConfig.sats_vault_round_fee_bps} svClaim ${satrushConfig.sats_vault_claim_fee_bps} protocol ${satrushConfig.protocol_fee_bps}`,
+          `  fees bps  strike ${satrushConfig.strike_fee_bps} epoch ${satrushConfig.epoch_fee_bps} 1btc ${satrushConfig.one_btc_fee_bps} svRound ${satrushConfig.sats_vault_round_fee_bps} svClaim ${satrushConfig.vault_exit_fee_bps} protocol ${satrushConfig.protocol_fee_bps}`,
         );
         console.log(`  min deploy $${Number(satrushConfig.min_deploy_usd_amount.toString()) / 1e6}`);
         console.log(`  board     ${boardInfo ? "initialized" : "NOT YET INITIALIZED"}`);

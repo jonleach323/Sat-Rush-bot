@@ -50,7 +50,7 @@ await prices.refresh();
 // Value a share the way we could actually realise it: net of the claim fee.
 const shares = num(sv.btc_shares);
 const shareUsd = shares > 0
-  ? (num(sv.btc_amount) / shares / 1e8) * prices.btcUsd() * (1 - conf.sats_vault_claim_fee_bps / 10_000)
+  ? (num(sv.btc_amount) / shares / 1e8) * prices.btcUsd() * (1 - conf.vault_exit_fee_bps / 10_000)
   : 0;
 
 const iterSlots = num(conf.epoch_vault_iteration_duration);
@@ -59,7 +59,7 @@ const head = board.round_id;
 
 console.log(`gate: HASHRATE_DEPLOY_CREDIT_ENABLED = ${cfg.HASHRATE_DEPLOY_CREDIT_ENABLED}`);
 console.log(`live iteration ${ev.iteration_id} · ${roundsPerIter} rounds per iteration`);
-console.log(`share value ${shareUsd.toExponential(3)} USD (net of the ${conf.sats_vault_claim_fee_bps / 100}% claim fee)\n`);
+console.log(`share value ${shareUsd.toExponential(3)} USD (net of the ${conf.vault_exit_fee_bps / 100}% claim fee)\n`);
 
 let anyPaid = false;
 console.log("  iter   deploys   deployed    board back   epoch paid    NET      verdict");

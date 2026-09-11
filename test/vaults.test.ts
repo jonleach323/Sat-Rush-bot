@@ -63,7 +63,8 @@ describe("1-BTC vault accounts round-trip", () => {
       entropy: bytes32(),
       winning_ticket: new BN(0),
       prize_btc: new BN(100_000_000),
-      reserved: bytes32(),
+      rotor_arm_counter: new BN(0),
+      reserved: new Array<number>(24).fill(0),
     };
     const buf = await accountsCoder.encode("OneBtcVaultIteration", it);
     const d = decodeAccount<OneBtcVaultIteration>("OneBtcVaultIteration", buf);
@@ -101,7 +102,10 @@ describe("epoch vault accounts round-trip", () => {
       pool_btc_amount: new BN(1_500_000),
       reserved_usd_amount: new BN(0),
       reserved_btc_amount: new BN(0),
-      reserved: bytes32(),
+      rotor_arm_counter: new BN(0),
+      pool_token_amount: new BN(0),
+      reserved_token_amount: new BN(0),
+      reserved: new Array<number>(8).fill(0),
     };
     const buf = await accountsCoder.encode("EpochVault", v);
     const d = decodeAccount<EpochVault>("EpochVault", buf);
@@ -117,7 +121,7 @@ describe("epoch vault accounts round-trip", () => {
     expect(d.total_tickets.toString()).toBe("0");
     expect(d.participants_count).toBe(0);
     expect(Object.keys(d.state)[0]).toBe("Open"); // discriminant 0 → first variant
-    expect(d.winners[0]).toMatchObject({ page_index: 0, claimed: false });
+    expect(d.winners[0]).toMatchObject({ page_index: 0, distributed: false });
   });
 
   it("EpochVaultEntry", async () => {

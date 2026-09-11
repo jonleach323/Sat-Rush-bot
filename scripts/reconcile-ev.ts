@@ -83,10 +83,10 @@ await prices.refresh();
 const totalShares = num(sv.btc_shares);
 const shareUsd = totalShares > 0
   ? (num(sv.btc_amount) / totalShares / 1e8) * prices.btcUsd() *
-    (1 - conf.sats_vault_claim_fee_bps / 1e4)
+    (1 - conf.vault_exit_fee_bps / 1e4)
   : 0;
 console.log(`share value ${shareUsd.toExponential(3)} USD net of the ` +
-  `${conf.sats_vault_claim_fee_bps / 100}% claim fee\n`);
+  `${conf.vault_exit_fee_bps / 100}% claim fee\n`);
 
 const AUTHORITY = new PublicKey(
   process.env["OPERATOR_WALLET"] ?? "8EHb675bVwz3nrAUssQfdKx8665WjkU5wZcykvqtii5J",

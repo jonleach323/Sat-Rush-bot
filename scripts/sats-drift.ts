@@ -1,7 +1,7 @@
 /**
  * The sats vault's exit fee, and who collects it.
  *
- * sats_vault_claim_fee_bps is 1000: a claimer receives 90% of their pro-rata
+ * vault_exit_fee_bps is 1000: a claimer receives 90% of their pro-rata
  * BTC and the other 10% stays behind. Nothing in this project priced what
  * happens to that 10% — it was treated purely as a cost on our own position.
  *
@@ -37,7 +37,7 @@ const conf = decodeAccount<SatrushConfig>(
 const btc = Number(sv.btc_amount.toString());
 const shares = Number(sv.btc_shares.toString());
 const vaultRatio = btc / shares;
-console.log(`claim fee ${conf.sats_vault_claim_fee_bps} bps`);
+console.log(`claim fee ${conf.vault_exit_fee_bps} bps`);
 console.log(`vault ${(btc / 1e8).toFixed(8)} BTC over ${shares.toLocaleString()} shares`);
 console.log(`vault ratio ${vaultRatio.toFixed(10)} base/share\n`);
 
@@ -113,8 +113,8 @@ const drift = last / first - 1;
 const perDay = spanHours > 0 ? drift * (24 / spanHours) : 0;
 console.log(`\n  drift over the window: ${(100 * drift).toFixed(4)}%  →  ~${(100 * perDay).toFixed(3)}%/day`);
 console.log(`  cross-check: ${(100 * totS / shares).toFixed(2)}% of the vault exited paying ` +
-  `${conf.sats_vault_claim_fee_bps / 100}% → holders should gain ` +
-  `${(100 * (totS / shares) * (conf.sats_vault_claim_fee_bps / 10_000)).toFixed(4)}%`);
+  `${conf.vault_exit_fee_bps / 100}% → holders should gain ` +
+  `${(100 * (totS / shares) * (conf.vault_exit_fee_bps / 10_000)).toFixed(4)}%`);
 console.log(`\n  This accrues to a holder who does NOTHING. It is the only edge in this`);
 console.log(`  repo that needs no deploy, no ticket, and no round won — but the rate is`);
 console.log(`  set entirely by other people's exit volume, so treat it as a flow`);

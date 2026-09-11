@@ -43,7 +43,7 @@ describe("fee model", () => {
       one_btc_fee_bps: 132,
       protocol_fee_bps: 142,
       sats_vault_round_fee_bps: 1200,
-      sats_vault_claim_fee_bps: 1000,
+      vault_exit_fee_bps: 1000,
     } as never);
     expect(fees.deployFeeBps).toBe(800);
     expect(fees.satsVaultRoundBps).toBe(1200);

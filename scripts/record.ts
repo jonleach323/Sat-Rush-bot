@@ -62,6 +62,7 @@ const fees = feeModelFromConfig(state.satrushConfig);
 const ixCtx = {
   usdMint: state.satrushConfig.usd_mint,
   btcMint: state.satrushConfig.btc_mint,
+  tokenMint: state.satrushConfig.token_mint,
 };
 
 const bankroll = new Bankroll(
