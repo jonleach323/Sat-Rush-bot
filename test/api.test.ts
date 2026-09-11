@@ -16,6 +16,7 @@ const fakeData: MonitorData = {
     unclaimed: { usd: 8.1, shares: "141384", sharesUsd: 0.13, tokenShares: "0", tokenSharesUsd: 0 },
     markedNetTodayUsd: -1.5,
     tokenFeed: null,
+    wallets: [],
     caps: { maxPerRoundUsd: 1000, dailyLossCapUsd: 1000, dailyLossLeftUsd: 998.5 },
     prices: { btc: { usd: 118_423.1, live: true }, sol: { usd: 212.55, live: true } },
   }),

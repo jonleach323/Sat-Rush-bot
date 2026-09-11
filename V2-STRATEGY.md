@@ -225,7 +225,17 @@ observable — and each is a place the bot would trade on wrong numbers:
   `tollAtRiskFraction` of a stake against the daily cap.
 - ~~**Preflight**~~ DONE: `MEASURED_ECONOMICS` re-baselined to the live V2
   config.
-- **Token price feed** for `mintedTokenValueBase` (API oracle spot).
+- ~~**Token price feed**~~ DONE: `src/ingest/token-feed.ts` (API oracle spot
+  × measured mint rate; fail-closed).
+- ~~**Wallet set**~~ DONE 2026-09-11: `WALLET_PATHS` behind the one
+  orchestrator — candidates split the authorized total across eligible
+  wallets and sign a leg each; the bankroll latch and both caps stay
+  aggregate; every wallet's Miner is streamed; settles, sweeps, epoch
+  distributes, 1-BTC claims and vault engines run per wallet; extras bind to
+  the primary's affiliate at their first deploy. Not built: `set_miner_tag`
+  (register the tag from the app once) and the per-wallet dashboard panel.
+- **Dry run** (FINDINGS.md § E-v2-dryrun): boots, cycles rounds, skips at
+  −4% EV; no halts.
 
 ## 6. Launch-day runbook
 

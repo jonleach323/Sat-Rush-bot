@@ -99,10 +99,11 @@ import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
-import { feeModelFromConfig, netFactor, TILES_COUNT, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { STREAK_GRACE_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
 import { TokenFeed } from "./ingest/token-feed.js";
+import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
@@ -157,8 +158,9 @@ export class Orchestrator {
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
   // that the manager's async readState refreshes immediately before evaluating.
-  private vaultHashrateCache = 0;
-  private vaultEpochEntryCache: { iter: number; tickets: number } = { iter: -1, tickets: 0 };
+  // Keyed by wallet pubkey (base58): each fleet wallet spends its own hashrate.
+  private readonly vaultHashrateCache = new Map<string, number>();
+  private readonly vaultEpochEntryCache = new Map<string, { iter: number; tickets: number }>();
   /** Latest on-chain vault pool state, populated by the vault manager poll.
    * Null when the vault strategy is off or before the first read. */
   private vaultPoolCache: VaultPoolsJson | null = null;
@@ -188,6 +190,8 @@ export class Orchestrator {
     private readonly prices: PriceFeed,
     /** RUSH price + mint rate (V2 only; null under GAME_VERSION=v1). */
     private readonly tokenFeed: TokenFeed | null,
+    /** The signer fleet; `payer` is its primary. One wallet unless WALLET_PATHS is set. */
+    private readonly wallets: WalletSet,
   ) {
     this.health = new HealthMonitor(
       {
@@ -257,6 +261,7 @@ export class Orchestrator {
       shareValueUsd: () => this.satsShareValueUsd(),
       tokenShareValueUsd: () => this.tokenShareValueUsd(),
       tokenFeedStatus: () => this.tokenFeed?.status() ?? null,
+      wallets: () => this.wallets.snapshot(),
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -269,7 +274,13 @@ export class Orchestrator {
   static async boot(cfg: Config): Promise<Orchestrator> {
     const programId = new PublicKey(cfg.PROGRAM_ID);
     const connection = new Connection(cfg.RPC_HTTP_URL, "processed");
-    const payer = loadKeypair(cfg.KEYPAIR_PATH);
+    // KEYPAIR_PATH is always the primary (it pays cranks and claims); WALLET_PATHS
+    // adds the extra signers. Duplicates are refused inside WalletSet.load.
+    const wallets = WalletSet.load(
+      cfg.WALLET_PATHS.length > 0 ? [cfg.KEYPAIR_PATH, ...cfg.WALLET_PATHS] : [],
+      cfg.KEYPAIR_PATH,
+    );
+    const payer = wallets.primary().keypair;
     const db = new StateDb(cfg.DB_PATH);
 
     const state = await bootstrapGameState(connection, {
@@ -278,7 +289,7 @@ export class Orchestrator {
           { ...r, droppedUsd: Number(r.droppedBase) / 1e6 },
           "fork rollback absorbed — board stake moved down at a newer slot",
         ),
-      minerAuthority: payer.publicKey,
+      minerAuthority: wallets.pubkeys(),
       programId,
     });
     if (!state.satrushConfig) throw new Error("satrush_config missing on chain");
@@ -417,9 +428,30 @@ export class Orchestrator {
             solUsd: () => prices.solUsd(),
           }
         : undefined;
+    // Fleet: balances must be known before the first allocate(); the drift
+    // tick keeps them fresh afterwards.
+    if (wallets.size > 1) await wallets.refreshBalances(connection, ixCtx.usdMint);
+    const primaryKey = payer.publicKey;
+    const affiliateAuthority = cfg.AFFILIATE_AUTHORITY ? new PublicKey(cfg.AFFILIATE_AUTHORITY) : primaryKey;
     const candidates = new CandidateSet({
       connection,
       payer,
+      ...(wallets.size > 1
+        ? {
+            wallets,
+            fundingFloor: {
+              minDeployBase: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
+              minLamports: cfg.WALLET_MIN_LAMPORTS,
+            },
+            // Bind a wallet to the affiliate only while it has no Miner yet
+            // (that is the only time the program reads the slot); never the
+            // affiliate itself (self-referral is refused on chain).
+            affiliateFor: (w: PublicKey) =>
+              w.equals(affiliateAuthority) || state.minerAt(minerPda(w, programId)) !== null
+                ? undefined
+                : affiliateAuthority,
+          }
+        : {}),
       ixCtx,
       feeEstimator,
       computeUnitLimit: cfg.DEPLOY_CU_LIMIT,
@@ -436,7 +468,11 @@ export class Orchestrator {
       mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
     });
 
-    const watch = [satsVaultPda(programId), tokenVaultPda(programId), minerPda(payer.publicKey, programId)];
+    const watch = [
+      satsVaultPda(programId),
+      tokenVaultPda(programId),
+      ...wallets.pubkeys().map((w) => minerPda(w, programId)),
+    ];
     const source: IngestSource = cfg.GRPC_URL
       ? new YellowstoneIngest({
           endpoint: cfg.GRPC_URL,
@@ -468,6 +504,7 @@ export class Orchestrator {
       fees,
       prices,
       tokenFeed,
+      wallets,
     );
   }
 
@@ -833,6 +870,34 @@ export class Orchestrator {
       strikeExpectedPot: this.strikeExpectedPotBase(),
       presenceCreditBase: this.presenceCreditBase(),
     };
+  }
+
+  /**
+   * One-line view of the model at the cap, for skip logs: the EV (bps of
+   * gross) of an even blanket and of the single emptiest tile at
+   * MAX_PER_ROUND. Tells the operator how far from +EV the board sits without
+   * a debugger — under V2 both are typically −100 bps or so.
+   */
+  private evDiagnostics(): Record<string, unknown> {
+    try {
+      const src = this.evSource();
+      const model = "model" in src ? src.model(src.predictedStakes) : v1Model(src);
+      const cap = this.effectiveMaxPerRoundBase();
+      if (cap <= 0n) return {};
+      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / BigInt(TILES_COUNT));
+      const emptiest = model.predictedStakes.reduce((b, s, i, a) => (s < (a[b] ?? 0n) ? i : b), 0);
+      const single = new Array<bigint>(TILES_COUNT).fill(0n);
+      single[emptiest] = cap;
+      const bps = (ev: number, gross: bigint) => Math.round((ev / Number(gross)) * 10_000);
+      return {
+        blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
+        emptiestTile: emptiest,
+        emptiestEvBps: bps(model.ev(single), cap),
+        tokenYield: this.tokenFeed?.status().live ? this.tokenFeed.status().yieldPerVolume : null,
+      };
+    } catch {
+      return {};
+    }
   }
 
   /**
@@ -1403,7 +1468,11 @@ export class Orchestrator {
     }
     const candidate = this.candidates.best(this.roundId);
     if (!candidate) {
-      this.skipOnce("no_candidate", { note: "selector found no deployable allocation" });
+      this.skipOnce("no_candidate", {
+        note: "selector found no deployable allocation",
+        selector: this.candidates.lastSkipReason(this.roundId) ?? "unknown",
+        ...this.evDiagnostics(),
+      });
       return;
     }
     const auth = this.bankroll.authorize(
@@ -1476,62 +1545,101 @@ export class Orchestrator {
         );
       }
     }
-    this.db.recordMyDeploy({
-      roundId: this.roundId,
-      mask: selection.mask,
-      amount: selection.totalGross,
-      evExpected: selection.ev,
-      firedSlot: this.state.currentSlot,
-      sig: candidate.signature,
-      status: this.cfg.EXECUTION_MODE === "dry" ? "dry" : "fired",
-      streak: this.state.miner?.current_streak_count ?? null,
-    });
+    // One row per leg: the fleet's deploys are separate transactions with
+    // separate outcomes, and per-wallet attribution is what the streak and
+    // P&L reconstruction key on. Σ leg amounts == the authorized total.
+    const legTotal = candidate.legs.reduce((a, l) => a + l.amountGross, 0n);
+    if (legTotal !== selection.totalGross) {
+      this.haltFromError(
+        new HaltError("candidate legs do not sum to the authorized amount", {
+          legs: legTotal.toString(),
+          authorized: selection.totalGross.toString(),
+        }),
+        "pre-send invariant",
+      );
+      this.transition("LOGGED", { haltedBeforeSend: true });
+      return;
+    }
+    for (const leg of candidate.legs) {
+      const legMiner = this.state.minerAt(minerPda(new PublicKey(leg.wallet), new PublicKey(this.cfg.PROGRAM_ID)));
+      this.db.recordMyDeploy({
+        roundId: this.roundId,
+        mask: selection.mask,
+        amount: leg.amountGross,
+        evExpected: selection.ev * (Number(leg.amountGross) / Number(selection.totalGross)),
+        firedSlot: this.state.currentSlot,
+        sig: leg.signature,
+        status: this.cfg.EXECUTION_MODE === "dry" ? "dry" : "fired",
+        streak: legMiner?.current_streak_count ?? null,
+        wallet: leg.wallet,
+      });
+    }
     this.transition("FIRED", {
       mask: selection.mask,
       tiles: selection.tiles,
       amount: selection.totalGross.toString(),
+      legs: candidate.legs.length,
       ev: selection.ev,
       fee: candidate.feeMicroLamports,
       cutoff: this.state.slotsToCutoff(),
       dry: this.cfg.EXECUTION_MODE === "dry",
     });
 
-    const firePromise = this.sender.fire(
-      {
-        signature: candidate.signature,
-        serialized: candidate.serialized,
-        lastValidBlockHeight: candidate.lastValidBlockHeight,
-        meta: { roundId: this.roundId, mask: selection.mask },
-      },
-      { isPastCutoff: () => (this.state.slotsToCutoff() ?? 1) <= -10 },
+    const isPastCutoff = () => (this.state.slotsToCutoff() ?? 1) <= -10;
+    const firePromise = Promise.all(
+      candidate.legs.map((leg) =>
+        this.sender.fire(
+          {
+            signature: leg.signature,
+            serialized: leg.serialized,
+            lastValidBlockHeight: leg.lastValidBlockHeight,
+            meta: { roundId: this.roundId, mask: selection.mask, wallet: leg.wallet },
+          },
+          { isPastCutoff },
+        ),
+      ),
     );
     this.transition("CONFIRMING");
     const roundAtFire = this.roundId;
-    const result = await firePromise;
+    const results = await firePromise;
+    // Per-leg statuses; the round's outcome is the best leg's (one landed
+    // deploy keeps the streak and the settle path alive), with every
+    // non-landed leg reported.
+    results.forEach((r, i) => {
+      const leg = candidate.legs[i]!;
+      if (r.outcome === "landed") this.db.updateMyDeployStatus(leg.signature, "landed", r.landedSlot);
+      else if (r.outcome === "missed_round") this.db.updateMyDeployStatus(leg.signature, "missed");
+      else if (r.outcome !== "dry") this.db.updateMyDeployStatus(leg.signature, "failed");
+    });
+    const landedLegs = results.filter((r) => r.outcome === "landed");
+    if (candidate.legs.length > 1 && landedLegs.length !== results.length) {
+      this.alert(
+        `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (${results
+          .map((r, i) => `${candidate.legs[i]!.wallet.slice(0, 6)}:${r.outcome}`)
+          .join(" ")})`,
+      );
+    }
+    const result =
+      landedLegs[0] ??
+      results.find((r) => r.outcome === "dry") ??
+      results.find((r) => r.outcome === "missed_round") ??
+      results[0]!;
 
     // If the board rotated while confirming, update the DB but leave the
     // new round's state machine alone.
     if (this.roundId !== roundAtFire) {
-      if (result.outcome === "landed") {
-        this.db.updateMyDeployStatus(candidate.signature, "landed", result.landedSlot);
-      } else if (result.outcome === "missed_round") {
-        this.db.updateMyDeployStatus(candidate.signature, "missed");
-      }
-      this.pnl.refreshDaily();
+      this.pnl.refreshDaily(); // leg statuses were written above
       return;
     }
 
     if (result.outcome === "landed") {
-      this.db.updateMyDeployStatus(candidate.signature, "landed", result.landedSlot);
-      this.transition("SETTLING", { landedSlot: result.landedSlot });
+      this.transition("SETTLING", { landedSlot: result.landedSlot, legs: landedLegs.length });
     } else if (result.outcome === "dry") {
       this.transition("SETTLING", { dry: true });
     } else if (result.outcome === "missed_round") {
-      this.db.updateMyDeployStatus(candidate.signature, "missed");
       this.alert(`missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
       this.transition("LOGGED", { missed: true });
     } else {
-      this.db.updateMyDeployStatus(candidate.signature, "failed");
       this.alert(`deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
       this.transition("LOGGED", { failed: true });
     }
@@ -1543,46 +1651,59 @@ export class Orchestrator {
   private async selfSettle(roundId: number): Promise<void> {
     if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry") return;
     if (this.settleFired.has(roundId)) return;
-    const deployed = this.db.queryOne<{ status: string }>(
-      "SELECT status FROM my_deploys WHERE round_id = ? AND status = 'landed'",
-      roundId,
-    );
-    if (!deployed) return;
+    const landed = this.db.landedWallets(roundId);
+    if (landed.length === 0) return;
     this.settleFired.add(roundId);
-    try {
-      const fee = this.feeEstimator.currentMicroLamportsPerCu();
-      assertFeeBearingInvariants({
-        kind: "settle",
-        priorityFeeMicroLamports: fee,
-        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
-        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
-      });
-      const ix = buildSettleDeployPublic(this.ixCtx, {
-        authority: this.payer.publicKey,
-        deploymentAuthority: this.payer.publicKey,
-        roundId,
-        // V2: the affiliate leg settles to Miner.affiliate (default pubkey → none).
-        affiliate: this.state.miner?.affiliate,
-      });
-      const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-        payer: this.payer,
-        instructions: [ix],
-        computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
-        priorityFeeMicroLamports: fee,
-      });
-      const result = await this.sender.fire(
-        {
-          signature: bs58.encode(tx.signatures[0]!),
-          serialized: Buffer.from(tx.serialize()),
-          lastValidBlockHeight,
-          meta: { kind: "self_settle", roundId },
-        },
-        { timeoutMs: 15_000 },
-      );
-      this.log.info({ roundId, outcome: result.outcome }, "self-settle resolved");
-    } catch (err) {
-      this.log.warn({ roundId, err: String(err) }, "self-settle failed (crank will cover)");
+    // One settle per landed wallet; the primary cranks and pays for all of
+    // them (settle is permissionless), so the extras never need SOL for it.
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    for (const w of landed) {
+      const deployer = w ? new PublicKey(w) : this.payer.publicKey;
+      try {
+        const fee = this.feeEstimator.currentMicroLamportsPerCu();
+        assertFeeBearingInvariants({
+          kind: "settle",
+          priorityFeeMicroLamports: fee,
+          maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+          killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+        });
+        const ix = buildSettleDeployPublic(this.ixCtx, {
+          authority: this.payer.publicKey,
+          deploymentAuthority: deployer,
+          roundId,
+          // V2: the affiliate leg settles to that wallet's Miner.affiliate (default → none).
+          affiliate: this.state.minerAt(minerPda(deployer, programId))?.affiliate,
+        });
+        const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+          payer: this.payer,
+          instructions: [ix],
+          computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
+          priorityFeeMicroLamports: fee,
+        });
+        const result = await this.sender.fire(
+          {
+            signature: bs58.encode(tx.signatures[0]!),
+            serialized: Buffer.from(tx.serialize()),
+            lastValidBlockHeight,
+            meta: { kind: "self_settle", roundId, wallet: deployer.toBase58() },
+          },
+          { timeoutMs: 15_000 },
+        );
+        this.log.info({ roundId, wallet: deployer.toBase58(), outcome: result.outcome }, "self-settle resolved");
+      } catch (err) {
+        this.log.warn({ roundId, wallet: deployer.toBase58(), err: String(err) }, "self-settle failed (crank will cover)");
+      }
     }
+  }
+
+  /** True for any signer of the fleet (the primary included). */
+  private isOurWallet(authority: PublicKey): boolean {
+    return this.wallets.byPubkey(authority.toBase58()) !== undefined;
+  }
+
+  /** Keypair for a fleet wallet by public key (the primary when unknown/null). */
+  private signerFor(wallet: string | null | undefined): Keypair {
+    return (wallet ? this.wallets.byPubkey(wallet)?.keypair : undefined) ?? this.payer;
   }
 
   /**
@@ -1622,10 +1743,13 @@ export class Orchestrator {
    * the gross and mask; without one there is nothing to check against.
    */
   private reconcileSettlementV2(data: PublicDeploySettled, round: Round): void {
+    const wallet = data.authority.toBase58();
     const mine = this.db.queryOne<{ amount: string; mask: number }>(
       `SELECT amount, mask FROM my_deploys
-       WHERE round_id = ? AND status IN ('fired','landed') ORDER BY id DESC LIMIT 1`,
+       WHERE round_id = ? AND status IN ('fired','landed') AND (wallet = ? OR wallet IS NULL)
+       ORDER BY id DESC LIMIT 1`,
       data.round_id,
+      wallet,
     );
     if (!mine) {
       this.log.warn({ roundId: data.round_id }, "settled a round with no deploy row — reconcile skipped");
@@ -1712,34 +1836,44 @@ export class Orchestrator {
     );
     const num = (v: { toString(): string }) => Number(v.toString());
 
-    const engine = new VaultEngine({
-      enabled: true, // gate is the manager itself (only started when enabled)
-      dry: this.cfg.EXECUTION_MODE === "dry",
-      hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
-      epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
-      ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
-      maxTickets: this.cfg.VAULT_MAX_TICKETS,
-      hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
-      hashrateAvailable: () => this.vaultHashrateCache,
-      myTickets: (kind, iter) =>
-        kind === "epoch"
-          ? this.vaultEpochEntryCache.iter === iter
-            ? this.vaultEpochEntryCache.tickets
-            : 0
-          : this.db.vaultTicketsHeld("one_btc", iter),
-      buy: (kind, iter, tickets) => this.buyVaultTickets(kind, iter, tickets),
-      log: (obj) => this.log.info(obj, "vault"),
+    // One engine per wallet: hashrate lives in each wallet's own Miner PDA and
+    // cannot be pooled, so each wallet buys its own tickets with its own
+    // balance (and signs its own buys). VAULT_MAX_TICKETS applies per wallet
+    // — it bounds one Miner's exposure, which is what the cap was sized for.
+    const engines = this.wallets.all().map((w) => {
+      const key = w.keypair.publicKey.toBase58();
+      return new VaultEngine({
+        enabled: true, // gate is the manager itself (only started when enabled)
+        dry: this.cfg.EXECUTION_MODE === "dry",
+        hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
+        epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
+        ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
+        maxTickets: this.cfg.VAULT_MAX_TICKETS,
+        hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
+        hashrateAvailable: () => this.vaultHashrateCache.get(key) ?? 0,
+        myTickets: (kind, iter) => {
+          if (kind === "epoch") {
+            const e = this.vaultEpochEntryCache.get(key);
+            return e && e.iter === iter ? e.tickets : 0;
+          }
+          return this.db.vaultTicketsHeld("one_btc", iter, this.wallets.size > 1 ? key : null);
+        },
+        buy: (kind, iter, tickets) => this.buyVaultTickets(kind, iter, tickets, w),
+        log: (obj) => this.log.info({ ...obj, wallet: key.slice(0, 6) }, "vault"),
+      });
     });
 
     const readState = async (): Promise<VaultReadState> => {
       const slot = await this.connection.getSlot("processed");
-      const minerInfo = await this.connection.getAccountInfo(
-        minerPda(this.payer.publicKey, programId),
-        "processed",
-      );
-      this.vaultHashrateCache = minerInfo
-        ? num(decodeAccount<Miner>("Miner", minerInfo.data).hashrate_amount)
-        : 0;
+      // Hashrate per wallet from the streamed Miner accounts (no RPC round
+      // trip); a wallet with no Miner yet has none to spend.
+      for (const w of this.wallets.all()) {
+        const key = w.keypair.publicKey.toBase58();
+        const miner = this.minerOf(w);
+        this.vaultHashrateCache.set(key, miner ? num(miner.hashrate_amount) : 0);
+        w.hashrate = this.vaultHashrateCache.get(key) ?? 0;
+        w.streak = miner?.current_streak_count ?? w.streak;
+      }
 
       let epoch: VaultReadState["epoch"] = null;
       const evInfo = await this.connection.getAccountInfo(epochVaultPda(programId), "processed");
@@ -1751,16 +1885,18 @@ export class Orchestrator {
         );
         if (itInfo) {
           const it = decodeAccount<EpochVaultIteration>("EpochVaultIteration", itInfo.data);
-          const entryInfo = await this.connection.getAccountInfo(
-            epochVaultEntryPda(ev.iteration_id, this.payer.publicKey, programId),
-            "processed",
-          );
-          this.vaultEpochEntryCache = {
-            iter: ev.iteration_id,
-            tickets: entryInfo
-              ? num(decodeAccount<EpochVaultEntry>("EpochVaultEntry", entryInfo.data).tickets)
-              : 0,
-          };
+          const entryKeys = this.wallets
+            .pubkeys()
+            .map((w) => epochVaultEntryPda(ev.iteration_id, w, programId));
+          const entryInfos = await this.connection.getMultipleAccountsInfo(entryKeys, "processed");
+          this.wallets.all().forEach((w, i) => {
+            const info = entryInfos[i];
+            const tickets = info
+              ? num(decodeAccount<EpochVaultEntry>("EpochVaultEntry", info.data).tickets)
+              : 0;
+            this.vaultEpochEntryCache.set(w.keypair.publicKey.toBase58(), { iter: ev.iteration_id, tickets });
+            w.tickets = tickets;
+          });
           epoch = {
             iterationId: ev.iteration_id,
             open: "Open" in it.state,
@@ -1802,10 +1938,13 @@ export class Orchestrator {
       // Cache the live pool state for monitoring. These accounts are only read
       // here, so without this the dashboard can't show pool size, field size, or
       // what a ticket is currently worth — the numbers that decide entry.
-      const myEpoch =
-        epoch && this.vaultEpochEntryCache.iter === epoch.iterationId
-          ? this.vaultEpochEntryCache.tickets
-          : 0;
+      // Fleet-wide tickets in the current iteration (the dashboard's view).
+      const myEpoch = epoch
+        ? [...this.vaultEpochEntryCache.values()].reduce(
+            (a, e) => a + (e.iter === epoch.iterationId ? e.tickets : 0),
+            0,
+          )
+        : 0;
       const ticketEv = (
         kind: "epoch" | "one_btc",
         pool: number,
@@ -1844,7 +1983,7 @@ export class Orchestrator {
     };
 
     this.vaultManager = new VaultManager({
-      engine,
+      engines,
       readState,
       epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
       epochLateFraction: this.cfg.VAULT_EPOCH_LATE_FRACTION,
@@ -1861,9 +2000,10 @@ export class Orchestrator {
   private async sendVaultIx(
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    signer: Keypair = this.payer,
   ): Promise<string> {
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu(),
@@ -1882,10 +2022,10 @@ export class Orchestrator {
   }
 
   /** Our SPL balance for a mint, in base units; 0 when the ATA doesn't exist. */
-  private async ataBalanceBase(mint: PublicKey): Promise<bigint> {
+  private async ataBalanceBase(mint: PublicKey, owner: PublicKey = this.payer.publicKey): Promise<bigint> {
     try {
       const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
-      const ata = getAssociatedTokenAddressSync(mint, this.payer.publicKey);
+      const ata = getAssociatedTokenAddressSync(mint, owner);
       const bal = await this.connection.getTokenAccountBalance(ata, "confirmed");
       return BigInt(bal.value.amount);
     } catch {
@@ -1907,14 +2047,16 @@ export class Orchestrator {
     iterationId: number,
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    /** Wallet the proceeds land on (the 1-BTC ticket's owner); primary by default. */
+    recipient: PublicKey = this.payer.publicKey,
   ): Promise<string> {
-    const usdBefore = await this.ataBalanceBase(this.ixCtx.usdMint);
-    const btcBefore = await this.ataBalanceBase(this.ixCtx.btcMint);
+    const usdBefore = await this.ataBalanceBase(this.ixCtx.usdMint, recipient);
+    const btcBefore = await this.ataBalanceBase(this.ixCtx.btcMint, recipient);
     const outcome = await this.sendVaultIx(ix, meta);
     if (outcome !== "landed") return outcome;
     try {
-      const usdBase = (await this.ataBalanceBase(this.ixCtx.usdMint)) - usdBefore;
-      const btcBase = (await this.ataBalanceBase(this.ixCtx.btcMint)) - btcBefore;
+      const usdBase = (await this.ataBalanceBase(this.ixCtx.usdMint, recipient)) - usdBefore;
+      const btcBase = (await this.ataBalanceBase(this.ixCtx.btcMint, recipient)) - btcBefore;
       this.db.recordVaultClaim({
         kind,
         iterationId,
@@ -1981,7 +2123,8 @@ export class Orchestrator {
       ev !== null &&
       ev.iteration_id === iterationId &&
       slot >= Number(ev.last_trigger_slot.toString()) + durationSlots;
-    const weWon = epochWinIndex(it.winners, this.payer.publicKey) >= 0;
+    const winningWallets = this.wallets.pubkeys().filter((w) => epochWinIndex(it.winners, w) >= 0);
+    const weWon = winningWallets.length > 0;
     const action = epochAction({
       state: stateName,
       windowElapsed,
@@ -2029,20 +2172,26 @@ export class Orchestrator {
       // (USD → claim_usd pool, BTC → sats-vault shares, RUSH → token vault).
       // Nothing reaches the wallet ATAs, so this is a plain crank send; the
       // Miner-side accounting is picked up by the claim path.
-      const rank = epochWinIndex(it.winners, this.payer.publicKey);
-      const outcome = await this.sendVaultIx(
-        buildDistributeEpochReward(this.ixCtx, {
-          authority: this.payer.publicKey,
-          iterationId,
-          rank,
-          winnerAuthority: this.payer.publicKey,
-        }),
-        { kind: "vault_epoch_distribute", iterationId, rank },
-      );
-      if (outcome === "landed") {
-        this.db.markVaultClaimed("epoch", iterationId);
-        this.alert(`🏆 vault WIN — distributed epoch iteration ${iterationId} (rank ${rank}) to our miner`);
+      // Equal prizes cap a wallet at one slot; a fleet can hold several.
+      let allLanded = true;
+      for (const winner of winningWallets) {
+        const rank = epochWinIndex(it.winners, winner);
+        const outcome = await this.sendVaultIx(
+          buildDistributeEpochReward(this.ixCtx, {
+            authority: this.payer.publicKey,
+            iterationId,
+            rank,
+            winnerAuthority: winner,
+          }),
+          { kind: "vault_epoch_distribute", iterationId, rank, wallet: winner.toBase58() },
+        );
+        if (outcome === "landed") {
+          this.alert(`🏆 vault WIN — distributed epoch iteration ${iterationId} (rank ${rank}) to ${winner.toBase58().slice(0, 6)}…`);
+        } else {
+          allLanded = false;
+        }
       }
+      if (allLanded) this.db.markVaultClaimed("epoch", iterationId);
     } else if (action === "done" && live) {
       this.db.markVaultClaimed("epoch", iterationId); // lost or fully resolved
     }
@@ -2077,17 +2226,21 @@ export class Orchestrator {
 
     let weWon = false;
     let winningTicketAcct: PublicKey | null = null;
+    let winningWallet: PublicKey = this.payer.publicKey;
     if (stateName !== "Open") {
       const winningTicket = BigInt(it.winning_ticket.toString());
-      for (const pkStr of this.db.oneBtcTicketPubkeys(iterationId)) {
-        const info = await this.connection.getAccountInfo(new PublicKey(pkStr), "processed");
+      for (const { ticketPubkey, wallet } of this.db.oneBtcTickets(iterationId)) {
+        const info = await this.connection.getAccountInfo(new PublicKey(ticketPubkey), "processed");
         if (!info) continue;
         const e = decodeAccount<OneBtcVaultEntry>("OneBtcVaultEntry", info.data);
         const start = BigInt(e.start_ticket_id.toString());
         const count = BigInt(e.tickets_count.toString());
         if (winningTicket >= start && winningTicket < start + count) {
           weWon = true;
-          winningTicketAcct = new PublicKey(pkStr);
+          winningTicketAcct = new PublicKey(ticketPubkey);
+          // The prize goes to the ticket's owner whoever cranks; the entry
+          // account is the source of truth, the DB's wallet is the hint.
+          winningWallet = wallet ? new PublicKey(wallet) : e.authority;
           break;
         }
       }
@@ -2110,8 +2263,10 @@ export class Orchestrator {
           authority: this.payer.publicKey,
           iterationId,
           ticket: winningTicketAcct,
+          winner: winningWallet,
         }),
-        { kind: "vault_one_btc_claim", iterationId },
+        { kind: "vault_one_btc_claim", iterationId, wallet: winningWallet.toBase58() },
+        winningWallet,
       );
       if (outcome === "landed") {
         this.db.markVaultClaimed("one_btc", iterationId);
@@ -2131,8 +2286,11 @@ export class Orchestrator {
     kind: VaultKind,
     iterationId: number,
     tickets: number,
+    /** The buying wallet — tickets are paid with ITS hashrate and it signs. */
+    buyer: WalletState = this.wallets.primary(),
   ): Promise<string> {
     const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    const signer = buyer.keypair;
     let ticketPubkey: string | null = null;
     let extraSigner: Keypair | null = null;
     let ix;
@@ -2141,7 +2299,7 @@ export class Orchestrator {
       extraSigner = ticket;
       ticketPubkey = ticket.publicKey.toBase58();
       ix = buildBuyOneBtcTickets(this.ixCtx, {
-        authority: this.payer.publicKey,
+        authority: signer.publicKey,
         iterationId,
         ticket: ticket.publicKey,
         ticketsToBuy: BigInt(tickets),
@@ -2157,7 +2315,7 @@ export class Orchestrator {
             .current_page_index
         : 0;
       ix = buildBuyEpochTickets(this.ixCtx, {
-        authority: this.payer.publicKey,
+        authority: signer.publicKey,
         iterationId,
         pageIndex,
         ticketsToBuy: BigInt(tickets),
@@ -2165,24 +2323,25 @@ export class Orchestrator {
     }
 
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: fee,
     });
     if (extraSigner) tx.sign([extraSigner]);
     const signature = bs58.encode(tx.signatures[0]!);
+    const wallet = signer.publicKey.toBase58();
     const result = await this.sender.fire(
       {
         signature,
         serialized: Buffer.from(tx.serialize()),
         lastValidBlockHeight,
-        meta: { kind: `vault_${kind}`, iterationId, tickets },
+        meta: { kind: `vault_${kind}`, iterationId, tickets, wallet },
       },
       { timeoutMs: 15_000 },
     );
     if (result.outcome === "landed" || result.outcome === "dry") {
-      this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, sig: signature });
+      this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, wallet, sig: signature });
     }
     if (result.outcome === "landed") {
       this.alert(`⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
@@ -2195,17 +2354,26 @@ export class Orchestrator {
     if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
     this.sweepInFlight = true;
     try {
-      await this.claimUsdCompound(); // fee-free — the compound loop
-      await this.claimSatsSweep(); // fee-bearing (10% claim fee) — opt-in
+      // Claims are authority-signed, so each wallet sweeps its own Miner.
+      for (const w of this.wallets.all()) {
+        await this.claimUsdCompound(w); // fee-free — the compound loop
+        await this.claimSatsSweep(w); // fee-bearing (10% claim fee) — opt-in
+      }
     } finally {
       this.sweepInFlight = false;
     }
+  }
+
+  /** A fleet wallet's Miner from the streamed state (null before its first deploy). */
+  private minerOf(w: WalletState): Miner | null {
+    return this.state.minerAt(minerPda(w.keypair.publicKey, new PublicKey(this.cfg.PROGRAM_ID)));
   }
 
   /** Send a single claim instruction through the race sender (shared plumbing). */
   private async fireClaim(
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    signer: Keypair = this.payer,
   ): Promise<string> {
     const fee = this.feeEstimator.currentMicroLamportsPerCu();
     assertFeeBearingInvariants({
@@ -2215,7 +2383,7 @@ export class Orchestrator {
       killSwitchEngaged: this.bankroll.killSwitchEngaged(),
     });
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: fee,
@@ -2239,19 +2407,21 @@ export class Orchestrator {
    * so there is no extra claim fee (unlike claim_sats) — making this pure upside.
    * Batched by MAX_UNCLAIMED_USD_VALUE so the tx fee is amortized.
    */
-  private async claimUsdCompound(): Promise<void> {
+  private async claimUsdCompound(w: WalletState): Promise<void> {
     if (!this.cfg.CLAIM_USD_ENABLED) return;
-    const miner = this.state.miner;
+    const miner = this.minerOf(w);
     if (!miner) return;
+    const authority = w.keypair.publicKey;
     const amount = BigInt(miner.unclaimed_usd_amount.toString());
     if (amount <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
     const outcome = await this.fireClaim(
-      buildClaimUsd(this.ixCtx, { authority: this.payer.publicKey, amount }),
-      { kind: "claim_usd", amount: amount.toString() },
+      buildClaimUsd(this.ixCtx, { authority, amount }),
+      { kind: "claim_usd", amount: amount.toString(), wallet: authority.toBase58() },
+      w.keypair,
     );
-    this.log.info({ amount: amount.toString(), outcome }, "usd compound claim resolved");
+    this.log.info({ amount: amount.toString(), wallet: authority.toBase58(), outcome }, "usd compound claim resolved");
     if (outcome === "landed") {
-      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet`);
+      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`);
     }
   }
 
@@ -2260,10 +2430,11 @@ export class Orchestrator {
    * pays the sats_vault_claim fee (~10%), so it's gated OFF by default — enable
    * only when realizing BTC is worth the fee vs holding the shares as exposure.
    */
-  private async claimSatsSweep(): Promise<void> {
-    const miner = this.state.miner;
+  private async claimSatsSweep(w: WalletState): Promise<void> {
+    const miner = this.minerOf(w);
     const vault = this.state.satsVault;
     if (!miner || !vault) return;
+    const authority = w.keypair.publicKey;
     const value = this.pnl.unclaimedValue({
       miner,
       satsVault: vault,
@@ -2282,10 +2453,11 @@ export class Orchestrator {
       (value.shares * BigInt(Math.round(this.cfg.CLAIM_FRACTION * 10_000))) / 10_000n;
     if (shares <= 0n) return;
     const outcome = await this.fireClaim(
-      buildClaimSats(this.ixCtx, { authority: this.payer.publicKey, shares }),
-      { kind: "claim_sats", shares: shares.toString() },
+      buildClaimSats(this.ixCtx, { authority, shares }),
+      { kind: "claim_sats", shares: shares.toString(), wallet: authority.toBase58() },
+      w.keypair,
     );
-    this.log.info({ shares: shares.toString(), outcome }, "sats sweep resolved");
+    this.log.info({ shares: shares.toString(), wallet: authority.toBase58(), outcome }, "sats sweep resolved");
   }
 
   // ── event wiring ────────────────────────────────────────────────────────────
@@ -2429,8 +2601,8 @@ export class Orchestrator {
         if (event.name === "PublicDeployCreated") {
           const data = event.data as PublicDeployCreated;
           this.noteDeployer(data.round_id, data.authority.toBase58());
-          if (data.authority.equals(this.payer.publicKey)) {
-            this.db.markDeployLandedByRound(data.round_id, event.slot);
+          if (this.isOurWallet(data.authority)) {
+            this.db.markDeployLandedByRound(data.round_id, event.slot, data.authority.toBase58());
           } else {
             this.db.recordCompetitorDeploy({
               roundId: data.round_id,
@@ -2448,7 +2620,7 @@ export class Orchestrator {
           this.onRevealed(event.data as RoundRevealed);
         } else if (event.name === "PublicDeploySettled") {
           const data = event.data as PublicDeploySettled;
-          if (data.authority.equals(this.payer.publicKey)) {
+          if (this.isOurWallet(data.authority)) {
             // Atomic per-round settlement write.
             this.db.transaction(() => {
               this.db.recordSettlement({
@@ -2459,6 +2631,7 @@ export class Orchestrator {
                 hashrateEarned: BigInt(data.hashrate_earned.toString()),
                 wonTokenAmount: BigInt(data.won_token_amount.toString()),
                 wonTokenShares: BigInt(data.won_token_shares.toString()),
+                wallet: data.authority.toBase58(),
                 sig: event.signature,
               });
               this.pnl.refreshDaily();
@@ -2482,6 +2655,7 @@ export class Orchestrator {
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
+      if (this.wallets.size > 1) void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
       void this.checkWalletDrift();
       this.validateHashrateFormula();
       this.refreshFireOffset();

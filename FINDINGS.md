@@ -1329,3 +1329,32 @@ Preflight is re-baselined to the live config (`MEASURED_ECONOMICS`). Not
 yet touched: the orchestrator's V1 economics, accounting and the wallet set
 (V2-STRATEGY.md § 5).
 
+## E-v2-dryrun: the rebuilt bot against mainnet, dry mode (2026-09-11)
+
+Three dry runs of the V2 orchestrator (`EXECUTION_MODE=dry`, `GAME_VERSION=v2`,
+throwaway keypair, ws-rpc ingest; no transaction can be sent in dry mode):
+
+- Boot: preflight passes all hard gates on the live config
+  (`game_version_matches_chain`: V2, `token_feed_live`: RUSH $50.4 × 0.294
+  RUSH/$1k → yield 1.48%); price feed primed; token feed primed
+  (`mintRushPerUsd` 2.96e-4, yield 1.50%); the at-risk fraction logged as
+  0.11 with share marking on.
+- Rounds 55524–55528 and 55532–55535 cycled ROUND_OPEN → ARMED → skip →
+  ROUND_OPEN without a halt, a kill, or a decode error; occupancy updates
+  re-ran the selector each round.
+- Every round skipped with `no_positive_marginal_ev`. At a $5 cap the
+  diagnostic reads blanket EV −406…−410 bps and the emptiest tile (13)
+  −438…−454 bps with the token yield at 1.50–1.53% of volume — the same
+  sign and size the ledger gave (−4.8% board return + strike leg; the
+  −1.0%/$ figure of `pnpm v2-ledger` only appears with 21 wallets' epoch
+  prizes and the hashrate legs, which the round-level selector does not
+  credit). Skipping is the correct behaviour on these numbers.
+- `rpc.satrush.io` rate-limits a bot that polls it (429, then Cloudflare
+  1015 after ~5 minutes of the vault manager's 5-second reads); the public
+  mainnet RPC carried a run with the vault poll off. Production stays on
+  the operator's Helius endpoints as before.
+
+Not exercised in dry mode, by design: the deploy/settle sends (verified
+against the tape in E-v2-idl instead), the affiliate binding of a fresh
+wallet, and the vault draw triggers' rotor accounts.
+

@@ -264,3 +264,34 @@ describe("StateDb", () => {
     db.close();
   });
 });
+
+describe("wallet-set attribution", () => {
+  it("deploys, settlements and tickets carry the wallet; landed marks are per wallet", () => {
+    const db = freshDb();
+    const A = "walletAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const B = "walletBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    for (const [w, sig] of [[A, "sigA"], [B, "sigB"]] as const) {
+      db.recordMyDeploy({ roundId: 7, mask: 1, amount: usdToBase(1), evExpected: 0, firedSlot: 1, sig, status: "fired", wallet: w });
+    }
+    db.markDeployLandedByRound(7, 100, A);
+    expect(db.landedWallets(7)).toEqual([A]);
+    db.markDeployLandedByRound(7, 101, B);
+    expect(db.landedWallets(7).sort()).toEqual([A, B]);
+    db.recordSettlement({ roundId: 7, winningStake: 0n, wonUsd: usdToBase(0.89), wonShares: 0n, hashrateEarned: 1n, wallet: B, sig: "settleB" });
+    expect(db.queryOne<{ wallet: string }>(`SELECT wallet FROM settlements WHERE sig = 'settleB'`)?.wallet).toBe(B);
+    db.recordVaultTicket({ kind: "one_btc", iterationId: 3, tickets: 5, ticketPubkey: "tkt1", wallet: A, sig: "t1" });
+    db.recordVaultTicket({ kind: "one_btc", iterationId: 3, tickets: 2, ticketPubkey: "tkt2", wallet: B, sig: "t2" });
+    expect(db.vaultTicketsHeld("one_btc", 3)).toBe(7); // fleet-wide
+    expect(db.vaultTicketsHeld("one_btc", 3, A)).toBe(5);
+    expect(db.oneBtcTickets(3)).toEqual([
+      { ticketPubkey: "tkt1", wallet: A },
+      { ticketPubkey: "tkt2", wallet: B },
+    ]);
+    // Legacy rows (no wallet) still match a wallet-scoped landed mark.
+    db.recordMyDeploy({ roundId: 8, mask: 1, amount: usdToBase(1), evExpected: 0, firedSlot: 1, sig: "legacy", status: "fired" });
+    db.markDeployLandedByRound(8, 100, A);
+    expect(db.landedWallets(8)).toEqual([null]);
+    db.close();
+  });
+});
+

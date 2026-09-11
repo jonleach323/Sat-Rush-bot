@@ -312,3 +312,61 @@ with no manual retune, which is exactly what shrinks win-dilution. Watch the
 **Setup order:** add the staked endpoint → confirm deploys still land (dashboard
 `land` column, near-zero "missed" alerts) → add the Jito URL + tip account →
 confirm again → let the adaptive offset re-tune down on its own.
+
+## 9. V2 operation (program upgrade of 2026-09-11)
+
+The bot runs the V2 economics by default (`GAME_VERSION=v2`). What changed
+operationally — everything else in this runbook still applies:
+
+- **IDL.** `satrush.json` is generated from the SDK (`pnpm idl:gen`), never
+  edited. After any SDK bump: `pnpm idl:gen && pnpm idl:verify && pnpm test`.
+  `idl:verify` reads mainnet through the coders, matches 40 fields to the
+  public API, decodes a settled event, and diffs the deploy/settle builders
+  against live transactions — it must print ALL CHECKS PASSED before a
+  restart into live mode.
+- **Preflight** adds `game_version_matches_chain` (fatal on mainnet: a V1
+  model against the V2 program is wrong) and `token_feed_live` (advisory:
+  without the API the RUSH leg is priced at `RUSH_USD_ESTIMATE ×
+  RUSH_MINT_PER_USD_ESTIMATE`, default 0). `MEASURED_ECONOMICS` is the live
+  V2 config; the 25% drift gate is unchanged.
+- **Token feed.** `SATRUSH_API_URL` `/board` every `TOKEN_FEED_POLL_MS`: RUSH
+  oracle price × RUSH-per-$ measured over the last settled rounds = the
+  token yield the selector credits. Stale past `TOKEN_FEED_MAX_AGE_MS` → the
+  leg falls back to the estimates (default: worth nothing). The skip log
+  line carries `tokenYield`, `blanketEvBps`, `emptiestEvBps` so you can see
+  how far from +EV the board is without a debugger.
+- **Expect skips.** On measured numbers the board is about −4% per dollar
+  at the round level (FINDINGS § E-v2-dryrun); `no_positive_marginal_ev`
+  every round is the model working, not a fault. It fires when the token
+  yield, a strike pool, or the occupancy prediction makes a tile +EV.
+- **Accounting.** A V2 win pays in BTC and RUSH vault shares, not USDC. The
+  daily-loss figure marks the day's won shares (vault rate × live price ×
+  (1 − exit fee); RUSH at 0 unless the feed is live) — the dashboard shows
+  `markedNetTodayUsd` next to the USD-only `todayNetUsd`. The reconcile
+  tripwire checks the exact 89% refund per deployment and halts on any
+  deviation, on BTC shares without a covered winner, or on a missing RUSH
+  leg. Claims: `claim_usd` compounds refunds (on by default); `claim_sats`
+  and `claim_token` pay the 10% exit fee and stay opt-in.
+- **Risk.** `MAX_PER_ROUND_USD` is still on gross. The daily cap counts 11%
+  of each stake (the toll: `1 − refund`) as at risk, both in the bankroll
+  and in the pre-send guard; realized losses are actual.
+- **Epoch rewards** are no longer claimed by the winner: the bot cranks
+  `distribute_epoch_reward(rank)`, which credits the winner's Miner (USD to
+  the claim pool, BTC to sats shares, RUSH to token shares). Nothing reaches
+  the wallet ATA until the claims above run.
+- **Wallet set.** `WALLET_PATHS` (see .env.example). One process, aggregate
+  caps split per round, one signed leg per wallet, per-wallet Miners,
+  settles (the primary cranks and pays), sweeps, vault engines and claims.
+  Fund each extra with USDC and `WALLET_MIN_LAMPORTS`; register the
+  primary's affiliate tag in the app first so extras bind to it at their
+  first deploy (`AFFILIATE_AUTHORITY` overrides). A leg that fails to land
+  is alerted with the per-wallet outcomes; the round counts as played if any
+  leg landed. The kill switch and pause apply to the whole fleet.
+- **RPC load.** Do not point the bot at `rpc.satrush.io`: it rate-limits a
+  poller within minutes (429 → Cloudflare 1015). Helius as before.
+- **Before the first live V2 round** (still outstanding): a real deploy +
+  settle on a $1 stake with `MAX_PER_ROUND_USD=1`, watching the reconcile
+  line; the first extra wallet's deploy (affiliate binding); and a vault
+  draw trigger if the owner's crank ever lets one through (the rotor
+  remaining accounts on the triggers are by analogy to deploy_public).
+

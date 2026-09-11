@@ -531,6 +531,16 @@ const schema = z
           : undefined,
       z.array(z.string()).default([]),
     ),
+    /**
+     * Affiliate to bind the fleet's NON-primary wallets to at their first
+     * deploy (the V2 `affiliate` account of `deploy_public`). Defaults to the
+     * primary wallet, i.e. the operator's own tag — the owner agreed to extra
+     * wallets playing under it. The primary itself never passes one
+     * (self-referral is refused on chain, error 6066). Binding happens at
+     * Miner creation only, so this only matters for wallets that have never
+     * deployed. Must have registered a tag (`set_miner_tag`) first.
+     */
+    AFFILIATE_AUTHORITY: optionalPubkey,
     /** Lamports a wallet must retain to be considered fundable for a round. */
     WALLET_MIN_LAMPORTS: z.preprocess(
       emptyToUndef,
@@ -794,6 +804,8 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     solUsdEstimate: cfg.SOL_USD_ESTIMATE,
     stakeSemantics: cfg.STAKE_SEMANTICS,
     gameVersion: cfg.GAME_VERSION,
+    walletSet: cfg.WALLET_PATHS.length > 0 ? `${cfg.WALLET_PATHS.length} keypairs (aggregate caps)` : "single wallet",
+    affiliateAuthority: cfg.AFFILIATE_AUTHORITY ?? "<primary wallet>",
     satrushApiUrl: cfg.SATRUSH_API_URL,
     tokenFeed: `poll ${cfg.TOKEN_FEED_POLL_MS}ms, max age ${cfg.TOKEN_FEED_MAX_AGE_MS}ms, fallback $${cfg.RUSH_USD_ESTIMATE} × ${cfg.RUSH_MINT_PER_USD_ESTIMATE} RUSH/$`,
     strategy: cfg.STRATEGY,

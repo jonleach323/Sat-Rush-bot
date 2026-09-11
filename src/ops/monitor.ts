@@ -8,6 +8,7 @@ import type { Miner, Round, SatrushConfig, SatsVault } from "../adapter/idl.js";
 import { TILES_COUNT } from "../ingest/decode.js";
 import type { PriceStatus } from "../ingest/prices.js";
 import type { TokenFeedStatus } from "../ingest/token-feed.js";
+import type { WalletSnapshot } from "../exec/wallets.js";
 import { buildIntel, type IntelJson } from "./intel.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
@@ -54,6 +55,8 @@ export interface StatusJson {
   /** Net today with the day's won shares marked — the figure the daily cap runs on. */
   markedNetTodayUsd: number;
   tokenFeed: TokenFeedStatus | null;
+  /** Fleet wallets — one entry in single-wallet mode. */
+  wallets: WalletSnapshot[];
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
   /** Oracle prices actually in force; `live: false` means a fallback is in use. */
   prices: PriceStatus;
@@ -175,6 +178,8 @@ export interface MonitorContext {
   tokenShareValueUsd: () => number;
   /** V2 token feed (price, mint rate, yield); null under V1. */
   tokenFeedStatus: () => TokenFeedStatus | null;
+  /** The signer fleet (public keys and balances only). */
+  wallets: () => WalletSnapshot[];
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -247,6 +252,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         },
         markedNetTodayUsd: baseToUsd(ctx.pnl.markedNetToday()),
         tokenFeed: ctx.tokenFeedStatus(),
+        wallets: ctx.wallets(),
         caps: {
           maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
           dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase),

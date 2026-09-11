@@ -177,8 +177,13 @@ it is how deployment rent and winnings come back.
   at 0) so V2 wins are not booked as losses, the tripwire checks the exact 89%
   refund per deployment (`reconcileRoundOutcomeV2`), and the daily cap counts
   the toll (`tollAtRiskFraction`, 11%) per stake while MAX_PER_ROUND stays on
-  gross. Not built: wallet-set wiring, the dry run against mainnet.
-  Do not trade V2 live before those land (V2-STRATEGY.md § 6) — and on measured
+  gross. Wallet set: `WALLET_PATHS` adds signers behind the ONE orchestrator
+  (aggregate caps, one leg per wallet per round, per-wallet Miners/settles/
+  sweeps/vault engines, extras bound to `AFFILIATE_AUTHORITY` = the primary at
+  their first deploy). Dry-run on mainnet: FINDINGS.md § E-v2-dryrun — the
+  selector correctly skips every round at −4% EV.
+  Not yet live-tested: a real V2 send (deploy/settle verified against the tape
+  only), the affiliate binding, and the draw triggers' rotor accounts. And on measured
   numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`).
 
 ## Roadmap notes from the owner

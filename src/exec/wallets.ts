@@ -15,7 +15,8 @@
  *
  * Never logs or serialises secret keys; only public keys leave this module.
  */
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { loadKeypair } from "./tx.js";
 
 export interface WalletState {
@@ -31,6 +32,16 @@ export interface WalletState {
   lamports: number;
   /** Set when the wallet cannot act this round (unfunded, failed, disabled). */
   disabledReason: string | null;
+}
+
+export interface WalletSnapshot {
+  pubkey: string;
+  streak: number;
+  hashrate: number;
+  tickets: number;
+  usdc: number;
+  sol: number;
+  disabled: string | null;
 }
 
 export interface WalletAllocation {
@@ -159,6 +170,32 @@ export class WalletSet {
     return out;
   }
 
+  /**
+   * Refresh every wallet's USDC + SOL from chain. A wallet whose read fails
+   * keeps its last balances (a flaky RPC must not disable the fleet); a
+   * missing USDC ATA reads as 0, which `eligible()` then excludes.
+   */
+  async refreshBalances(connection: Connection, usdMint: PublicKey): Promise<void> {
+    await Promise.all(
+      this.wallets.map(async (w) => {
+        try {
+          const ata = getAssociatedTokenAddressSync(usdMint, w.keypair.publicKey);
+          const [lamports, usdc] = await Promise.all([
+            connection.getBalance(w.keypair.publicKey, "processed"),
+            connection.getTokenAccountBalance(ata, "processed").then(
+              (b) => BigInt(b.value.amount),
+              () => 0n, // no ATA yet
+            ),
+          ]);
+          w.lamports = lamports;
+          w.usdcBase = usdc;
+        } catch {
+          /* hold last values */
+        }
+      }),
+    );
+  }
+
   /** Aggregate balances, for risk reporting. */
   totals(): { usdcBase: bigint; lamports: number; tickets: number; hashrate: number } {
     return this.wallets.reduce(
@@ -173,15 +210,7 @@ export class WalletSet {
   }
 
   /** Public snapshot for the dashboard — never includes secret material. */
-  snapshot(): {
-    pubkey: string;
-    streak: number;
-    hashrate: number;
-    tickets: number;
-    usdc: number;
-    sol: number;
-    disabled: string | null;
-  }[] {
+  snapshot(): WalletSnapshot[] {
     return this.wallets.map((w) => ({
       pubkey: w.keypair.publicKey.toBase58(),
       streak: w.streak,

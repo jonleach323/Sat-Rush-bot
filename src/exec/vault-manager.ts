@@ -109,7 +109,10 @@ export function marginalTicketUsd(v: {
 }
 
 export interface VaultManagerOpts {
-  engine: VaultEngine;
+  /** Single-wallet engine (kept for the one-wallet path and tests). */
+  engine?: VaultEngine | undefined;
+  /** Fleet: one engine per wallet, each spending its own hashrate. */
+  engines?: VaultEngine[] | undefined;
   readState: () => Promise<VaultReadState>;
   /** Absolute floor for the epoch entry window (see epochLateWindowSlots). */
   epochLateSlots: number;
@@ -126,7 +129,12 @@ export interface VaultManagerOpts {
 export class VaultManager {
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly opts: VaultManagerOpts) {}
+  private readonly engines: VaultEngine[];
+
+  constructor(private readonly opts: VaultManagerOpts) {
+    this.engines = [...(opts.engines ?? []), ...(opts.engine ? [opts.engine] : [])];
+    if (this.engines.length === 0) throw new Error("VaultManager needs at least one engine");
+  }
 
   start(): void {
     if (this.timer) return;
@@ -191,16 +199,21 @@ export class VaultManager {
     kind: VaultSnapshot["kind"],
     s: EpochReadState | OneBtcReadState,
   ): Promise<void> {
-    try {
-      await this.opts.engine.evaluate({
-        kind,
-        iterationId: s.iterationId,
-        open: s.open,
-        totalTickets: s.totalTickets,
-        poolValueUsd: s.poolValueUsd,
-      });
-    } catch (err) {
-      this.opts.log({ vault: kind, err: String(err).slice(0, 120), msg: "vault evaluate failed" });
+    // Each wallet's engine spends that wallet's own hashrate; they evaluate
+    // in turn against the same snapshot (a fleet buy moves the pool by a few
+    // tickets, which is below the engine's own noise).
+    for (const engine of this.engines) {
+      try {
+        await engine.evaluate({
+          kind,
+          iterationId: s.iterationId,
+          open: s.open,
+          totalTickets: s.totalTickets,
+          poolValueUsd: s.poolValueUsd,
+        });
+      } catch (err) {
+        this.opts.log({ vault: kind, err: String(err).slice(0, 120), msg: "vault evaluate failed" });
+      }
     }
   }
 }
