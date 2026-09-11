@@ -81,11 +81,11 @@ TOLERANCE` and `WALLET_DRIFT_TOLERANCE_USD` stay at their §0/​default values
 1. **Flip endpoints.** `.env`: `RPC_HTTP_URL` + `SECONDARY_RPC_URLS` to the
    mainnet RPCs, `GRPC_URL`/`GRPC_TOKEN` to the mainnet Yellowstone,
    `EXECUTION_MODE=mainnet`, `MAINNET_CONFIRM` **unset for now**.
-2. **Confirm the program ID.** If the owner kept the vanity keypair
-   (`satRushGBRY…`), the existing IDL stands. If mainnet has a new address:
-   obtain the **mainnet IDL** from the owner, replace `satrush.json`, set
-   `PROGRAM_ID`, and re-run the full test suite (`pnpm test`) — the coders,
-   discriminators and PDAs all derive from that file.
+2. **Confirm the program ID.** The program kept its vanity address
+   (`satRushGBRY…`) through the V2 upgrade. `satrush.json` is generated from
+   the pinned SDK (`pnpm idl:gen`) and checked against the chain
+   (`pnpm idl:verify`) — see § 9; if the address ever changes, set
+   `PROGRAM_ID`, regenerate, verify, and re-run `pnpm test`.
 3. **Re-dump the config:**
    `EXECUTION_MODE=devnet pnpm exec tsx scripts/experiments/e6-config-dump.ts`
    pointed at mainnet RPC (e6 only reads; the devnet gate just guards
@@ -154,9 +154,14 @@ was upgraded and OUR IDL IS STALE.
 2. Do NOT guess layouts or patch offsets by hand — every coder,
    discriminator, and PDA in this codebase derives from `satrush.json`
    (CLAUDE.md ground rule).
-3. Request the updated IDL from the owner; replace `satrush.json`;
-   run `pnpm test` (161 tests re-validate coders round-trip);
-   re-run e6 + preflight; only then relaunch.
+3. Bump `@satrush/client` to the release matching the upgrade (nothing
+   publishes an IDL; the SDK's codecs are the source), then
+   `pnpm idl:gen && pnpm idl:verify && pnpm test` — the generator rebuilds
+   `satrush.json` and `src/adapter/generated-types.ts`, the verifier reads
+   the live accounts and diffs the builders against real transactions, and
+   the suite re-validates the coders round-trip. Re-run preflight; only then
+   relaunch. If the SDK has not been published yet, wait: a hand-patched
+   layout is how money gets lost.
 
 ## 5. Known operational facts (measured — see FINDINGS.md)
 
