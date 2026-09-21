@@ -162,5 +162,9 @@ describe("ramp signal sizing (V2)", () => {
     expect(typeof diag["capBlanketEvBpsAtStreakCap"]).toBe("number");
     // The two are different questions: a $21 ramp and a $35k blanket do not price alike.
     expect(diag["blanketEvBpsAtStreakCap"]).not.toBe(diag["capBlanketEvBpsAtStreakCap"]);
+    // The boost cycle is priced: p = window / modulus, and a cycle-weighted signal drives the ramp.
+    expect(diag["pBoosted"]).toBeCloseTo(240 / 1097, 3);
+    expect(typeof diag["cycleEvBpsAtStreakCap"]).toBe("number");
+    expect(diag["unboostedDeployUsd"] as number).toBeGreaterThan(0);
   });
 });

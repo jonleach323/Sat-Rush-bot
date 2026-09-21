@@ -137,3 +137,56 @@ export function streakOptionValueUsd(input: StreakOptionInput): number {
   if (rawLoss <= 0) return 0;
   return rawLoss * deployPerRoundUsd * liquidFraction * valueUsdPerRawUnit * discount;
 }
+
+/**
+ * The boost cycle. A Sat Strike (memoryless, one round in `modulus`) opens a
+ * window of `STRIKE_BOOST_WINDOW_ROUNDS` rounds at `multiplier`× hashrate;
+ * in steady state a fraction p = window / modulus of rounds is boosted.
+ * The streak's worth is earned mostly inside those windows — the fleet's
+ * optimal deploy is a few times larger there and every raw unit counts
+ * double — so the option value of the streak is priced against the
+ * boost-weighted deploy, not the unboosted one and never the cash cap.
+ */
+export interface BoostCycleDeployInput {
+  /** Fraction of rounds that are boosted (window / modulus), in [0, 1]. */
+  pBoosted: number;
+  /** The model's optimal total deploy per round at the streak cap, unboosted (USD). */
+  unboostedDeployUsd: number;
+  /** The same, boosted (USD). */
+  boostedDeployUsd: number;
+  /** Hashrate multiplier inside a window (2). */
+  boostMultiplier: number;
+}
+
+/** Expected (deploy × hashrate multiplier) per round across the cycle, in USD-per-round of raw accrual. */
+export function boostWeightedDeployUsd(i: BoostCycleDeployInput): number {
+  const p = Math.min(1, Math.max(0, i.pBoosted));
+  const d0 = Math.max(0, i.unboostedDeployUsd);
+  const d2 = Math.max(0, i.boostedDeployUsd);
+  const m = Math.max(1, i.boostMultiplier);
+  return (1 - p) * d0 + p * d2 * m;
+}
+
+export interface CycleEvInput {
+  pBoosted: number;
+  /** EV and stake (USD) of the deploy the bot makes at the cap when unboosted (the minimum blanket when nothing larger pays). */
+  unboostedEvUsd: number;
+  unboostedStakeUsd: number;
+  /** EV and stake (USD) of the boosted optimum at the cap. */
+  boostedEvUsd: number;
+  boostedStakeUsd: number;
+}
+
+/**
+ * EV per dollar, in bps, of holding the streak at its cap across a whole
+ * cycle: the ramp signal. Positive means playing every round at the cap
+ * pays once the boost windows are counted, even when each unboosted round
+ * loses a little on its own.
+ */
+export function cycleEvBps(i: CycleEvInput): number | null {
+  const p = Math.min(1, Math.max(0, i.pBoosted));
+  const ev = (1 - p) * i.unboostedEvUsd + p * i.boostedEvUsd;
+  const stake = (1 - p) * Math.max(0, i.unboostedStakeUsd) + p * Math.max(0, i.boostedStakeUsd);
+  if (!(stake > 0)) return null;
+  return Math.round((ev / stake) * 10_000);
+}

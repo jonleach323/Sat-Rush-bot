@@ -117,3 +117,18 @@ describe("presenceCreditBase in the EV model", () => {
     );
   });
 });
+
+describe("boost cycle — the streak is worth what the windows pay", () => {
+  it("boost-weighted deploy: (1−p)·d0 + p·d2·m, clamped", async () => {
+    const { boostWeightedDeployUsd, cycleEvBps } = await import("../src/strategy/streak.js");
+    // Live 2026-09-21: p = 240/1097, unboosted the fleet holds the $21 minimum, boosted the argmax is $40 at 2×.
+    const p = 240 / 1097;
+    expect(boostWeightedDeployUsd({ pBoosted: p, unboostedDeployUsd: 21, boostedDeployUsd: 40, boostMultiplier: 2 })).toBeCloseTo((1 - p) * 21 + p * 80, 6);
+    expect(boostWeightedDeployUsd({ pBoosted: 2, unboostedDeployUsd: -5, boostedDeployUsd: 40, boostMultiplier: 0.5 })).toBe(40);
+    // Cycle EV: −$0.126 on $21 unboosted, +$0.588 on $40 boosted → +12 bps across the cycle.
+    expect(cycleEvBps({ pBoosted: p, unboostedEvUsd: -0.126, unboostedStakeUsd: 21, boostedEvUsd: 0.588, boostedStakeUsd: 40 })).toBe(12);
+    // No windows → the unboosted number alone (−60 bps).
+    expect(cycleEvBps({ pBoosted: 0, unboostedEvUsd: -0.126, unboostedStakeUsd: 21, boostedEvUsd: 0.588, boostedStakeUsd: 40 })).toBe(-60);
+    expect(cycleEvBps({ pBoosted: p, unboostedEvUsd: 0, unboostedStakeUsd: 0, boostedEvUsd: 0, boostedStakeUsd: 0 })).toBeNull();
+  });
+});

@@ -130,7 +130,9 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { selectAllocation } from "./strategy/selector.js";
+import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
 import { TokenFeed } from "./ingest/token-feed.js";
 import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
@@ -1178,8 +1180,13 @@ export class Orchestrator {
       // so its EV at the cap is the non-token toll against the RUSH yield —
       // positive means mining RUSH is cheaper than buying it (pnpm buy-vs-mine).
       const rampAtCap = capped && rampTotal > 0n ? bps(capped.ev(rampBlanket), rampTotal) : null;
-      this.rampSignal(rampAtCap);
+      // The boost cycle: what the cap is worth ACROSS windows, not on this
+      // unboosted round alone. Argmax deploys at the cap (unboosted, boosted)
+      // are priced once per round; the ramp signal is the cycle-weighted EV.
+      const cycle = this.boostCycleAtCap(src, rampBlanket, rampTotal);
+      this.rampSignal(cycle?.cycleEvBps ?? rampAtCap);
       return {
+        ...(cycle ?? {}),
         // The minimum blanket (what the ramp deploys): today's streak, and at the streak cap (the ramp signal).
         rampBlanketUsd: Number(rampTotal) / 1e6,
         blanketEvBps: rampTotal > 0n ? bps(model.ev(rampBlanket), rampTotal) : null,
@@ -1213,7 +1220,7 @@ export class Orchestrator {
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
       this.rampAlertArmed = false;
       this.alert(
-        `ramp pays: the minimum blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
+        `ramp pays: holding the streak cap across the boost cycle is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
     } else if (!this.rampAlertArmed && blanketAtCapBps < -min) {
@@ -1294,9 +1301,17 @@ export class Orchestrator {
   private presenceCreditBase(): number {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
     const miner = this.state.miner;
+    // The deploy the streak's raw accrues on: the boost-weighted optimum at
+    // the cap (a few dollars unboosted, tens boosted at 2×), never the cash
+    // cap — sizing it on MAX_PER_ROUND priced the option on $35k of USDC.
+    const minBlanketUsd = (Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000) / 1e6) * TILES_COUNT;
+    const cycle = this.cycleMemo?.roundId === this.roundId ? this.cycleMemo : null;
+    const deployPerRoundUsd = cycle
+      ? boostWeightedDeployUsd({ pBoosted: cycle.pBoosted, unboostedDeployUsd: cycle.unboostedDeployUsd, boostedDeployUsd: cycle.boostedDeployUsd, boostMultiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER })
+      : minBlanketUsd;
     const usd = streakOptionValueUsd({
       streak: miner?.current_streak_count ?? 1,
-      deployPerRoundUsd: Number(this.bankroll.maxPerRoundBase) / 1e6,
+      deployPerRoundUsd,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
       liquidFraction:
         1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
@@ -3251,6 +3266,62 @@ export class Orchestrator {
     } catch (err) {
       this.log.warn({ err: String(err).slice(0, 160) }, "snapshot re-seed after reconnect failed — stream updates will catch up");
     }
+  }
+
+  /** Per-round memo of the boost-cycle pricing at the streak cap (see boostCycleAtCap). */
+  private cycleMemo: {
+    roundId: number | null;
+    pBoosted: number;
+    unboostedDeployUsd: number;
+    boostedDeployUsd: number;
+    boostedEvUsd: number;
+    cycleEvBps: number | null;
+  } | null = null;
+
+  /**
+   * Price the streak cap across the boost cycle. p = window / modulus of
+   * rounds are boosted (memoryless strike). Unboosted, the bot plays the
+   * minimum blanket at the cap (or the argmax if one pays); boosted, the
+   * argmax at 2× hashrate. The cycle EV per dollar is the ramp signal, and
+   * the boost-weighted deploy sizes the streak option. Memoized per round.
+   */
+  private boostCycleAtCap(src: EvSource, rampBlanket: bigint[], rampTotal: bigint): Record<string, number | null> | null {
+    const base = this.v2Base();
+    if (!("model" in src) || !base?.hashrate) return null;
+    const cap = this.effectiveMaxPerRoundBase();
+    if (this.cycleMemo?.roundId !== this.roundId) {
+      const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? STRIKE_TRIGGER_MODULUS.value;
+      const pBoosted = Math.min(1, STRIKE_BOOST_WINDOW_ROUNDS.value / Math.max(1, modulus));
+      const at = (multiplier: number) =>
+        v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate!, streak: REWARD_MAX_STREAK, multiplier }, presenceCreditBase: 0 });
+      const argmax = (model: ReturnType<typeof v2Model>) => {
+        const sel = selectAllocation(model, { ...this.selectorConfig(), maxPerRound: cap, kellyFraction: 0, bankrollBase: undefined, minEdgeBps: 0, minEvBase: undefined, minEvPerUnit: undefined });
+        return sel.kind === "deploy" ? { usd: Number(sel.totalGross) / 1e6, evUsd: sel.ev / 1e6 } : { usd: 0, evUsd: 0 };
+      };
+      const unboosted = at(1);
+      const boosted = at(this.cfg.STRIKE_HASHRATE_MULTIPLIER);
+      const u = argmax(unboosted);
+      const b = argmax(boosted);
+      // Unboosted the bot holds the cap with the minimum blanket when nothing larger pays.
+      const uStake = u.usd > 0 ? u.usd : Number(rampTotal) / 1e6;
+      const uEv = u.usd > 0 ? u.evUsd : rampTotal > 0n ? unboosted.ev(rampBlanket) / 1e6 : 0;
+      this.cycleMemo = {
+        roundId: this.roundId,
+        pBoosted,
+        unboostedDeployUsd: uStake,
+        boostedDeployUsd: b.usd,
+        boostedEvUsd: b.evUsd,
+        cycleEvBps: cycleEvBps({ pBoosted, unboostedEvUsd: uEv, unboostedStakeUsd: uStake, boostedEvUsd: b.evUsd, boostedStakeUsd: b.usd > 0 ? b.usd : uStake }),
+      };
+    }
+    const m = this.cycleMemo;
+    return {
+      pBoosted: Number(m.pBoosted.toFixed(4)),
+      unboostedDeployUsd: Number(m.unboostedDeployUsd.toFixed(2)),
+      boostedArgmaxUsd: Number(m.boostedDeployUsd.toFixed(2)),
+      boostedEvUsd: Number(m.boostedEvUsd.toFixed(3)),
+      cycleEvBpsAtStreakCap: m.cycleEvBps,
+    };
   }
 
   /** Snapshot throttle: last slot a row was written, per round. */
