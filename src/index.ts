@@ -170,6 +170,8 @@ export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
   private paused = false;
+  /** Affiliate tag confirmed on chain (or registered) — the treasury cycle retries until then. */
+  private affiliateTagDone = false;
   /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
   private rampAlertArmed = true;
   /** Last blanket-at-streak-cap EV (bps of gross), presence credit excluded; the auto-ramp reads it. */
@@ -2663,6 +2665,8 @@ export class Orchestrator {
     if (this.bankroll.killSwitchEngaged()) return;
     this.fleetCycleInFlight = true;
     try {
+      // A boot under the KILL file skipped the tag; retry once the switch clears.
+      if (!this.affiliateTagDone) await this.ensureAffiliateTag();
       await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
       const p = this.wallets.primary();
       const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
@@ -2711,9 +2715,10 @@ export class Orchestrator {
   /**
    * Register AFFILIATE_TAG on the primary once, so the extras bind to it at
    * their first deploy. Skipped when the primary already has an Affiliate
-   * account, when no tag is configured, in dry mode, or with the kill switch
-   * engaged. Extras that deploy before this lands bind to nothing (the
-   * program only reads the slot at Miner creation) — the log says so.
+   * account, in dry mode, or with the kill switch engaged; retried from the
+   * treasury cycle until it lands, so a boot under the KILL file does not
+   * leave the extras binding to nothing once the file is removed (the
+   * program only reads the affiliate slot at Miner creation).
    */
   private async ensureAffiliateTag(): Promise<void> {
     const tag = this.cfg.AFFILIATE_TAG ?? autoAffiliateTag(this.payer.publicKey);
@@ -2721,11 +2726,16 @@ export class Orchestrator {
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
     try {
       const info = await this.connection.getAccountInfo(affiliatePda(this.payer.publicKey, programId), "confirmed");
-      if (info) return;
+      if (info) {
+        this.affiliateTagDone = true;
+        return;
+      }
       const outcome = await this.fireClaim(buildSetMinerTag(this.ixCtx, { authority: this.payer.publicKey, tag }), { kind: "set_miner_tag", tag });
       this.log.info({ tag, outcome }, "affiliate tag registered on the primary");
-      if (outcome === "landed") this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
-      else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — restart to retry`);
+      if (outcome === "landed") {
+        this.affiliateTagDone = true;
+        this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
+      } else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — retrying on the next treasury cycle`);
     } catch (err) {
       this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
     }

@@ -121,9 +121,17 @@ Fastest to slowest — all of these stop *new* risk immediately:
    closed. In-flight round: the bankroll latch already prevents re-fires;
    an already-sent deploy settles normally later.
 
-The kill switch stops deploys, settles, and sweeps. It does NOT cancel a
-transaction already on the wire — that one resolves via confirm.ts and is
-recorded either way.
+The kill switch stops deploys, settles, and sweeps — and the fleet
+treasury with them: under `/kill` or a KILL file no deposit is distributed
+to the sub-wallets, no USD is claimed, and the affiliate tag is not
+registered (the tag is retried on the first treasury cycle after the file
+goes). It does NOT cancel a transaction already on the wire — that one
+resolves via confirm.ts and is recorded either way.
+
+To hold *trading only* while the treasury keeps moving your own money
+between your own wallets, use **Telegram `/pause`** instead: deploys skip
+with reason `paused`, top-ups, sweeps and USD claims continue, `/resume`
+re-arms. The KILL file is the full stop.
 
 ## 3. Drain procedure (exit the game entirely)
 

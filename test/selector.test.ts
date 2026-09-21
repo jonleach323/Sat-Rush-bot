@@ -309,3 +309,57 @@ describe("absolute EV floor (fees + opportunity)", () => {
   });
 });
 
+
+describe("blanket seed (coverage non-convexity)", () => {
+  /** Synthetic model: EV per base unit depends only on how many tiles are covered. */
+  const coverageModel = (perBaseAt: (covered: number) => number) => {
+    const total = (a: bigint[]) => a.reduce((x, y) => x + y, 0n);
+    const covered = (a: bigint[]) => a.filter((x) => x > 0n).length;
+    const ev = (a: bigint[]) => Number(total(a)) * perBaseAt(covered(a));
+    return {
+      predictedStakes: zeroStakes(),
+      ev,
+      marginal: (a: bigint[], t: number, inc: bigint) => {
+        const after = [...a];
+        after[t] = (after[t] ?? 0n) + inc;
+        return ev(after) - ev(a);
+      },
+      returns: (a: bigint[]) => new Array<number>(TILES_COUNT).fill(ev(a)),
+    };
+  };
+  const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(3) };
+
+  it("reaches a positive 21-tile blanket when every lone tile is negative", () => {
+    // Lone tiles −5%/$, full coverage +2%/$: the empty seed stalls at zero.
+    const model = coverageModel((c) => (c === TILES_COUNT ? 0.02 : -0.05));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.tiles.length).toBe(TILES_COUNT);
+    expect(sel.totalGross).toBe(usdToBase(50)); // keeps filling at +2%/$ up to the cap
+    expect(sel.ev).toBeCloseTo(Number(usdToBase(50)) * 0.02, 0);
+    expect(sel.capBound).toBe(true);
+  });
+
+  it("still skips when the blanket is unaffordable under the cap", () => {
+    const model = coverageModel((c) => (c === TILES_COUNT ? 0.02 : -0.05));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(10) });
+    expect(sel).toMatchObject({ kind: "skip", reason: "no_positive_marginal_ev" });
+  });
+
+  it("keeps the empty-seed result when it has the higher EV", () => {
+    // Single tile +5%/$, anything wider −1%/$.
+    const model = coverageModel((c) => (c === 1 ? 0.05 : -0.01));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.tiles.length).toBe(1);
+    expect(sel.totalGross).toBe(usdToBase(50));
+  });
+
+  it("skips when both seeds end non-positive", () => {
+    const model = coverageModel(() => -0.01);
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel).toMatchObject({ kind: "skip", reason: "no_positive_marginal_ev" });
+  });
+});

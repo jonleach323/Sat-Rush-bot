@@ -199,35 +199,67 @@ function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
     return { kind: "skip", reason: "ladder_quantum_exceeds_max_per_round", strategy: "water_filling" };
   }
 
-  const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
-  let total = 0n;
-
-  let lastBestMarginal = Number.NEGATIVE_INFINITY;
-  const bestTileFor = (predicate: (ev: number) => boolean): number | null => {
-    let bestEv = Number.NEGATIVE_INFINITY;
-    const candidates: number[] = [];
-    for (let tile = 0; tile < TILES_COUNT; tile++) {
-      const gain = model.marginal(allocation, tile, quantum);
-      if (gain > bestEv + EV_EPSILON) {
-        bestEv = gain;
-        candidates.length = 0;
-        candidates.push(tile);
-      } else if (Math.abs(gain - bestEv) <= EV_EPSILON) {
-        candidates.push(tile);
+  // Water-fill from a seed: allocate quanta to the best-marginal tile while
+  // the best marginal EV is positive. Returns the allocation, its total and
+  // a refresher for the marginal at the stop point.
+  const fill = (seed: readonly bigint[]) => {
+    const allocation = [...seed];
+    let total = allocation.reduce((a, b) => a + b, 0n);
+    let lastBestMarginal = Number.NEGATIVE_INFINITY;
+    const bestTileFor = (predicate: (ev: number) => boolean): number | null => {
+      let bestEv = Number.NEGATIVE_INFINITY;
+      const candidates: number[] = [];
+      for (let tile = 0; tile < TILES_COUNT; tile++) {
+        const gain = model.marginal(allocation, tile, quantum);
+        if (gain > bestEv + EV_EPSILON) {
+          bestEv = gain;
+          candidates.length = 0;
+          candidates.push(tile);
+        } else if (Math.abs(gain - bestEv) <= EV_EPSILON) {
+          candidates.push(tile);
+        }
       }
+      lastBestMarginal = bestEv;
+      if (candidates.length === 0 || !predicate(bestEv)) return null;
+      return pickBiased(candidates, rng);
+    };
+    while (total + quantum <= cfg.maxPerRound) {
+      const tile = bestTileFor((ev) => ev > 0);
+      if (tile === null) break;
+      allocation[tile] = (allocation[tile] ?? 0n) + quantum;
+      total += quantum;
     }
-    lastBestMarginal = bestEv;
-    if (candidates.length === 0 || !predicate(bestEv)) return null;
-    return pickBiased(candidates, rng);
+    return {
+      allocation,
+      get total() {
+        return total;
+      },
+      add(tile: number) {
+        allocation[tile] = (allocation[tile] ?? 0n) + quantum;
+        total += quantum;
+      },
+      bestTileFor,
+      marginalAtStop: () => lastBestMarginal,
+    };
   };
 
-  // Greedy: allocate quanta while the best marginal EV is positive.
-  while (total + quantum <= cfg.maxPerRound) {
-    const tile = bestTileFor((ev) => ev > 0);
-    if (tile === null) break;
-    allocation[tile] = (allocation[tile] ?? 0n) + quantum;
-    total += quantum;
+  // Two seeds. From EMPTY, greedy water-filling only ever reaches a blanket
+  // through a chain of positive single-tile marginals — but coverage is
+  // non-convex under V2 (the 89% losing-tile refund and the strike pot make
+  // the 21-tile blanket positive while every lone tile is negative), so the
+  // empty seed can stall at zero with a positive blanket on the table. The
+  // BLANKET seed (one quantum on every tile, when affordable) fills from
+  // full coverage; the higher-EV result wins.
+  let best = fill(new Array<bigint>(TILES_COUNT).fill(0n));
+  const blanketCost = quantum * BigInt(TILES_COUNT);
+  if (blanketCost <= cfg.maxPerRound) {
+    const fromBlanket = fill(new Array<bigint>(TILES_COUNT).fill(quantum));
+    const evEmpty = best.total > 0n ? model.ev(best.allocation) : 0;
+    const evBlanket = model.ev(fromBlanket.allocation);
+    if (evBlanket > evEmpty + EV_EPSILON) best = fromBlanket;
   }
+  const { allocation, bestTileFor } = best;
+  let total = best.total;
 
   if (total === 0n) {
     return { kind: "skip", reason: "no_positive_marginal_ev", strategy: "water_filling" };
@@ -238,8 +270,8 @@ function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
   while (total < cfg.minDeploy && total + quantum <= cfg.maxPerRound) {
     const tile = bestTileFor(() => true);
     if (tile === null) break;
-    allocation[tile] = (allocation[tile] ?? 0n) + quantum;
-    total += quantum;
+    best.add(tile);
+    total = best.total;
   }
   if (total < cfg.minDeploy) {
     return { kind: "skip", reason: "cannot_reach_min_deploy", strategy: "water_filling" };
@@ -255,11 +287,11 @@ function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
   // Cap-bound detection: the loop ended because the next quantum would
   // exceed MAX_PER_ROUND — was the model still asking for more?
   let capBound = false;
-  let marginalEvAtStop = lastBestMarginal;
+  let marginalEvAtStop = best.marginalAtStop();
   if (total + quantum > cfg.maxPerRound) {
-    bestTileFor(() => true); // refresh lastBestMarginal at the stop point
-    marginalEvAtStop = lastBestMarginal;
-    capBound = lastBestMarginal > 0;
+    bestTileFor(() => true); // refresh the marginal at the stop point
+    marginalEvAtStop = best.marginalAtStop();
+    capBound = marginalEvAtStop > 0;
   }
 
   const tiles = allocation.flatMap((a, i) => (a > 0n ? [i] : []));
