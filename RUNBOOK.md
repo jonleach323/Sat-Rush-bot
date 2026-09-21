@@ -436,12 +436,18 @@ address.
    Non-blanket selections fall back to the slice split. Every wallet binds
    to the primary's affiliate at its first deploy (10 bps of its volume
    comes back to the primary as grubstake and is deployed from there).
-5. **Sizing — nothing to set.** `MAX_PER_ROUND_USD=0` (default) makes the
-   per-round cap the fleet's deployable USDC, refreshed every 30 s, and
-   `DAILY_LOSS_CAP_USD=0` makes the daily cap half of the day's opening
-   USDC (never under $5); both are still enforced by the bankroll guard on
-   every fire (`Bankroll.setLimits`). A positive value in either is a hard
-   ceiling if you want one. The selector adds $1 quanta to the best tile while the
+5. **Sizing — EV-max, nothing to set.** Every round fires at the model's
+   EV argmax and not a dollar past it: the water-filler stops where the
+   dilution-priced marginal turns non-positive. Nothing else sizes below
+   that by default — `MIN_EDGE_BPS=0`, `KELLY_FRACTION=0` (Kelly is
+   log-growth, i.e. safer than EV-max), `VAULT_MAX_SHARE=1` (the curve
+   prices our share), `STREAK_OPTION_DISCOUNT=1`, `MAX_PER_ROUND_USD=0`
+   (cash is the only cap) and `DAILY_LOSS_CAP_USD=0` with
+   `AUTO_DAILY_LOSS_FRACTION=1` (the day's opening bankroll: a round is
+   refused only for running out of money). The guard still enforces those
+   derived figures on every fire. The float per wallet anticipates the
+   selector's uncapped want each cycle, so a spike is funded before it
+   fires rather than after. Set any of these to play safer than the model. The selector adds $1 quanta to the best tile while the
    marginal EV is positive, so it finds the EV-maximizing stake itself; the
    hashrate leg is priced on the dilution curve (our tickets lower the value
    of every ticket we hold), so the marginal bends down and the stop is the

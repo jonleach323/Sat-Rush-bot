@@ -291,15 +291,17 @@ const schema = z
      * below modeled -> raise toward the break-even crossover.
      *
      * V2 (2026-09-21): the EV-maximizing fleet blanket runs at 1–3% of gross
-     * (pnpm ev-size: $0.36 on $20 unboosted, $1.48 on $50 boosted), so the
-     * V1 floor of 200 bps skipped the unboosted optimum outright — "too
-     * little" by construction. 25 bps keeps a margin over model noise
-     * (uplift ±0.10 ≈ 20 bps) without gating the V2 band. */
+     * (pnpm ev-size), so the V1 floor of 200 bps skipped the unboosted
+     * optimum outright. EV-MAX MODE: 0 — every round with positive modelled
+     * EV fires at its argmax; a floor only refuses positive rounds. */
     MIN_EDGE_BPS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(0).max(10_000).default(25),
+      z.coerce.number().int().min(0).max(10_000).default(0),
     ),
-    /** Fractional-Kelly bet sizing ∈ [0,1]. Caps each round's total stake at
+    /** EV-MAX MODE: 0 (off). Kelly maximises log-growth, not EV — it sizes
+     * BELOW the EV argmax whenever the stake is a large fraction of the
+     * bankroll. Set > 0 only if growth-optimal (safer) sizing is preferred.
+     * Fractional-Kelly bet sizing ∈ [0,1]. Caps each round's total stake at
      * this fraction of the growth-optimal Kelly bet (sized to the live wallet
      * bankroll) — bigger on fat edges, smaller on thin/high-variance ones. Only
      * ever reduces below the EV-max water-filling stake, never past the risk
@@ -309,7 +311,7 @@ const schema = z
      * rejected at load: over-betting Kelly provably lowers compounded growth. */
     KELLY_FRACTION: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(1),
+      z.coerce.number().min(0).max(1).default(0),
     ),
     /** Anti-collision: fold profiled rival occupancy into the selector's
      * forecast so it routes off tiles other snipers will crowd. This is the
@@ -349,7 +351,8 @@ const schema = z
       emptyToUndef,
       z.coerce.number().finite().nonnegative().default(0),
     ),
-    AUTO_DAILY_LOSS_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().gt(0).max(1).default(0.5)),
+    /** Auto daily cap as a fraction of the day's opening USDC. 1.0 = the whole bankroll: no round is ever refused for drawdown, only for running out of money; the reconcile tripwire and kill switch cover model breakage. */
+    AUTO_DAILY_LOSS_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().gt(0).max(1).default(1)),
     MAX_UNCLAIMED_USD_VALUE: z.preprocess(
       emptyToUndef,
       z.coerce.number().finite().positive().default(50),
@@ -767,10 +770,11 @@ const schema = z
      * The loss is real but projected: it assumes we keep deploying at this rate
      * and that the vaults keep pricing hashrate near today's margin. The
      * haircut stops a large modelled term from steamrolling a decision about
-     * real money. 1 = credit it in full. */
+     * real money. EV-MAX MODE: 1 — the model's estimate is credited in full;
+     * lower it only to play safer than the model. */
     STREAK_OPTION_DISCOUNT: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.5),
+      z.coerce.number().min(0).max(1).default(1),
     ),
     /**
      * The "flip" signal. While the board is −EV the bot skips rounds; the
@@ -780,8 +784,10 @@ const schema = z
      * clears this margin (bps of gross), the skip log carries it and one
      * Telegram alert fires (re-armed once it falls back below zero). That
      * condition is "mining RUSH is cheaper than buying it" with the RUSH leg
-     * at spot (`pnpm buy-vs-mine`); the margin absorbs the inputs' standard
-     * errors (uplift ±0.10 ≈ 20 bps, mint CV 5% ≈ 9 bps). 0 disables.
+     * at spot (`pnpm buy-vs-mine`). The margin is the ramp's own economics,
+     * not caution: the climb costs ≤ $2.25 per wallet of negative EV and the
+     * cap then pays for ~10k rounds, so it pays back above ~2 bps of a $21
+     * fleet minimum per round; 5 bps rounds that up. 0 disables.
      */
     /**
      * Start the ramp by itself. The streak option only prices the loss of a
@@ -796,7 +802,7 @@ const schema = z
     RAMP_PRESENCE_TOLL_BPS: z.preprocess(emptyToUndef, z.coerce.number().int().min(0).max(10_000).default(300)),
     RAMP_ALERT_MIN_BPS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).default(50),
+      z.coerce.number().min(0).default(5),
     ),
     /** Ceiling on our share of a vault's projected final ticket count.
      *
@@ -805,10 +811,12 @@ const schema = z
      * concluded hashrate was near-worthless because we had configured ourselves
      * not to spend it, and so credited 0.57% of what a deploy actually earns.
      * The binding constraint is economic, not configured: past some share our
-     * own tickets dilute the price we are valuing them at. */
+     * own tickets dilute the price we are valuing them at. EV-MAX MODE: 1 —
+     * no brake; the dilution curve (HashrateValuation.dilution) prices our
+     * own share exactly, so a cap here could only stop below the argmax. */
     VAULT_MAX_SHARE: z.preprocess(
       emptyToUndef,
-      z.coerce.number().gt(0).max(1).default(0.25),
+      z.coerce.number().gt(0).max(1).default(1),
     ),
     VAULT_HASHRATE_FRACTION: z.preprocess(
       emptyToUndef,

@@ -219,10 +219,13 @@ it is how deployment rent and winnings come back.
   TWAP (so the RUSH leg is ≤ 2% of gross in dollars at any price), and the
   staking yield is 29% of the buybacks leg ÷ staked — a volume yield.
 
-- **Zero-config extraction (2026-09-21):** the risk limits derive from the
-  bankroll in auto mode (`MAX_PER_ROUND_USD=0` → deployable USDC;
-  `DAILY_LOSS_CAP_USD=0` → half the day's opening USDC; both still enforced
-  by `Bankroll.setLimits` on every fire), the fleet defaults to 21 with the
+- **EV-max, zero-config (2026-09-21):** every round fires at the model's EV
+  argmax and no further (dilution-priced marginal → 0); every default that
+  could size below it is off — `MIN_EDGE_BPS=0`, `KELLY_FRACTION=0`,
+  `VAULT_MAX_SHARE=1`, `STREAK_OPTION_DISCOUNT=1`; the risk limits derive
+  from the bankroll (`MAX_PER_ROUND_USD=0` → deployable USDC;
+  `DAILY_LOSS_CAP_USD=0` → the day's opening USDC; both still enforced by
+  `Bankroll.setLimits` on every fire), the fleet defaults to 21 with the
   primary key and affiliate tag created on boot, the float per wallet is
   derived from the observed peak leg, sizing is the dilution-priced marginal,
   and the ramp starts itself. The operator supplies the deposit and the

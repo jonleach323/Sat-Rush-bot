@@ -32,13 +32,16 @@ describe("config defaults", () => {
     // more selective): thin tiles converge toward the board mean, and a
     // minimum modeled edge is required to fire.
     expect(cfg.ENDGAME_CONVERGENCE).toBe(0); // V2: the board is final at the fire offset (pnpm v2-timing)
-    expect(cfg.RAMP_ALERT_MIN_BPS).toBe(50); // the flip signal's margin (≈ the inputs' standard errors)
     expect(cfg.AUTO_RAMP).toBe(true);
     expect(cfg.RAMP_PRESENCE_TOLL_BPS).toBe(300);
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
-    expect(cfg.MIN_EDGE_BPS).toBe(25); // V2: the optimal fleet blanket runs at 1–3% of gross (pnpm ev-size)
+    expect(cfg.MIN_EDGE_BPS).toBe(0); // EV-max: every positive round fires at its argmax
     // Full Kelly by default (growth-maximizing); clamped at 1.0.
-    expect(cfg.KELLY_FRACTION).toBe(1);
+    expect(cfg.KELLY_FRACTION).toBe(0); // EV-max: Kelly (log-growth) would size below the argmax
+    expect(cfg.AUTO_DAILY_LOSS_FRACTION).toBe(1);
+    expect(cfg.VAULT_MAX_SHARE).toBe(1);
+    expect(cfg.STREAK_OPTION_DISCOUNT).toBe(1);
+    expect(cfg.RAMP_ALERT_MIN_BPS).toBe(5);
     // Strike jackpot expectation is folded into EV by default.
     expect(cfg.STRIKE_EV_ENABLED).toBe(true);
     // Adaptive fire timing on by default, within sane bounds.

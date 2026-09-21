@@ -82,7 +82,9 @@ import {
   type OneBtcStateName,
 } from "./strategy/vault-claim.js";
 import { loadConfig, type Config } from "./config.js";
-import { CandidateSet, type EvSource } from "./exec/candidates.js";
+import { CandidateSet, type EvSource,
+  computeCandidateSelections,
+} from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
@@ -1278,14 +1280,19 @@ export class Orchestrator {
     const projectedField = Math.max(others, bounds.high);
 
     const share = this.cfg.VAULT_MAX_SHARE;
-    const capTickets =
-      (share / (1 - share)) * projectedField - epoch.myTickets;
+    // share ≥ 1: no brake (the dilution curve prices our own share); the
+    // flat price is then the small-block value, used only where the curve
+    // is not (deferred hashrate, the ticket engine's opportunity cost).
+    const capTickets = share >= 1
+      ? Number.POSITIVE_INFINITY
+      : (share / (1 - share)) * projectedField - epoch.myTickets;
     if (!(capTickets >= 1)) return null;
+    const block = Math.max(1, (Math.min(share, 0.05) / (1 - Math.min(share, 0.05))) * projectedField);
 
     const uplift = this.cfg.EPOCH_DEDUP_UPLIFT;
     const at = (mine: number): number =>
       expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift, this.epochCurve());
-    const avgTicketUsd = (at(epoch.myTickets + capTickets) - at(epoch.myTickets)) / capTickets;
+    const avgTicketUsd = (at(epoch.myTickets + block) - at(epoch.myTickets)) / block;
     if (!(avgTicketUsd > 0)) return null;
 
     const roundsRemaining = Math.max(1, slotsToClose / roundDuration);
@@ -1353,9 +1360,10 @@ export class Orchestrator {
 
 
 
-  private monetisableRawPerRound(): number {
+  private monetisableRawPerRound(): number | undefined {
     const e = this.epochTicketEconomics();
     if (!e) return 0;
+    if (!Number.isFinite(e.capTickets)) return undefined; // no brake
     return (e.capTickets * this.cfg.VAULT_HASHRATE_PER_TICKET) / e.roundsRemaining;
   }
 
@@ -2726,11 +2734,19 @@ export class Orchestrator {
       /* no history yet */
     }
     for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
+    // Forward-looking: what the selector would deploy per tile RIGHT NOW with
+    // no cash cap at all, so the float is ready before the spike, not after.
+    try {
+      const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
+      for (const sel of want) for (const a of sel.allocation) if (a > observed) observed = a;
+    } catch {
+      /* model not ready */
+    }
     const tiles = BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
     return dynamicFloatBase({
       observedPeakLegBase: observed,
       floorBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
-      perRoundCapBase: this.bankroll.maxPerRoundBase / tiles,
+      perRoundCapBase: this.cfg.MAX_PER_ROUND_USD > 0 ? this.bankroll.maxPerRoundBase / tiles : usdToBase(1_000_000),
       floatRounds: this.cfg.FLEET_FLOAT_ROUNDS,
       headroom: this.cfg.FLEET_FLOAT_HEADROOM,
     });
