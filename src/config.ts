@@ -4,13 +4,29 @@
  *
  * Run directly (`tsx src/config.ts`) to print a redacted summary and exit.
  */
-import "dotenv/config";
-import { realpathSync } from "node:fs";
+import { config as loadDotenv } from "dotenv";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
 import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS, STRIKE_PAYOUT_FRACTION, STAKING_YIELD_DAILY } from "./strategy/facts.js";
 import { PROGRAM_ADDRESS } from "./adapter/idl.js";
+
+/**
+ * Where the env comes from, first match wins: DOTENV_CONFIG_PATH, `.env` in
+ * the working directory, then the service's `/etc/satrush/.env` — so
+ * `pnpm preflight` / `pnpm grpc-probe` on the VPS read the same file the
+ * systemd unit does without sourcing it by hand. Variables already in the
+ * process environment always win (dotenv never overrides).
+ */
+export const ENV_FILE_CANDIDATES = [".env", "/etc/satrush/.env"] as const;
+export function resolveEnvFile(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.DOTENV_CONFIG_PATH) return env.DOTENV_CONFIG_PATH;
+  for (const p of ENV_FILE_CANDIDATES) if (existsSync(p)) return p;
+  return null;
+}
+const envFile = resolveEnvFile();
+if (envFile) loadDotenv({ path: envFile });
 
 const emptyToUndef = (v: unknown) =>
   typeof v === "string" && v.trim() === "" ? undefined : v;

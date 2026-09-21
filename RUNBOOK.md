@@ -300,6 +300,8 @@ nothing; several an hour is worth escalating. Get evidence with
 
     pnpm grpc-probe 15
 
+(scripts on the box find `/etc/satrush/.env` on their own when there is no
+`.env` in the working directory; `DOTENV_CONFIG_PATH=<file>` overrides)
 which subscribes exactly as the bot does and prints slots/s, the worst
 silence, the lag against the HTTP RPC head and every disconnect, then a
 verdict. If the RPC head kept moving while the stream was silent, the
