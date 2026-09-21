@@ -159,6 +159,9 @@ export const DASHBOARD_HTML = `<!doctype html>
   <h2>Current board · <span id="boardsub" class="mono" style="color:var(--ink-2)"></span></h2>
   <div class="board" id="board"></div>
 
+  <h2>Deposit · <span class="mono" style="color:var(--ink-2)">send USDC + SOL to the primary; the fleet funds itself</span></h2>
+  <div class="stat" id="deposit" style="display:flex;gap:18px;align-items:center;flex-wrap:wrap"></div>
+
   <h2>Vitals</h2>
   <div class="stat" id="vitals"></div>
   <div class="stat" id="prices" style="margin-top:12px"></div>
@@ -319,6 +322,15 @@ function render(s, rounds, deploys, comp, health, vault, pnl, intel) {
       carry ? ("BTC / RUSH share legs over "+g.carryHorizonDays+" d (capped)") : "VAULT_CARRY_HORIZON_DAYS=0 — hold intent not stated"],
   ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
 
+  if (s.deposit) {
+    const d = s.deposit;
+    el("deposit").innerHTML =
+      (d.usdcQr ? '<div style="text-align:center"><img src="'+d.usdcQr+'" width="132" height="132" alt="USDC QR"><div class="mono" style="font-size:11px">USDC</div></div>' : "") +
+      (d.solQr ? '<div style="text-align:center"><img src="'+d.solQr+'" width="132" height="132" alt="SOL QR"><div class="mono" style="font-size:11px">SOL</div></div>' : "") +
+      '<div><div class="mono" style="font-size:13px;word-break:break-all">'+d.address+'</div>' +
+      '<div style="color:var(--ink-2);margin-top:6px">minimum first deposit '+d.minUsdc+' USDC + '+d.minSol+' SOL · scan with Phantom / Solflare / Backpack</div>' +
+      '<button data-addr="'+d.address+'" onclick="navigator.clipboard.writeText(this.dataset.addr)" style="margin-top:8px">copy address</button></div>';
+  }
   const fleet = s.wallets || [];
   el("fleetwrap").style.display = fleet.length > 1 ? "" : "none";
   if (fleet.length > 1) {

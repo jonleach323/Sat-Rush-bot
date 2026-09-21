@@ -17,6 +17,7 @@ const fakeData: MonitorData = {
     markedNetTodayUsd: -1.5,
     tokenFeed: null,
     wallets: [],
+  deposit: { address: "11111111111111111111111111111111", usdcUri: "solana:x", solUri: "solana:y", usdcQr: "", solQr: "", minUsdc: 420, minSol: 0.72 },
     game: { version: "v2", tokenYield: 0.015, satsVaultApr: 3.15, tokenVaultApr: null, carry: null, carryHorizonDays: 0 },
     caps: { maxPerRoundUsd: 1000, dailyLossCapUsd: 1000, dailyLossLeftUsd: 998.5 },
     prices: { btc: { usd: 118_423.1, live: true }, sol: { usd: 212.55, live: true } },

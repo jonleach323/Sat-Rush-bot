@@ -88,6 +88,7 @@ import { CandidateSet, type EvSource,
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { depositInfo, qrDataUrl, qrPng } from "./ops/deposit.js";
 import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
@@ -103,7 +104,7 @@ import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
 import { HealthMonitor } from "./ops/health.js";
 import { MonitorApi } from "./ops/api.js";
-import { createMonitorData, type MonitorData, type VaultPoolsJson } from "./ops/monitor.js";
+import { createMonitorData, type MonitorData, type VaultPoolsJson, type StatusJson } from "./ops/monitor.js";
 import { createTelegramOps, type TelegramOps, type FleetReport } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
@@ -196,6 +197,8 @@ export class Orchestrator {
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private fleetTimer: NodeJS.Timeout | null = null;
   private dayAnchor: { day: string; usdcBase: bigint } | null = null;
+  private depositBlock: StatusJson["deposit"] | null = null;
+  private fundedAlerted = false;
   private fleetCycleInFlight = false;
   private lastFleetPlan: { at: number; plan: FleetPlan; executed: number; dry: boolean } | null = null;
   private fleetShortfallAlerted = false;
@@ -276,6 +279,7 @@ export class Orchestrator {
       maxPerRoundBase: () => this.bankroll.maxPerRoundBase,
       dailyLossCapBase: () => this.bankroll.dailyLossCapBase,
       myAuthority: this.payer.publicKey.toBase58(),
+      deposit: () => this.depositBlock ?? { ...depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size), usdcQr: "", solQr: "" },
       solBalanceLamports: () =>
         this.connection.getBalance(this.payer.publicKey, "processed"),
       usdcBalanceBaseUnits: async () => {
@@ -682,6 +686,7 @@ export class Orchestrator {
         getVault: () => this.monitor.vault(),
         getWallets: () => this.wallets.snapshot(),
         getFleet: () => this.fleetReport(),
+        getDeposit: () => this.depositForTelegram(),
       },
     });
     this.telegram.start();
@@ -2626,6 +2631,24 @@ export class Orchestrator {
     return signature;
   }
 
+  /** The deposit block for the dashboard and Telegram: address, Solana Pay URIs and QR data URLs (once). */
+  private async buildDepositBlock(): Promise<void> {
+    const info = depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size);
+    try {
+      const [usdcQr, solQr] = await Promise.all([qrDataUrl(info.usdcUri), qrDataUrl(info.solUri)]);
+      this.depositBlock = { ...info, usdcQr, solQr };
+    } catch {
+      this.depositBlock = { ...info, usdcQr: "", solQr: "" };
+    }
+    this.log.info({ deposit: info.address, minUsdc: info.minUsdc, minSol: info.minSol }, "deposit address ready (dashboard + /deposit show the QR)");
+  }
+
+  /** Telegram /deposit: the address, the URIs and a scannable PNG. */
+  async depositForTelegram(): Promise<{ address: string; usdcUri: string; solUri: string; minUsdc: number; minSol: number; png: Buffer }> {
+    const info = depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size);
+    return { ...info, png: await qrPng(info.usdcUri) };
+  }
+
   /**
    * The fleet treasury. Deposits go to the primary; this moves them to the
    * wallets that need them most. One cycle: refresh balances → claim every
@@ -2641,6 +2664,14 @@ export class Orchestrator {
     this.fleetCycleInFlight = true;
     try {
       await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      const p = this.wallets.primary();
+      const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
+      if (funded && !this.fundedAlerted) {
+        this.fundedAlerted = true;
+        this.alert(`💰 deposit received: $${(Number(p.usdcBase) / 1e6).toFixed(2)} USDC · ${(p.lamports / 1e9).toFixed(3)} SOL on the primary — distributing to ${this.wallets.size} wallets`);
+      } else if (!funded && this.fundedAlerted && p.usdcBase < usdToBase(1)) {
+        this.fundedAlerted = false;
+      }
       if (this.cfg.EXECUTION_MODE !== "dry") {
         for (const w of this.wallets.all()) await this.claimUsdCompound(w);
         await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
@@ -3199,6 +3230,7 @@ export class Orchestrator {
       this.refreshRivalProfiles();
     }, 30_000);
     this.walletDriftTimer.unref?.();
+    void this.buildDepositBlock();
     if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
       void this.ensureAffiliateTag();
       this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);

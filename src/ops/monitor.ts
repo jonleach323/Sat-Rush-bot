@@ -57,6 +57,8 @@ export interface StatusJson {
   tokenFeed: TokenFeedStatus | null;
   /** Fleet wallets — one entry in single-wallet mode. */
   wallets: WalletSnapshot[];
+  /** Where to send money: the primary, as an address and as Solana Pay QRs (data URLs). */
+  deposit: { address: string; usdcUri: string; solUri: string; usdcQr: string; solQr: string; minUsdc: number; minSol: number };
   /** The V2 economics the selector is pricing right now. */
   game: {
     version: string;
@@ -167,6 +169,8 @@ export interface MonitorContext {
   maxPerRoundBase: () => bigint;
   dailyLossCapBase: () => bigint;
   myAuthority: string;
+  /** Deposit block, computed once at boot (QR data URLs are static). */
+  deposit: () => StatusJson["deposit"];
   solBalanceLamports: () => Promise<number>;
   usdcBalanceBaseUnits: () => Promise<bigint>;
   /** Live BTC/USD (oracle-backed); a getter so it isn't frozen at boot. */
@@ -269,6 +273,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         markedNetTodayUsd: baseToUsd(ctx.pnl.markedNetToday()),
         tokenFeed: ctx.tokenFeedStatus(),
         wallets: ctx.wallets(),
+        deposit: ctx.deposit(),
         game: (() => {
           const feed = ctx.tokenFeedStatus();
           return {

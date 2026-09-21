@@ -4,7 +4,7 @@
  * silently. All game-side effects go through injected deps so the bot works
  * identically in dry mode and offline tests (handleUpdate + api transformer).
  */
-import { Bot, type Api } from "grammy";
+import { Bot, InputFile, type Api } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import type { Logger } from "pino";
 import { baseToUsd } from "../units.js";
@@ -118,6 +118,7 @@ export interface TelegramDeps {
   getVault?(): VaultReport | Promise<VaultReport>;
   getWallets?(): WalletRow[] | Promise<WalletRow[]>;
   getFleet?(): FleetReport | Promise<FleetReport>;
+  getDeposit?(): Promise<{ address: string; usdcUri: string; solUri: string; minUsdc: number; minSol: number; png: Buffer }>;
 }
 
 /** The fleet treasury's view: balances, per-tile runway, pending and last transfers. */
@@ -399,12 +400,26 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(lines.join("\n"));
   });
 
+  bot.command("deposit", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getDeposit) return void ctx.reply("deposit info unavailable");
+    const d = await opts.deps.getDeposit();
+    await ctx.replyWithPhoto(new InputFile(d.png, "deposit-usdc.png"), {
+      caption: [
+        `💰 deposit address (the primary; the fleet funds itself from it):`,
+        d.address,
+        `minimum first deposit: ${d.minUsdc} USDC + ${d.minSol} SOL`,
+        `scan the QR with Phantom / Solflare / Backpack for USDC; SOL: ${d.solUri}`,
+      ].join("\n"),
+    });
+  });
+
   bot.command("help", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     await ctx.reply(
       [
         "⛏ SAT RUSH commands (V2)",
-        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /fleet /health",
+        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /fleet /deposit /health",
         "control: /pause /resume /kill",
         "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),
