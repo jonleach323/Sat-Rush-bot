@@ -58,7 +58,8 @@
     "hold-vs-stake": "tsx scripts/hold-vs-stake.ts",
     "buy-vs-mine": "tsx scripts/buy-vs-mine.ts",
     "strike-payout": "tsx scripts/strike-payout.ts",
-    "ev-map": "tsx scripts/ev-map.ts"
+    "ev-map": "tsx scripts/ev-map.ts",
+    "measure-remaining": "tsx scripts/measure-remaining.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

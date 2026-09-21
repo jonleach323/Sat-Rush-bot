@@ -38,9 +38,10 @@ Referrals pages), and the measurements in FINDINGS.md.
    leg is worth ≤ 2% of gross in dollars at any price; mining beats buying
    iff the non-token toll is under ~1.85%, which only the boosted blanket
    at the cap clears in every bracket.
-6. **Hashrate belongs in the 1-BTC vault**, not the epoch vault: $0.045 per
-   ticket versus $0.013–$0.028, 1.6–3.5× per unit, at the cost of winner-
-   take-all variance (one ticket in ~1.8M). The engine already ranks them.
+6. **Hashrate is worth about the same in either vault**: a 1-BTC ticket
+   $0.023–$0.045 (1.0–1.9× an epoch ticket's $0.024) depending on how long
+   the vault takes to fill, at winner-take-all variance (one ticket in
+   1.8–3.5M). The engine ranks them by marginal value each tick.
 7. **Grubstake is 97.7 cents on the dollar** deployed as a blanket, and
    expires. Affiliate points are 10 bps of referred volume, 1:1 to grubstake.
 
@@ -193,8 +194,8 @@ last 100 rounds average $83/round and falling).
   blended full-time blanket at cap (22% of rounds boosted): −0.73% … +1.20% per $ per round
 
   HASHRATE (100 raw = 1 ticket)
-  epoch ticket $0.0127–$0.0284 · 1-BTC ticket $0.0448 (1 BTC ÷ ~1.82M projected tickets; 114 days to the draw at today's volume)
-  → 1-BTC pays 1.6–3.5× the epoch vault per unit; winner-take-all
+  epoch ticket $0.0236 at iteration 16's projected close (pace: $28.2k pool / 900k tickets; iteration 15 closed $0.0237) · 1-BTC ticket $0.023–$0.045 (1 BTC ÷ 1.8–3.5M tickets; 56–115 days to the draw)
+  → 1-BTC pays 1.0–1.9× the epoch vault per unit (iterations 1–2 drew at 0.88M and 1.69M tickets); winner-take-all
 
   HOLD / CLAIM / STAKE / BUY
   sats-vault shares: +0.30%/day carry, hold · token-vault shares: +0.24%/day, hold · claim USD: free, always
@@ -232,12 +233,33 @@ mid-iteration while the field shrank — iteration 16's close settles it).
   ticket value at iteration 16's close, the mint TWAP (2% cap), the fee
   split (preflight's economics gate), the strike modulus.
 
-## 7. What is still uncertain, honestly
+## 7. What was uncertain, measured (`pnpm measure-remaining`, 2026-09-21)
 
-The epoch ticket value under the halved fee (bracketed, not known until
-iteration 16 closes); whether the mint's tranche 1 (515,813 RUSH) or the
-TWAP cap binds in a RUSH rally (cap binds above $10 spot); the staking
-split (29%) is app text, not measured on chain yet; the 1-BTC ticket
-projection assumes purchases keep pace with fill; none of the V2 send
-paths (deploy, settle, ticket buys, claims) has been fired live from this
-client — the builders are verified against the tape only.
+- **Epoch ticket value under the 104 bps fee: unchanged.** Iteration 16 at
+  5.1 of 10.7 days holds $16,263 against $13,802 of epoch fee collected
+  (118%: the BTC/RUSH legs' price moves and pending sweeps). At the
+  post-09-17 pace ($2,134/day of fee, 83,817 tickets/day) it closes at
+  ~$28.2k over ~900k tickets: a ticket worth $0.0236, against iteration
+  15's $0.0237. The field shrank as much as the fee did, so the "live fee"
+  low case ($0.0127) in `pnpm ev-map` is a floor, not the estimate; the
+  central column is the closed-15 / 16-pace one. The blanket at the cap is
+  therefore +0.10%…+0.58% unboosted and +2.49%…+3.45% boosted.
+- **Staking split: 31.4% ± 3 measured** ($6,960 of BTC deposited against
+  $22,165 of buybacks fee collected over 13,299 rounds; BTC priced today,
+  deposits stream over 24 h), consistent with the app's stated 29%. Kept
+  at the stated round number.
+- **1-BTC tickets at the draw: 1.8–3.5M.** Iterations 1 and 2 drew at
+  883,982 and 1,694,036 tickets; iteration 3 runs 28,486 tickets/day at
+  12.7% filled after 8.1 days, and the fill takes 56 more days at its own
+  average or 115 at the last-3-day volume. Ticket value $0.023–$0.045.
+- **The mint's binding average is the 30-day TWAP** at ~$46.4 (the cap
+  price implied by the live rate), above spot $42.95 and above the mint
+  program's 1-day observation ring (~$42; ~270 records at ~4-minute
+  spacing, layout inferred from a raw dump). So the RUSH leg is 1.83% of
+  gross today and rises toward 2% only as the 30-day average falls to spot.
+
+**Not measurable from here:** a live V2 send (deploy, settle, ticket buy,
+claim) from this client. Every builder is verified key-for-key against
+mainnet transactions, but firing one needs a funded keypair and
+`MAINNET_CONFIRM=yes`, which only the operator can supply. That is the
+one open item, and it is an operational test, not an economic unknown.

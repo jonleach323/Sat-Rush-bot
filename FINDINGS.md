@@ -1763,3 +1763,20 @@ The verdict (SAT-RUSH-MODEL.md § 0): the board is negative everywhere except
 a 21-tile blanket at the streak cap inside boost windows (+0.27%…+3.45% per
 $ per round, 22% of rounds); hold every share; stake bought RUSH for the
 volume yield; spend hashrate on 1-BTC tickets; never single tiles.
+
+### Addendum: the four "uncertain" items, measured (2026-09-21)
+
+`pnpm measure-remaining` (pages the V2 rounds once):
+
+```
+  staking split   $6,960 BTC deposited / $22,165 buybacks fee collected (13,299 rounds) = 31.4% ± 3   stated 29% ✓
+  epoch 16        5.1/10.7 d: pool $16,263 vs fee collected $13,802 (118%); pace $2,134/day, 83,817 tickets/day
+                  → close ~$28.2k / ~900k tickets → ticket $0.0236 (iteration 15: $0.0237)   the fee-scaled $0.0127 was a floor
+  1-BTC draw      iterations 1, 2 drew at 883,982 / 1,694,036 tickets; iteration 3: 28,486/day, 12.7% filled at 8.1 d
+                  → 1.8–3.5M at the draw → $0.023–$0.045/ticket (1.0–1.9× an epoch ticket, not 1.6–3.5×)
+  mint TWAP       implied binding average $46.42 (30-day side) vs spot $42.95 and the 1-day ring ~$42 → RUSH leg 1.83% of gross
+```
+
+The blanket-at-cap verdict tightens: +0.10%…+0.58% per $ per round
+unboosted, +2.49%…+3.45% boosted, on iteration 16's own pace. The one
+item that stays open is a live send, which needs the operator's keypair.
