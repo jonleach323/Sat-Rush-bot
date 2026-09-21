@@ -77,6 +77,7 @@ console.log(report.length ? report.join("\n") : "nothing to migrate — the file
 if (write && report.length) {
   const bak = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   copyFileSync(path, bak);
-  writeFileSync(path, out.join("\n"));
+  // Always end with a newline: a later `tee -a KEY=value` must start its own line.
+  writeFileSync(path, out.join("\n").replace(/\n*$/, "\n"));
   console.log(`written; previous file saved as ${bak}`);
 } else if (report.length) console.log(`(dry — re-run with --write to apply)`);
