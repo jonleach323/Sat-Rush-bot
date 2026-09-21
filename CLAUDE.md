@@ -66,6 +66,17 @@ stale, invented, or duplicated. Rules:
   is set" was repeated from a stale note while the bot was live and trading.
 - `pnpm preflight` prints assumed and stale facts. Treat stale as an error.
 
+## Engineering rules (2026-09-21, after a day of live-found bugs)
+- `pnpm check` (typecheck + lint + tests) must pass before a push; CI runs it.
+- Orchestrator wiring (refresh/ARM/fire ordering, kill switch, bursts,
+  reconnects, treasury) is covered by `test/orchestrator.test.ts` on the fake
+  harness in `test/harness/`. A change there ships with a harness test.
+- Nothing synchronous and unbounded runs inside the event loop: the
+  selector is coarse-to-fine, refreshes are coalesced, planner runs are
+  memoized per round, and `/health` names any job that blocks > 1 s.
+- Observation history is bounded (prune to 6000 rounds); ledger tables never.
+- Deploys go through `deploy/upgrade.sh`, never a hand-typed pull without a build.
+
 ## Stack
 TypeScript, Node 20+, pnpm. Deps: @solana/web3.js v1, @coral-xyz/anchor,
 @triton-one/yellowstone-grpc, better-sqlite3, grammy (Telegram), pino, zod, vitest, tsx.

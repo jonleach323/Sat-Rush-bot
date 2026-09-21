@@ -348,6 +348,38 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * Test seam: build an orchestrator from already-constructed parts (fakes
+   * for the connection, ingest source and sender; an in-memory DB). The
+   * orchestration — state machine, refresh coalescing, ARM-edge re-pricing,
+   * kill-switch gating, treasury — is otherwise reachable only through
+   * boot() against live RPC, which is where every 2026-09-21 bug lived.
+   */
+  static forTest(parts: {
+    cfg: Config;
+    connection: Connection;
+    state: GameState;
+    source: IngestSource;
+    db: StateDb;
+    pnl: Pnl;
+    bankroll: Bankroll;
+    candidates: CandidateSet;
+    sender: RaceSender;
+    feeEstimator: FeeEstimator;
+    payer: Keypair;
+    ixCtx: InstructionContext;
+    fees: FeeModel;
+    prices: PriceFeed;
+    tokenFeed: TokenFeed | null;
+    wallets: WalletSet;
+  }): Orchestrator {
+    return new Orchestrator(
+      parts.cfg, parts.connection, parts.state, parts.source, parts.db, parts.pnl, parts.bankroll,
+      parts.candidates, parts.sender, parts.feeEstimator, parts.payer, parts.ixCtx, parts.fees,
+      parts.prices, parts.tokenFeed, parts.wallets,
+    );
+  }
+
   static async boot(cfg: Config): Promise<Orchestrator> {
     const programId = new PublicKey(cfg.PROGRAM_ID);
     const connection = new Connection(cfg.RPC_HTTP_URL, "processed");
@@ -3457,6 +3489,12 @@ export class Orchestrator {
   }
 
   async shutdown(reason: string): Promise<void> {
+    await this.close(reason);
+    process.exit(0);
+  }
+
+  /** Everything shutdown() does except exiting the process (tests, embedding). */
+  async close(reason: string): Promise<void> {
     this.log.info({ reason }, "shutting down");
     this.candidates.clear();
     this.health.stop();
@@ -3471,7 +3509,6 @@ export class Orchestrator {
     await this.api?.stop().catch(() => undefined);
     await this.telegram?.stop().catch(() => undefined);
     this.db.close();
-    process.exit(0);
   }
 }
 

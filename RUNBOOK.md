@@ -108,6 +108,30 @@ TOLERANCE` and `WALLET_DRIFT_TOLERANCE_USD` stay at their §0/​default values
    COUNT(*) FROM my_deploys GROUP BY 1;`). A tripwire halt (KILL file) means
    stop and investigate — otherwise let the EV engine run.
 
+## 1a. Engineering discipline (what "production" means here)
+
+- **CI** (`.github/workflows/ci.yml`) runs `pnpm typecheck`, `pnpm lint`,
+  `pnpm test` and `pnpm build` on every push; `pnpm check` is the same
+  locally. Lint is typescript-eslint's type-checked set plus the rules that
+  match this bot's failure modes (dropped promises, promises in booleans,
+  switch exhaustiveness, dead code).
+- **The orchestrator has its own tests** (`test/orchestrator.test.ts` on
+  `test/harness/`): a full round on fakes — real Bankroll, CandidateSet,
+  RaceSender (dry) and GameState; fake RPC, fake ingest, in-memory DB,
+  IDL-encoded account fixtures. Any change to `src/index.ts` that touches
+  ordering (refresh, ARM, fire), the kill switch, bursts or reconnects
+  gets a test there first; that layer is where every 2026-09-21 bug lived.
+- **The process measures itself**: `/health` (Telegram and `/api/health`)
+  reports event-loop delay, the worst block of the window and lifetime,
+  and every timed job's last/max/mean. `event_loop_blocked` alerts name
+  the job. A silent stream, a frozen Telegram and a late fire all start
+  as a blocked loop; look there first.
+- **Config lint** at boot and in preflight names each operationally wrong
+  env value with its fix (§7a lists the ones that bit).
+- **Upgrades are one command**: `sudo /opt/satrush/deploy/upgrade.sh`
+  (§11). It refuses to restart on a failed preflight and verifies the
+  revision the service logs is the one it built.
+
 ## 2. Rollback / emergency stop
 
 Fastest to slowest — all of these stop *new* risk immediately:
@@ -551,6 +575,16 @@ address.
    the grace lets presence deploy every third round if fees bite).
 
 ## 11. Upgrading a running V1 deployment to the V2 fleet
+
+**Routine upgrades after that** (any later commit on the branch):
+
+    sudo /opt/satrush/deploy/upgrade.sh            # fast-forward the current branch
+    sudo /opt/satrush/deploy/upgrade.sh <branch>   # or switch to a branch / rev
+
+Backup → fetch → install → build → dist-newer-than-src check → env:migrate
+→ preflight (a failure keeps the old build running) → restart → the boot
+line's `rev` must equal the built revision or the script fails loudly.
+
 
 The V1 bot on the VPS keeps running until step 3; the V2 build is a
 different program model, a fleet, and derived limits, so the upgrade is:
