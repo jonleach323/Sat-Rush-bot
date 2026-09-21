@@ -101,7 +101,7 @@ export function oneBtcEntryReady(o: OneBtcReadState, minFillBps: number): boolea
  */
 export function marginalTicketUsd(
   v: { kind: VaultSnapshot["kind"]; state: EpochReadState | OneBtcReadState },
-  epochCurve?: readonly number[] | undefined,
+  epochCurve?: readonly number[],
 ): number {
   const { poolValueUsd, totalTickets } = v.state;
   if (!(poolValueUsd > 0) || !(totalTickets > 0)) return 0;

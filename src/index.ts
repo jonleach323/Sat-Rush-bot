@@ -87,7 +87,7 @@ import { CandidateSet, type EvSource,
 } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
-import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { assembleTx } from "./exec/tx.js";
 import { depositInfo, qrDataUrl, qrPng } from "./ops/deposit.js";
 import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";

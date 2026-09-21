@@ -146,7 +146,6 @@ const sender = new RaceSender({
   jitoUrl: cfg.JITO_BLOCK_ENGINE_URL,
   logger,
 });
-const tFire = Date.now();
 const result = await sender.fire(candidate, {
   isPastCutoff: () => lastSlot > cutoffSlot,
 });

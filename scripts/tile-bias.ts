@@ -76,7 +76,8 @@ for (let i = 0; i < sigs.length; i += 50) {
           const tiles: number[] = [];
           for (let t = 0; t < TILES_COUNT; t++) if (mask & (1 << t)) tiles.push(t);
           if (tiles.length === 0) continue;
-          isAuto ? autoDeploys++ : manualDeploys++;
+          if (isAuto) autoDeploys++;
+          else manualDeploys++;
           const slot = maskCount[isAuto ? 0 : 1] as number[];
           for (const t of tiles) slot[t] = (slot[t] ?? 0) + 1;
           let r = rounds.get(id);
@@ -107,7 +108,6 @@ for (const r of usable) {
   if (tot <= 0) continue;
   for (let t = 0; t < TILES_COUNT; t++) shareSum[t] = (shareSum[t] ?? 0) + (r.stakes[t] ?? 0) / tot;
 }
-const fair = 1 / TILES_COUNT;
 const shares = shareSum.map((s) => s / usable.length);
 const ranked = shares.map((s, t) => ({ t, s })).sort((a, b) => a.s - b.s);
 

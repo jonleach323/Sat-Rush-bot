@@ -18,7 +18,6 @@ import {
   BN,
   decodeAccount,
   instructionCoder,
-  PROGRAM_ID,
   SATRUSH_IDL,
   type Board,
   type Miner,

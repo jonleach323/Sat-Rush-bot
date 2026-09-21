@@ -98,7 +98,7 @@ const EV_EPSILON = 1e-6;
 const BPS = 10_000;
 
 /** True when `ev` clears the configured minimum-edge floor for `gross`. */
-function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint | undefined): boolean {
+function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint): boolean {
   const bps = minEdgeBps ?? 0;
   const relative = bps > 0 ? (Number(gross) * bps) / BPS : 0;
   const absolute = minEvBase !== undefined && minEvBase > 0n ? Number(minEvBase) : 0;

@@ -133,7 +133,8 @@ describe("CandidateSet with a wallet set", () => {
 });
 
 describe("GameState tracks every fleet wallet's Miner", () => {
-  function minerBytes(authority: PublicKey, streak: number, hashrate: number): Buffer {
+  // encode() is async in Anchor; the old `: Buffer` signature was a type lie lint caught.
+  async function minerBytes(authority: PublicKey, streak: number, hashrate: number): Promise<Buffer> {
     const reserved = (SATRUSH_IDL.types!.find((t) => t.name === "Miner")!.type as { fields: { name: string; type: { array?: [string, number] } }[] })
       .fields.find((f) => f.name === "reserved")!.type.array![1];
     return accountsCoder.encode("Miner", {

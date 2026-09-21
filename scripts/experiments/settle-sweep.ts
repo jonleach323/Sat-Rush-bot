@@ -12,7 +12,6 @@ import {
   explorer,
   fmtUsd,
   getBoard,
-  getDeployment,
   getMiner,
   nowIso,
   sendIxs,

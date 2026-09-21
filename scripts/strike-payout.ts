@@ -41,13 +41,13 @@ const pct = (x: number, d = 1) => `${(100 * x).toFixed(d)}%`;
 console.log(`rounds ${stop + 1}…${head} (${rounds} finished): ${strikes.length} strikes → one per ${(rounds / Math.max(1, strikes.length)).toFixed(0)} rounds (on-chain modulus ${modulus} → expected one per ${modulus}); strike fee collected $${feeUsd.toFixed(0)} (${conf.strike_fee_bps} bps × gross)`);
 console.log(`\n  round    gross    bonus USD   reserve   seeded next   payout USD   payout BTC   payout RUSH   epoch leg   date`);
 const fr: number[] = [];
-let bonusUsdTotal = 0, bonusCombinedTotal = 0;
+let bonusCombinedTotal = 0;
 for (const r of strikes) {
   const bU = n(r.strike_bonus_usd, 6), rU = n(r.strike_reserve_usd, 6), sU = n(r.strike_seed_from_reserve_usd, 6), eU = n(r.strike_epoch_usd, 6);
   const bB = n(r.strike_bonus_btc, 8), rB = n(r.strike_reserve_btc, 8);
   const bT = n(r.strike_bonus_token, 9), rT = n(r.strike_reserve_token, 9);
   const fU = bU / (bU + rU + eU), fB = bB + rB > 0 ? bB / (bB + rB + n(r.strike_epoch_btc, 8)) : NaN, fT = bT + rT > 0 ? bT / (bT + rT + n(r.strike_epoch_token, 9)) : NaN;
-  fr.push(fU); bonusUsdTotal += bU; bonusCombinedTotal += r.strike_bonus_combined_usd ?? bU;
+  fr.push(fU); bonusCombinedTotal += r.strike_bonus_combined_usd ?? bU;
   console.log(`  ${r.id}   $${n(r.total_gross_deployed_usd, 6).toFixed(0).padStart(5)}   ${("$" + bU.toFixed(0)).padStart(9)}   ${("$" + rU.toFixed(0)).padStart(7)}   ${("$" + sU.toFixed(0)).padStart(11)}   ${pct(fU).padStart(10)}   ${(Number.isNaN(fB) ? "—" : pct(fB)).padStart(10)}   ${(Number.isNaN(fT) ? "—" : pct(fT)).padStart(11)}   ${("$" + eU.toFixed(0)).padStart(9)}   ${(r.started_at ?? "").slice(0, 10)}`);
 }
 if (fr.length > 0) {
