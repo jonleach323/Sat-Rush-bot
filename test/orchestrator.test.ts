@@ -52,7 +52,7 @@ describe("round lifecycle on fakes", () => {
     expect(total <= 1_000_000_000n).toBe(true);
   });
 
-  it("the ARM edge re-prices on the final board before firing", async () => {
+  it("re-prices on the final board PRE_ARM_SLOTS before the fire offset, and the ARM tick only sends", async () => {
     h = await bootHarness();
     type WithRefresh = { refreshCandidates: (t: string) => Promise<void> };
     const proto = Orchestrator.prototype as unknown as WithRefresh;
@@ -68,12 +68,21 @@ describe("round lifecycle on fakes", () => {
       order.push("fire");
       return { outcome: "dry", signature: "x", meta: (args[0] as { meta: unknown }).meta } as never;
     });
+    // Offset 4 → pre-arm at cutoff 7 (slot 1223), ARM at cutoff 4 (slot 1226).
+    h.slotsTo(1_223);
+    await h.settle(60);
+    expect(order).toContain("refresh:pre_arm");
+    expect(order).not.toContain("fire"); // priced, signed, not yet sent
+    h.slotsTo(1_225);
+    await h.settle(20);
+    expect(order).not.toContain("fire");
     h.slotsTo(1_226);
-    await h.settle(80);
-    // The "armed" refresh happens, and the fire comes after it.
-    const armedAt = order.indexOf("refresh:armed");
-    expect(armedAt).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf("fire")).toBeGreaterThan(armedAt);
+    await h.settle(60);
+    const preArmAt = order.indexOf("refresh:pre_arm");
+    expect(order.indexOf("fire")).toBeGreaterThan(preArmAt);
+    // Nothing was re-priced inside the fire window.
+    expect(order.slice(order.indexOf("fire") - 1)[0]).not.toMatch(/^refresh:armed/);
+    expect(order.filter((o) => o === "refresh:armed")).toHaveLength(0);
   });
 });
 

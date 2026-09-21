@@ -99,6 +99,14 @@ import { lintConfig } from "./ops/config-lint.js";
 
 /** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
 const REFRESH_MIN_INTERVAL_MS = 750;
+/**
+ * The final re-pricing runs this many slots BEFORE the fire offset, not at
+ * it: a blockhash fetch plus 21 signatures cost ~0.5 s, and spending that
+ * inside the fire window (offset 5 slots ≈ 2 s, send→land 1–2 slots) is
+ * how round 69566 landed after cutoff (round_not_active). The board is
+ * final ~40 s before cutoff, so pricing 3 slots earlier loses nothing.
+ */
+const PRE_ARM_SLOTS = 3;
 /** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
 const SNAPSHOT_MIN_SLOTS = 5;
 /** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
@@ -822,6 +830,7 @@ export class Orchestrator {
     this.roundId = roundId;
     this.skipLogged.clear();
     this.fireInFlight = false;
+    this.preArmed = false;
     this.transition("ROUND_OPEN", { cutoff: this.state.slotsToCutoff() });
     void this.refreshCandidates("round_open");
   }
@@ -861,31 +870,35 @@ export class Orchestrator {
     else this.refreshTimer = setTimeout(() => void this.runRefresh(trigger, true), wait);
   }
 
+  /** Set once per round when the pre-arm re-pricing has been started. */
+  private preArmed = false;
+
   /**
-   * The ARM edge: price the round on the FINAL board and the ramp signal of
-   * this very tick, then fire. The candidates on hand were built at the last
-   * occupancy update — with the forecast of that moment and before
-   * evDiagnostics() could floor the presence credit — so a round the
-   * diagnostics call positive at fire time could still carry a stale "no
-   * candidate" (round 68883: blanket +73 bps, selector empty).
+   * PRE_ARM_SLOTS before the fire offset: price the round on the (final)
+   * board and this tick's ramp signal, and rebuild the signed legs with a
+   * fresh blockhash — so the ARM tick has nothing left to do but send. The
+   * candidates on hand before this were built at the last occupancy update,
+   * with that moment's forecast and before evDiagnostics() could floor the
+   * presence credit (round 68883: blanket +73 bps, selector empty). If the
+   * bot is already ARMED when this refresh lands, it fires from here.
    */
-  private async armAndFire(): Promise<void> {
+  private async preArm(cutoff: number): Promise<void> {
+    this.log.debug({ roundId: this.roundId, cutoff }, "pre-arm: final re-pricing");
     if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
-    await this.refreshNow("armed");
-    await this.tryFire();
+    await this.refreshNow("pre_arm", true);
   }
 
   private refreshPromise: Promise<void> | null = null;
 
   /** Run one refresh now, after any in-flight one; cancels a pending coalesced timer (this refresh supersedes it). */
-  private async refreshNow(trigger: string): Promise<void> {
+  private async refreshNow(trigger: string, fireAfter = false): Promise<void> {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
     this.refreshQueued = false;
     while (this.refreshPromise) await this.refreshPromise;
-    await this.runRefresh(trigger, false);
+    await this.runRefresh(trigger, fireAfter);
   }
 
   private runRefresh(trigger: string, fireAfter: boolean): Promise<void> {
@@ -1848,9 +1861,13 @@ export class Orchestrator {
 
     if (this.botState === "ROUND_OPEN") {
       const cutoff = this.state.slotsToCutoff();
+      if (cutoff !== null && !this.preArmed && cutoff <= this.currentFireOffset() + PRE_ARM_SLOTS) {
+        this.preArmed = true;
+        void this.preArm(cutoff);
+      }
       if (cutoff !== null && cutoff <= this.currentFireOffset()) {
         this.transition("ARMED", { cutoff, fireOffset: this.currentFireOffset() });
-        void this.armAndFire();
+        void this.tryFire();
       }
     } else if (this.botState === "ARMED") {
       void this.tryFire();
