@@ -280,6 +280,33 @@ paste the HTTPS URL + token; Claude fetches `<url>/api/status` etc. and
 diagnoses. Use a monitoring-scoped API_TOKEN you can rotate (it's read-only
 and everything it shows is public chain data, but rotate it after sharing).
 
+### 7a. Ingest drops: what the journal shows and what to do
+
+A stream that goes quiet (no error, no end — a half-open connection) is
+rebuilt by the gRPC source itself: HTTP/2 keepalive (PING every 10 s, dead
+after 5 s) surfaces most of them at the transport within ~15 s, and the
+silence watchdog kills anything else after 5 × `STALENESS_MS` (floor 7.5 s,
+cap 30 s). The reconnect asks LaserStream to **replay from the last slot
+seen** (`fromSlot`, ~3000 slots of retention), so the gap fills itself; a
+refused replay falls back to live-only once, and the orchestrator re-reads
+config/board/round/vaults/Miners over RPC on every reconnect regardless.
+Fires are gated on a live stream throughout, so a drop costs rounds, never
+a mis-priced deploy.
+
+The journal line on a drop names how the stream lived:
+`ingest disconnected … (stream lived 1830s, 4571 slots, last slot N,
+reconnects K)`. One drop an hour is a provider/LB rotation and costs
+nothing; several an hour is worth escalating. Get evidence with
+
+    pnpm grpc-probe 15
+
+which subscribes exactly as the bot does and prints slots/s, the worst
+silence, the lag against the HTTP RPC head and every disconnect, then a
+verdict. If the RPC head kept moving while the stream was silent, the
+stream is at fault: send the output, the endpoint region and the timestamps
+to the provider. Keep `STALENESS_MS` at 1500: it is the fire gate, and a
+large value only delays the watchdog (a 20 s value gave a 100 s grace).
+
 ## 8. Send-path infrastructure (latency + inclusion)
 
 Two independent latency paths — optimize them separately.

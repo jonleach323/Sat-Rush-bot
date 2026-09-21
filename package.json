@@ -19,6 +19,7 @@
     "sim": "tsx test/sim.ts",
     "preflight": "tsx scripts/preflight.ts",
     "prices": "tsx scripts/check-prices.ts",
+    "grpc-probe": "tsx scripts/grpc-probe.ts",
     "epoch-uplift": "tsx scripts/epoch-uplift.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",

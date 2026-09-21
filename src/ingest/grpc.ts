@@ -28,7 +28,7 @@ interface YellowstoneClient {
 type YellowstoneClientCtor = new (
   endpoint: string,
   xToken: string | undefined,
-  channelOptions: undefined,
+  channelOptions: Record<string, number | boolean> | undefined,
   reconnectOptions?: { enabled?: boolean },
 ) => YellowstoneClient;
 
@@ -61,6 +61,24 @@ const PING_INTERVAL_MS = 15_000;
  * a hung native connect would otherwise freeze the reconnect loop forever. */
 const CONNECT_TIMEOUT_MS = 15_000;
 const WATCHDOG_INTERVAL_MS = 2_500;
+/** Silence grace ceiling: mainnet slots never pause this long, whatever STALENESS_MS says. */
+const WATCHDOG_GRACE_MAX_MS = 30_000;
+
+/**
+ * Transport keepalive (all durations in ms — the napi builder feeds them to
+ * Duration::from_millis). HTTP/2 PING every 10 s, dead after 5 s without a
+ * PONG: a half-open connection then surfaces as a stream error within ~15 s
+ * at the transport, before the silence watchdog has to infer it. No
+ * `grpcTimeout`: that is a per-call deadline and would kill the subscription.
+ */
+const CHANNEL_OPTIONS = {
+  grpcConnectTimeout: 10_000,
+  grpcHttp2KeepAliveInterval: 10_000,
+  grpcKeepAliveTimeout: 5_000,
+  grpcKeepAliveWhileIdle: true,
+  grpcTcpKeepalive: 30_000,
+  grpcTcpNodelay: true,
+};
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -83,6 +101,13 @@ export class YellowstoneIngest extends IngestSource {
   private watchdogTimer: NodeJS.Timeout | null = null;
   /** When the current stream came up — silence is measured from here or the last slot, whichever is later. */
   private streamStartedAtMs = 0;
+  /** Last slot delivered by any stream; the next connect replays from here (LaserStream `fromSlot`). */
+  private lastSlot: number | null = null;
+  /** Slots delivered by the current stream (diagnostics: how a stream lived before it died). */
+  private streamSlots = 0;
+  /** A replay-from-slot subscription that died before delivering anything: the next attempt goes live-only. */
+  private replayFailed = false;
+  private reconnects = 0;
   private stopped = false;
   private attempt = 0;
   private runLoop: Promise<void> | null = null;
@@ -107,7 +132,12 @@ export class YellowstoneIngest extends IngestSource {
     this.stream?.destroy(new Error("chaos: forced disconnect"));
   }
 
-  private buildRequest(): SubscribeRequest {
+  /** Stream health for status surfaces: reconnects so far and the last slot seen. */
+  stats(): { reconnects: number; lastSlot: number | null } {
+    return { reconnects: this.reconnects, lastSlot: this.lastSlot };
+  }
+
+  private buildRequest(replayFromSlot?: number): SubscribeRequest {
     const program = this.opts.programId.toBase58();
     const accounts: SubscribeRequest["accounts"] = {
       board: {
@@ -151,24 +181,31 @@ export class YellowstoneIngest extends IngestSource {
       entry: {},
       accountsDataSlice: [],
       commitment: CommitmentLevel.PROCESSED,
+      // LaserStream replays everything from this slot on (retention ~3000
+      // slots): a reconnect fills its own gap instead of leaving a hole for
+      // the RPC re-seed to paper over. A server that cannot honour it errors
+      // the stream at once — handled by the live-only fallback.
+      ...(replayFromSlot !== undefined ? { fromSlot: String(replayFromSlot) } : {}),
     };
   }
 
   private async connectLoop(): Promise<void> {
     while (!this.stopped) {
+      const replayFrom = this.lastSlot !== null && !this.replayFailed ? this.lastSlot : undefined;
       try {
         // Own reconnect policy — disable the SDK's built-in one.
-        const client = new Client(this.opts.endpoint, this.opts.xToken, undefined, {
+        const client = new Client(this.opts.endpoint, this.opts.xToken, CHANNEL_OPTIONS, {
           enabled: false,
         });
         // v5 requires an explicit connect before subscribe
         await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "grpc connect");
         const stream = await withTimeout(
-          client.subscribe(this.buildRequest()),
+          client.subscribe(this.buildRequest(replayFrom)),
           CONNECT_TIMEOUT_MS,
           "grpc subscribe",
         );
         this.stream = stream;
+        this.streamSlots = 0;
         stream.on("data", (update: SubscribeUpdate) => {
           this.attempt = 0; // live traffic resets the backoff
           this.handleUpdate(update);
@@ -176,7 +213,11 @@ export class YellowstoneIngest extends IngestSource {
         this.streamStartedAtMs = Date.now();
         this.startPing();
         this.startWatchdog();
-        this.emit("status", { connected: true });
+        if (this.lastSlot !== null) this.reconnects++;
+        this.emit("status", {
+          connected: true,
+          detail: replayFrom !== undefined ? `replaying from slot ${replayFrom}` : this.lastSlot !== null ? "live only (no replay)" : "initial",
+        });
 
         await new Promise<void>((resolve, reject) => {
           this.endStream = resolve; // teardown resolves this explicitly —
@@ -185,10 +226,13 @@ export class YellowstoneIngest extends IngestSource {
           stream.once("end", resolve);
           stream.once("close", resolve);
         });
-        if (!this.stopped) this.emit("status", { connected: false, detail: "stream ended" });
+        if (!this.stopped) this.emit("status", { connected: false, detail: `stream ended${this.streamEpitaph()}` });
       } catch (err) {
         if (!this.stopped) {
-          this.emit("status", { connected: false, detail: String(err) });
+          // A replay subscription refused outright (retention exceeded, or a
+          // server without fromSlot): go live-only next time, once.
+          if (replayFrom !== undefined && this.streamSlots === 0) this.replayFailed = true;
+          this.emit("status", { connected: false, detail: `${String(err)}${this.streamEpitaph()}` });
         }
       } finally {
         this.teardownStream();
@@ -222,9 +266,16 @@ export class YellowstoneIngest extends IngestSource {
     }, PING_INTERVAL_MS);
   }
 
-  /** Silence grace before a stream is declared dead and rebuilt. */
+  /** Silence grace before a stream is declared dead and rebuilt: 5 × STALENESS_MS, floored at 7.5 s and capped at 30 s. */
   private watchdogGraceMs(): number {
-    return Math.max(this.stalenessMs * 5, 7_500);
+    return Math.min(Math.max(this.stalenessMs * 5, 7_500), WATCHDOG_GRACE_MAX_MS);
+  }
+
+  /** How the dying stream lived: for the journal, so a provider pattern is visible. */
+  private streamEpitaph(): string {
+    if (this.streamStartedAtMs === 0) return "";
+    const lived = Math.round((Date.now() - this.streamStartedAtMs) / 1000);
+    return ` (stream lived ${lived}s, ${this.streamSlots} slots, last slot ${this.lastSlot ?? "none"}, reconnects ${this.reconnects})`;
   }
 
   /**
@@ -275,7 +326,11 @@ export class YellowstoneIngest extends IngestSource {
   private handleUpdate(update: SubscribeUpdate): void {
     if (update.slot) {
       this.markSeen("slots");
-      this.emit("slot", { slot: Number(update.slot.slot) });
+      const slot = Number(update.slot.slot);
+      this.streamSlots++;
+      if (this.lastSlot === null || slot > this.lastSlot) this.lastSlot = slot;
+      this.replayFailed = false; // a stream that delivers is a server that can replay next time
+      this.emit("slot", { slot });
       return;
     }
     if (update.account?.account) {
