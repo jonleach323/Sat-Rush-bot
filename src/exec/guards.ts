@@ -105,7 +105,7 @@ export function assertDeployInvariants(inv: DeploySendInvariants): void {
 }
 
 export interface FeeBearingSendInvariants {
-  kind: "settle" | "claim";
+  kind: "settle" | "claim" | "transfer";
   priorityFeeMicroLamports: number;
   maxPriorityFeeMicroLamports: number;
   killSwitchEngaged: boolean;

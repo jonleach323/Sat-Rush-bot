@@ -67,6 +67,13 @@ export interface HashrateValuation {
   /** Promo multiplier on earned hashrate (2 during the post-Strike window). */
   multiplier: number;
   /**
+   * Tiles each SIGNER actually covers when that differs from the allocation's
+   * tile count: the fleet's tile mode deploys a 21-tile allocation as 21
+   * single-tile legs, so every wallet earns (streak + 21/1) raw per $, not
+   * (streak + 21/21). Undefined = the allocation's own count.
+   */
+  coveredOverride?: number | undefined;
+  /**
    * Raw units this round's deploy can actually be MONETISED into, i.e. converted
    * to vault tickets before the hashrate goes stale. Undefined = uncapped.
    *
@@ -99,7 +106,7 @@ export function hashrateRebateUsd(
 ): number {
   if (!(grossUsd > 0)) return 0;
   if (v.valueUsdPerRawUnit === 0) return 0;
-  const rawPerUsd = hashrateRawPerUsd(v.streak, tilesCovered) * v.multiplier;
+  const rawPerUsd = hashrateRawPerUsd(v.streak, v.coveredOverride ?? tilesCovered) * v.multiplier;
   const earned = rawPerUsd * grossUsd;
   const cap = v.maxRawUnitsPerRound;
   const realisable = cap === undefined ? earned : Math.min(earned, Math.max(0, cap));
@@ -127,7 +134,7 @@ export function hashrateRebateFraction(
     throw new RangeError(`invalid multiplier: ${v.multiplier}`);
   }
   if (v.valueUsdPerRawUnit === 0) return 0;
-  return hashrateRawPerUsd(v.streak, tilesCovered) * v.multiplier * v.valueUsdPerRawUnit;
+  return hashrateRawPerUsd(v.streak, v.coveredOverride ?? tilesCovered) * v.multiplier * v.valueUsdPerRawUnit;
 }
 
 /**

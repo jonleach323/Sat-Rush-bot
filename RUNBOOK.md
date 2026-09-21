@@ -396,3 +396,51 @@ operationally — everything else in this runbook still applies:
   draw trigger if the owner's crank ever lets one through (the rotor
   remaining accounts on the triggers are by analogy to deploy_public).
 
+## 10. Running the 21-wallet fleet (tile mode + treasury)
+
+The shape `pnpm ev-grid § C` prices best: 21 wallets, wallet i on tile i,
+which is a blanket at the fleet level (identical refund / sats / strike /
+RUSH flows) with every wallet earning the single-tile hashrate rate (121
+raw/$ at the cap vs 101). One orchestrator, aggregate caps, one deposit
+address.
+
+1. **Create it.** `EXECUTION_MODE=mainnet MAINNET_CONFIRM=yes pnpm fleet:init 21 <tag>`
+   writes `keypairs/fleet/wallet-02.json` … `wallet-21.json` (0600, never
+   printed; the directory is gitignored), prints the 21 public keys with
+   their tiles, and registers `<tag>` on the primary (`set_miner_tag`) if
+   the primary has no Affiliate account yet. Idempotent. Then set
+   `FLEET_SIZE=21` (WALLET_PATHS stays empty). In dry mode it creates the
+   files and only prints what it would register.
+2. **Fund it.** Send USDC and SOL to the PRIMARY (wallet 1, the first key
+   printed). Nothing else needs funding by hand.
+3. **The treasury does the rest.** Every `FLEET_REBALANCE_INTERVAL_MS` it
+   refreshes balances, claims every wallet's unclaimed USD (the 89% refund
+   coming home, fee-free), then moves USDC and SOL from the primary to the
+   wallets below `FLEET_WALLET_LOW_*`, lowest runway first, up to
+   `FLEET_WALLET_TARGET_*`, out of what the primary holds above its own
+   target plus `FLEET_TREASURY_RESERVE_USD`; wallets above twice the target
+   sweep the excess back. Top-ups are primary-signed, sweeps wallet-signed,
+   all through the race sender with the kill switch respected. When the
+   primary cannot cover the low wallets one Telegram alert says exactly what
+   to deposit; `/fleet` shows balances, tile, runway in rounds, pending and
+   last transfers. Dry mode plans and logs, sends nothing.
+4. **Tile mode** (`FLEET_TILE_MODE`, default on): when the selector picks a
+   full blanket, each wallet sends one single-tile transaction carrying its
+   tile's share of the allocation; the selector prices the blanket's
+   hashrate at one covered tile. A wallet that cannot fund its tile drops
+   out for that round (its tile goes unplayed; the treasury fixes it next
+   cycle); below `FLEET_TILE_MIN_COVER` covered tiles the round is skipped.
+   Non-blanket selections fall back to the slice split. Every wallet binds
+   to the primary's affiliate at its first deploy (10 bps of its volume
+   comes back to the primary as grubstake and is deployed from there).
+5. **Sizing.** `MAX_PER_ROUND_USD` is the FLEET's per-round gross; each
+   tile gets a 21st of it. Per-wallet target/low marks should cover a few
+   hundred rounds of that share: at $21/round fleet gross (a $1 tile each)
+   the defaults ($20 target, $8 low) are ~20 rounds of pure misses per
+   wallet, plenty since 89% refunds every round. Raise them with the stake.
+6. **What to watch.** `/fleet` runway and the deposit alert; per-wallet
+   streaks (every wallet must hold its own; a wallet that misses 3 rounds
+   restarts its ramp); the skip log's `blanketEvBpsAtStreakCap` and the pot
+   (`pnpm ev-grid § A`); transaction fees per wallet (2 tx/round each —
+   the grace lets presence deploy every third round if fees bite).
+

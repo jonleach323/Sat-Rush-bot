@@ -25,6 +25,7 @@ import {
   buildClaimSats,
   buildClaimToken,
   buildExchangeAffiliatePoints,
+  buildSetMinerTag,
   buildClaimUsd,
   buildDeployPublic,
   buildSelectEpochWinner,
@@ -56,6 +57,7 @@ import {
   tokenVaultPda,
   affiliatePda,
   treasuryPda,
+  affiliateTagPda,
 } from "../src/adapter/pdas.js";
 
 const authority = Keypair.generate().publicKey;
@@ -357,6 +359,29 @@ describe("claim_token", () => {
       event_authority: eventAuthorityPda(),
       program: PROGRAM_ID,
     });
+  });
+});
+
+describe("set_miner_tag", () => {
+  const ix = buildSetMinerTag(ctx, { authority, tag: "sat-rush_01" });
+
+  it("decodes back to the same tag", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("set_miner_tag");
+    expect((decoded!.data as { tag: string }).tag).toBe("sat-rush_01");
+  });
+
+  it("matches the IDL account list", () => {
+    expectMatchesIdl("set_miner_tag", ix, {
+      authority,
+      affiliate: affiliatePda(authority),
+      affiliate_tag: affiliateTagPda("sat-rush_01"),
+    });
+  });
+
+  it("refuses a tag the program would reject", () => {
+    expect(() => buildSetMinerTag(ctx, { authority, tag: "ab" })).toThrow(/invalid affiliate tag/);
+    expect(() => buildSetMinerTag(ctx, { authority, tag: "Has Caps" })).toThrow(/invalid affiliate tag/);
   });
 });
 

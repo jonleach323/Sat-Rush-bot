@@ -219,6 +219,13 @@ it is how deployment rent and winnings come back.
   TWAP (so the RUSH leg is ≤ 2% of gross in dollars at any price), and the
   staking yield is 29% of the buybacks leg ÷ staked — a volume yield.
 
+- **The fleet** (RUNBOOK § 10): `pnpm fleet:init 21 <tag>` creates the
+  wallets under `FLEET_DIR` and registers the affiliate tag; `FLEET_SIZE`
+  loads them; tile mode sends a blanket as one single-tile leg per wallet
+  (wallet i → tile i, hashrate priced at one tile); the treasury claims each
+  wallet's USD and tops up the thinnest wallets from the primary (deposit
+  address = the primary; `/fleet`; `src/exec/fleet-plan.ts` is the planner).
+
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned
   later, possibly transitioning to full-private. Launch is public-only. Therefore:

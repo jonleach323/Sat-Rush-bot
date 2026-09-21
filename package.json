@@ -60,7 +60,8 @@
     "strike-payout": "tsx scripts/strike-payout.ts",
     "ev-map": "tsx scripts/ev-map.ts",
     "measure-remaining": "tsx scripts/measure-remaining.ts",
-    "ev-grid": "tsx scripts/ev-grid.ts"
+    "ev-grid": "tsx scripts/ev-grid.ts",
+    "fleet:init": "tsx scripts/fleet-init.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

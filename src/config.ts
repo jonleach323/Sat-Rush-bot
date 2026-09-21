@@ -596,6 +596,44 @@ const schema = z
     GRUBSTAKE_DEPLOYS: boolFromEnv(true),
     /** Convert accrued affiliate points into grubstake USD on the primary's Miner (fee-free apart from the tx). */
     AFFILIATE_EXCHANGE_ENABLED: boolFromEnv(true),
+    /**
+     * The fleet, the easy way: `pnpm fleet:init 21` writes wallet-02…wallet-21
+     * keypairs into FLEET_DIR and the bot loads them when WALLET_PATHS is empty
+     * (KEYPAIR_PATH is wallet 1 and pays for cranks). FLEET_SIZE=1 = single
+     * wallet. Deposits go to the PRIMARY only; the treasury distributes.
+     */
+    FLEET_DIR: z.preprocess(emptyToUndef, z.string().default("./keypairs/fleet")),
+    FLEET_SIZE: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(64).default(1)),
+    /** Affiliate tag `pnpm fleet:init` registers for the primary (3–16 chars, a-z 0-9 _ -). */
+    AFFILIATE_TAG: z.preprocess(emptyToUndef, z.string().regex(/^[a-z0-9_-]{3,16}$/).optional()),
+    /**
+     * Tile mode: when the selector picks a full 21-tile blanket, wallet i
+     * deploys ONLY tile i (i = its index in the set, wrapping past 21) instead
+     * of a slice of the blanket. The fleet's money on every tile is identical
+     * (refund, sats, strike and RUSH legs all flow the same way), but each
+     * wallet earns the single-tile hashrate rate — 121 raw/$ at the cap
+     * against a blanket's 101, a fifth more tickets for the same dollars
+     * (pnpm ev-grid § C). Non-blanket selections fall back to the slice split.
+     * Meaningful with 21 wallets; below that the uncovered tiles are not played.
+     */
+    FLEET_TILE_MODE: boolFromEnv(true),
+    /** Minimum tiles a tile-mode fire must cover (wallets that cannot fund their tile drop out); below this the round is skipped. */
+    FLEET_TILE_MIN_COVER: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(21).default(18)),
+    /**
+     * The treasury: every FLEET_REBALANCE_INTERVAL_MS the bot claims each
+     * wallet's unclaimed USD (fee-free), then moves USDC and SOL from the
+     * PRIMARY to the wallets below their LOW mark, lowest runway first, up to
+     * TARGET, out of what the primary holds above its own target plus
+     * RESERVE; wallets above 2× TARGET sweep the excess back. Dry mode plans
+     * and logs only. You fund the fleet by sending USDC and SOL to the primary.
+     */
+    FLEET_TREASURY_ENABLED: boolFromEnv(true),
+    FLEET_WALLET_TARGET_USD: z.preprocess(emptyToUndef, z.coerce.number().positive().default(20)),
+    FLEET_WALLET_LOW_USD: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(8)),
+    FLEET_WALLET_TARGET_SOL: z.preprocess(emptyToUndef, z.coerce.number().positive().default(0.02)),
+    FLEET_WALLET_LOW_SOL: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(0.008)),
+    FLEET_TREASURY_RESERVE_USD: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(0)),
+    FLEET_REBALANCE_INTERVAL_MS: z.preprocess(emptyToUndef, z.coerce.number().int().min(10_000).default(60_000)),
     /** Lamports a wallet must retain to be considered fundable for a round. */
     WALLET_MIN_LAMPORTS: z.preprocess(
       emptyToUndef,
@@ -883,7 +921,7 @@ export function summarizeConfig(cfg: Config): Record<string, unknown> {
     solUsdEstimate: cfg.SOL_USD_ESTIMATE,
     stakeSemantics: cfg.STAKE_SEMANTICS,
     gameVersion: cfg.GAME_VERSION,
-    walletSet: cfg.WALLET_PATHS.length > 0 ? `${cfg.WALLET_PATHS.length} keypairs (aggregate caps)` : "single wallet",
+    walletSet: cfg.WALLET_PATHS.length > 0 ? `${cfg.WALLET_PATHS.length} keypairs (aggregate caps)` : cfg.FLEET_SIZE > 1 ? `fleet of ${cfg.FLEET_SIZE} from ${cfg.FLEET_DIR} (tile mode ${cfg.FLEET_TILE_MODE ? "on" : "off"}, treasury ${cfg.FLEET_TREASURY_ENABLED ? "on" : "off"})` : "single wallet",
     affiliateAuthority: cfg.AFFILIATE_AUTHORITY ?? "<primary wallet>",
     satrushApiUrl: cfg.SATRUSH_API_URL,
     vaultCarry: cfg.VAULT_CARRY_HORIZON_DAYS > 0 ? `${cfg.VAULT_CARRY_HORIZON_DAYS} d horizon, APR cap ${cfg.VAULT_CARRY_APR_CAP}` : "not credited",

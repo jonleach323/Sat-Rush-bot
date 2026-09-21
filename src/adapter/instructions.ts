@@ -20,6 +20,7 @@ import { validateMask } from "./mask.js";
 import { rngRemainingAccounts, ROTOR_TAGS } from "./rng.js";
 import {
   affiliatePda,
+  affiliateTagPda,
   boardBtcAta,
   boardPda,
   boardUsdAta,
@@ -604,6 +605,36 @@ export interface ExchangeAffiliatePointsParams {
  * own Miner (paid from the treasury into the Miner PDA's USD ATA, so the
  * credit stays program-controlled). The Miner is created if absent.
  */
+export interface SetMinerTagParams {
+  authority: PublicKey;
+  /** 3–16 chars of a-z, 0-9, '_' or '-' (program `Affiliate::validate_tag`). */
+  tag: string;
+}
+
+/**
+ * `set_miner_tag`: claim `tag` for `authority`, creating the wallet's Affiliate
+ * PDA (once per wallet) and the tag registry entry (once per tag). Accounts
+ * from the IDL: authority (signer, writable), affiliate (writable),
+ * affiliate_tag (writable), system_program. No event.
+ */
+export function buildSetMinerTag(ctx: InstructionContext, params: SetMinerTagParams): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority, tag } = params;
+  if (!/^[a-z0-9_-]{3,16}$/.test(tag)) {
+    throw new RangeError(`invalid affiliate tag "${tag}": 3–16 chars of a-z, 0-9, '_' or '-'`);
+  }
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(affiliatePda(authority, programId), true),
+      meta(affiliateTagPda(tag, programId), true),
+      meta(SystemProgram.programId),
+    ],
+    data: instructionCoder.encode("set_miner_tag", { tag }),
+  });
+}
+
 export function buildExchangeAffiliatePoints(
   ctx: InstructionContext,
   params: ExchangeAffiliatePointsParams,

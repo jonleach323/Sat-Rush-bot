@@ -18,6 +18,7 @@ import {
   buildDeployPublic,
   type InstructionContext,
 } from "../adapter/instructions.js";
+import { FULL_MASK, tilesToMask } from "../adapter/mask.js";
 import { TILES_COUNT, type EvContext, type EvModel } from "../strategy/ev.js";
 import {
   selectAllocation,
@@ -30,6 +31,29 @@ import type { FundingFloor, WalletSet } from "./wallets.js";
 import { scaledTipLamports } from "./tip.js";
 
 export type DeploySelection = Extract<Selection, { kind: "deploy" }>;
+
+/**
+ * Tile mode split: wallet i takes tile (i mod 21) with that tile's gross from a
+ * full-blanket allocation. A wallet that cannot fund its tile (floor, USDC,
+ * lamports) is skipped — its tile goes unplayed this round — rather than
+ * shrinking everyone else. Exported for tests.
+ */
+export function tileLegs(
+  set: WalletSet,
+  allocation: readonly bigint[],
+  floor: FundingFloor,
+): { signer: Keypair; amountGross: bigint; mask: number }[] {
+  const out: { signer: Keypair; amountGross: bigint; mask: number }[] = [];
+  set.all().forEach((w, i) => {
+    const tile = i % TILES_COUNT;
+    const amount = allocation[tile] ?? 0n;
+    if (amount < floor.minDeployBase) return;
+    if (w.disabledReason !== null || w.usdcBase < amount || w.lamports < floor.minLamports) return;
+    // A second wallet on the same tile (fleet > 21) doubles up on it; fine, it is still the blanket's tile.
+    out.push({ signer: w.keypair, amountGross: amount, mask: tilesToMask([tile]) });
+  });
+  return out;
+}
 
 export interface BuiltCandidate {
   rank: number;
@@ -57,6 +81,8 @@ export interface BuiltCandidate {
 export interface CandidateLeg {
   /** Signing wallet, base58. */
   wallet: string;
+  /** This leg's own selection mask (the selection's mask in slice mode; one tile in tile mode). */
+  mask: number;
   amountGross: bigint;
   /** Paid from the Miner grubstake rather than the wallet (no hashrate on this leg). */
   grubstake: boolean;
@@ -77,6 +103,16 @@ export interface CandidateSetOptions {
   wallets?: WalletSet | undefined;
   /** Funding floor for `wallets.allocate` (on-chain min deploy + lamports). */
   fundingFloor?: FundingFloor | undefined;
+  /**
+   * Tile mode: a full-blanket selection is sent as one single-tile leg per
+   * wallet (wallet i → tile i mod 21) carrying that tile's share of the
+   * allocation, so the fleet's money on the board is the blanket while each
+   * wallet earns single-tile hashrate. Wallets that cannot fund their tile
+   * drop out; below `tileMinCover` legs the candidate is dropped. Non-blanket
+   * selections use the slice split.
+   */
+  tileMode?: boolean | undefined;
+  tileMinCover?: number | undefined;
   /**
    * Affiliate authority to bind a wallet to at its FIRST deploy (V2). Called
    * per wallet; return undefined to pass none (the primary must: self-referral
@@ -281,16 +317,21 @@ export class CandidateSet {
    */
   private splitAcrossWallets(
     selection: DeploySelection,
-  ): { signer: Keypair; amountGross: bigint }[] {
+  ): { signer: Keypair; amountGross: bigint; mask: number }[] {
     const set = this.opts.wallets;
     if (!set || set.size <= 1) {
-      return [{ signer: this.opts.payer, amountGross: selection.totalGross }];
+      return [{ signer: this.opts.payer, amountGross: selection.totalGross, mask: selection.mask }];
     }
     const floor = this.opts.fundingFloor ?? { minDeployBase: 1_000_000n, minLamports: 0 };
+    if (this.opts.tileMode && selection.mask === FULL_MASK) {
+      const legs = tileLegs(set, selection.allocation, floor);
+      const minCover = Math.min(TILES_COUNT, this.opts.tileMinCover ?? TILES_COUNT);
+      return legs.length >= minCover ? legs : [];
+    }
     const allocs = set.allocate(selection.totalGross, floor);
     const sum = allocs.reduce((a, x) => a + x.grossBase, 0n);
     if (allocs.length === 0 || sum !== selection.totalGross) return [];
-    return allocs.map((a) => ({ signer: a.wallet.keypair, amountGross: a.grossBase }));
+    return allocs.map((a) => ({ signer: a.wallet.keypair, amountGross: a.grossBase, mask: selection.mask }));
   }
 
   private async buildLegs(
@@ -302,14 +343,14 @@ export class CandidateSet {
   ): Promise<CandidateLeg[]> {
     const split = this.splitAcrossWallets(selection);
     const legs: CandidateLeg[] = [];
-    for (const { signer, amountGross } of split) {
+    for (const { signer, amountGross, mask } of split) {
       const affiliateAuthority = this.opts.affiliateFor?.(signer.publicKey);
       const isGrubstakeFunded = this.opts.grubstakeFor?.(signer.publicKey, amountGross) === true;
       const instructions: TransactionInstruction[] = [
         buildDeployPublic(this.opts.ixCtx, {
           authority: signer.publicKey,
           roundId,
-          selectionMask: selection.mask,
+          selectionMask: mask,
           amountBaseUnits: amountGross,
           isGrubstakeFunded,
           ...(affiliateAuthority ? { affiliateAuthority } : {}),
@@ -345,6 +386,7 @@ export class CandidateSet {
       });
       legs.push({
         wallet: signer.publicKey.toBase58(),
+        mask,
         amountGross,
         grubstake: isGrubstakeFunded,
         signature: bs58.encode(tx.signatures[0]!),

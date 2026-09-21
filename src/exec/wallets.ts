@@ -17,6 +17,8 @@
  */
 import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { loadKeypair } from "./tx.js";
 
 export interface WalletState {
@@ -78,8 +80,8 @@ export class WalletSet {
    * silently deduping would make the fleet quietly smaller than configured
    * while the risk maths still divided by N.
    */
-  static load(paths: readonly string[], fallbackPath: string): WalletSet {
-    const list = paths.length > 0 ? paths : [fallbackPath];
+  static load(paths: readonly string[], fallbackPath: string, fleet?: { dir: string; size: number }): WalletSet {
+    const list = paths.length > 0 ? paths : [fallbackPath, ...WalletSet.fleetPaths(fleet)];
     const seen = new Set<string>();
     const keypairs: Keypair[] = [];
     for (const p of list) {
@@ -92,6 +94,20 @@ export class WalletSet {
       keypairs.push(kp);
     }
     return new WalletSet(keypairs);
+  }
+
+  /**
+   * The fleet directory's keypairs (`wallet-02.json` … in name order), at most
+   * `size - 1` of them: the primary (KEYPAIR_PATH) is wallet 1. `pnpm fleet:init`
+   * creates them; a missing directory or size ≤ 1 is the single-wallet case.
+   */
+  static fleetPaths(fleet?: { dir: string; size: number }): string[] {
+    if (!fleet || fleet.size <= 1 || !existsSync(fleet.dir)) return [];
+    return readdirSync(fleet.dir)
+      .filter((f) => /^wallet-\d{2,}\.json$/.test(f))
+      .sort()
+      .slice(0, fleet.size - 1)
+      .map((f) => join(fleet.dir, f));
   }
 
   get size(): number {
@@ -111,6 +127,11 @@ export class WalletSet {
 
   pubkeys(): PublicKey[] {
     return this.wallets.map((w) => w.keypair.publicKey);
+  }
+
+  /** Index of a wallet in the set (0 = primary), or -1. */
+  indexOf(key: string): number {
+    return this.wallets.findIndex((w) => w.keypair.publicKey.toBase58() === key);
   }
 
   byPubkey(key: string): WalletState | undefined {

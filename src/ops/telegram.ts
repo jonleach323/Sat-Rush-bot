@@ -117,6 +117,21 @@ export interface TelegramDeps {
   getDeploys?(limit: number): DeployRow[] | Promise<DeployRow[]>;
   getVault?(): VaultReport | Promise<VaultReport>;
   getWallets?(): WalletRow[] | Promise<WalletRow[]>;
+  getFleet?(): FleetReport | Promise<FleetReport>;
+}
+
+/** The fleet treasury's view: balances, per-tile runway, pending and last transfers. */
+export interface FleetReport {
+  size: number;
+  tileMode: boolean;
+  treasuryEnabled: boolean;
+  primary: string;
+  wallets: (WalletRow & { tile: number | null; runwayRounds: number | null })[];
+  pending: { from: string; to: string; asset: "usdc" | "sol"; amount: number; reason: "top_up" | "sweep" }[];
+  shortfallUsd: number;
+  shortfallSol: number;
+  minRunwayRounds: number | null;
+  last: { at: number; transfers: number; executed: number; dry: boolean } | null;
 }
 
 export interface VaultReport {
@@ -366,12 +381,28 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     );
   });
 
+  bot.command("fleet", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.getFleet) return void ctx.reply("fleet data unavailable");
+    const f = await opts.deps.getFleet();
+    if (f.size <= 1) return void ctx.reply("single wallet — no fleet (set FLEET_SIZE and run pnpm fleet:init)");
+    const lines = [
+      `🏦 fleet of ${f.size} · tile mode ${f.tileMode ? "on" : "off"} · treasury ${f.treasuryEnabled ? "on" : "off"} · deposit to ${short(f.primary)}`,
+      `thinnest wallet: ${f.minRunwayRounds ?? "?"} rounds of runway` +
+        (f.shortfallUsd > 0 || f.shortfallSol > 0 ? ` · ⚠ NEEDS ${f.shortfallUsd > 0 ? usdn(f.shortfallUsd) + " USDC " : ""}${f.shortfallSol > 0 ? f.shortfallSol.toFixed(3) + " SOL" : ""}` : " · funded"),
+      ...f.wallets.map((w, i) => `${i === 0 ? "★" : " "} t${String(w.tile ?? "-").padStart(2)} ${short(w.pubkey)} ${usdn(w.usdc)} · ${w.sol.toFixed(3)} SOL · ${w.runwayRounds ?? "?"} rds · streak ${w.streak}` + (w.disabled ? ` ⚠ ${w.disabled}` : "")),
+      f.pending.length ? `pending: ${f.pending.map((t) => `${t.reason === "top_up" ? "→" : "←"} ${short(t.to)} ${t.asset === "usdc" ? usdn(t.amount) : t.amount.toFixed(3) + " SOL"}`).join(", ")}` : "pending: none",
+      f.last ? `last cycle ${new Date(f.last.at).toISOString().slice(11, 19)}Z: ${f.last.executed}/${f.last.transfers} sent${f.last.dry ? " (dry)" : ""}` : "no cycle yet",
+    ];
+    await ctx.reply(lines.join("\n"));
+  });
+
   bot.command("help", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     await ctx.reply(
       [
         "⛏ SAT RUSH commands (V2)",
-        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /health",
+        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /fleet /health",
         "control: /pause /resume /kill",
         "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),

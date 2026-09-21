@@ -13,6 +13,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
   type TransactionInstruction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -84,6 +85,8 @@ import { CandidateSet, type EvSource } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
@@ -98,7 +101,7 @@ import { logger } from "./logger.js";
 import { HealthMonitor } from "./ops/health.js";
 import { MonitorApi } from "./ops/api.js";
 import { createMonitorData, type MonitorData, type VaultPoolsJson } from "./ops/monitor.js";
-import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
+import { createTelegramOps, type TelegramOps, type FleetReport } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
@@ -161,6 +164,10 @@ export class Orchestrator {
   /** Per-crank failure backoff, so a bad eligibility check cannot spam sends. */
   private readonly crankBackoff = new Map<string, { failures: number; nextAttemptMs: number }>();
   private walletDriftTimer: NodeJS.Timeout | null = null;
+  private fleetTimer: NodeJS.Timeout | null = null;
+  private fleetCycleInFlight = false;
+  private lastFleetPlan: { at: number; plan: FleetPlan; executed: number; dry: boolean } | null = null;
+  private fleetShortfallAlerted = false;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
   // that the manager's async readState refreshes immediately before evaluating.
@@ -288,6 +295,7 @@ export class Orchestrator {
     const wallets = WalletSet.load(
       cfg.WALLET_PATHS.length > 0 ? [cfg.KEYPAIR_PATH, ...cfg.WALLET_PATHS] : [],
       cfg.KEYPAIR_PATH,
+      { dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE },
     );
     const payer = wallets.primary().keypair;
     const db = new StateDb(cfg.DB_PATH);
@@ -468,6 +476,8 @@ export class Orchestrator {
               minDeployBase: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
               minLamports: cfg.WALLET_MIN_LAMPORTS,
             },
+            tileMode: cfg.FLEET_TILE_MODE,
+            tileMinCover: cfg.FLEET_TILE_MIN_COVER,
             // Bind a wallet to the affiliate only while it has no Miner yet
             // (that is the only time the program reads the slot); never the
             // affiliate itself (self-referral is refused on chain).
@@ -628,6 +638,7 @@ export class Orchestrator {
         getDeploys: (limit) => this.monitor.recentDeploys(limit) as never,
         getVault: () => this.monitor.vault(),
         getWallets: () => this.wallets.snapshot(),
+        getFleet: () => this.fleetReport(),
       },
     });
     this.telegram.start();
@@ -901,6 +912,10 @@ export class Orchestrator {
               valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
               multiplier: this.strikeBonusMultiplier(),
               maxRawUnitsPerRound: this.monetisableRawPerRound(),
+              // Tile mode sends a blanket as single-tile legs: each wallet
+              // earns (streak + 21/1) raw per $, so the blanket's hashrate
+              // is priced at one covered tile. Only when the fleet exists.
+              ...(this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? { coveredOverride: 1 } : {}),
             },
           }
         : {}),
@@ -1674,7 +1689,10 @@ export class Orchestrator {
     // separate outcomes, and per-wallet attribution is what the streak and
     // P&L reconstruction key on. Σ leg amounts == the authorized total.
     const legTotal = candidate.legs.reduce((a, l) => a + l.amountGross, 0n);
-    if (legTotal !== selection.totalGross) {
+    // Tile mode may leave tiles unplayed (a wallet that cannot fund its tile
+    // drops out), so the legs can sum to LESS than authorized — never more.
+    const tileMode = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 && candidate.legs.some((l) => l.mask !== selection.mask);
+    if (tileMode ? legTotal > selection.totalGross : legTotal !== selection.totalGross) {
       this.haltFromError(
         new HaltError("candidate legs do not sum to the authorized amount", {
           legs: legTotal.toString(),
@@ -1689,7 +1707,7 @@ export class Orchestrator {
       const legMiner = this.state.minerAt(minerPda(new PublicKey(leg.wallet), new PublicKey(this.cfg.PROGRAM_ID)));
       this.db.recordMyDeploy({
         roundId: this.roundId,
-        mask: selection.mask,
+        mask: leg.mask,
         amount: leg.amountGross,
         evExpected: selection.ev * (Number(leg.amountGross) / Number(selection.totalGross)),
         firedSlot: this.state.currentSlot,
@@ -1718,7 +1736,7 @@ export class Orchestrator {
             signature: leg.signature,
             serialized: leg.serialized,
             lastValidBlockHeight: leg.lastValidBlockHeight,
-            meta: { roundId: this.roundId, mask: selection.mask, wallet: leg.wallet },
+            meta: { roundId: this.roundId, mask: leg.mask, wallet: leg.wallet },
           },
           { isPastCutoff },
         ),
@@ -2477,6 +2495,140 @@ export class Orchestrator {
     return signature;
   }
 
+  /**
+   * The fleet treasury. Deposits go to the primary; this moves them to the
+   * wallets that need them most. One cycle: refresh balances → claim every
+   * wallet's unclaimed USD (fee-free; it is the 89% refund coming home) →
+   * plan (src/exec/fleet-plan.ts) → execute the transfers, primary-signed for
+   * top-ups and wallet-signed for sweeps, through the race sender. Dry mode
+   * plans and logs only. Never runs with the kill switch engaged. When the
+   * primary cannot cover the low wallets, one alert names the deposit needed.
+   */
+  private async fleetTreasuryCycle(): Promise<void> {
+    if (this.fleetCycleInFlight || this.wallets.size <= 1) return;
+    if (this.bankroll.killSwitchEngaged()) return;
+    this.fleetCycleInFlight = true;
+    try {
+      await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      if (this.cfg.EXECUTION_MODE !== "dry") {
+        for (const w of this.wallets.all()) await this.claimUsdCompound(w);
+        await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      }
+      const plan = this.planFleetNow();
+      const dry = this.cfg.EXECUTION_MODE === "dry";
+      let executed = 0;
+      if (!dry) {
+        for (const t of plan.transfers) {
+          try {
+            const outcome = await this.fireTransfer(t);
+            if (outcome === "landed") executed++;
+          } catch (err) {
+            this.log.warn({ err: String(err).slice(0, 160), transfer: { ...t, amount: t.amount.toString() } }, "fleet transfer failed");
+          }
+        }
+        if (executed > 0) await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      }
+      this.lastFleetPlan = { at: Date.now(), plan, executed, dry };
+      if (plan.transfers.length > 0) {
+        this.log.info({ transfers: plan.transfers.map((t) => ({ ...t, amount: t.amount.toString() })), executed, dry, minRunwayRounds: plan.minRunwayRounds }, "fleet treasury cycle");
+      }
+      const shortUsd = Number(plan.shortfallUsdcBase) / 1e6, shortSol = plan.shortfallLamports / 1e9;
+      if ((shortUsd > 0 || shortSol > 0) && !this.fleetShortfallAlerted) {
+        this.fleetShortfallAlerted = true;
+        this.alert(`🏦 fleet needs a deposit: send ${shortUsd > 0 ? `$${shortUsd.toFixed(2)} USDC` : ""}${shortUsd > 0 && shortSol > 0 ? " and " : ""}${shortSol > 0 ? `${shortSol.toFixed(3)} SOL` : ""} to the primary ${this.payer.publicKey.toBase58()} (thinnest wallet has ${plan.minRunwayRounds} rounds of runway)`);
+      } else if (shortUsd === 0 && shortSol === 0) {
+        this.fleetShortfallAlerted = false;
+      }
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "fleet treasury cycle failed");
+    } finally {
+      this.fleetCycleInFlight = false;
+    }
+  }
+
+  /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
+  private planFleetNow(): FleetPlan {
+    const perRound = usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    const balances = this.wallets.all().map((w) => ({
+      pubkey: w.keypair.publicKey.toBase58(),
+      usdcBase: w.usdcBase,
+      lamports: w.lamports,
+      perRoundBase: perRound,
+    }));
+    return planFleet(balances, {
+      targetUsdcBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
+      lowUsdcBase: usdToBase(this.cfg.FLEET_WALLET_LOW_USD),
+      targetLamports: Math.round(this.cfg.FLEET_WALLET_TARGET_SOL * 1e9),
+      lowLamports: Math.round(this.cfg.FLEET_WALLET_LOW_SOL * 1e9),
+      reserveUsdcBase: usdToBase(this.cfg.FLEET_TREASURY_RESERVE_USD),
+      minTransferUsdcBase: usdToBase(1),
+      minTransferLamports: 2_000_000,
+    });
+  }
+
+  /** One USDC or SOL transfer between fleet wallets, signed by the sender, through the race sender. */
+  private async fireTransfer(t: FleetTransfer): Promise<string> {
+    const signer = this.signerFor(t.from);
+    const to = new PublicKey(t.to);
+    const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    assertFeeBearingInvariants({
+      kind: "transfer",
+      priorityFeeMicroLamports: fee,
+      maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+      killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+    });
+    const instructions: TransactionInstruction[] = [];
+    if (t.asset === "usdc") {
+      const mint = this.ixCtx.usdMint;
+      const fromAta = getAssociatedTokenAddressSync(mint, signer.publicKey);
+      const toAta = getAssociatedTokenAddressSync(mint, to);
+      instructions.push(
+        createAssociatedTokenAccountIdempotentInstruction(signer.publicKey, toAta, to, mint),
+        createTransferCheckedInstruction(fromAta, mint, toAta, signer.publicKey, t.amount, 6),
+      );
+    } else {
+      instructions.push(SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: to, lamports: t.amount }));
+    }
+    const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+      payer: signer,
+      instructions,
+      computeUnitLimit: 60_000,
+      priorityFeeMicroLamports: fee,
+    });
+    const result = await this.sender.fire(
+      {
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        meta: { kind: "fleet_transfer", asset: t.asset, amount: t.amount.toString(), from: t.from, to: t.to, reason: t.reason },
+      },
+      { timeoutMs: 15_000 },
+    );
+    return result.outcome;
+  }
+
+  /** Fleet view for Telegram /fleet and the status API: balances, runway, the last plan. */
+  fleetReport(): FleetReport {
+    const plan = this.wallets.size > 1 ? this.planFleetNow() : null;
+    const perRound = this.wallets.size > 1 ? Number(usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.min(this.wallets.size, TILES_COUNT))) / 1e6 : this.cfg.MAX_PER_ROUND_USD;
+    return {
+      size: this.wallets.size,
+      tileMode: this.cfg.FLEET_TILE_MODE && this.wallets.size > 1,
+      treasuryEnabled: this.cfg.FLEET_TREASURY_ENABLED && this.wallets.size > 1,
+      primary: this.payer.publicKey.toBase58(),
+      wallets: this.wallets.snapshot().map((w, i) => ({
+        ...w,
+        tile: this.wallets.size > 1 ? (i % TILES_COUNT) + 1 : null,
+        runwayRounds: perRound > 0 ? Math.floor(w.usdc / perRound) : null,
+      })),
+      pending: plan ? plan.transfers.map((t) => ({ ...t, amount: t.asset === "usdc" ? Number(t.amount) / 1e6 : Number(t.amount) / 1e9 })) : [],
+      shortfallUsd: plan ? Number(plan.shortfallUsdcBase) / 1e6 : 0,
+      shortfallSol: plan ? plan.shortfallLamports / 1e9 : 0,
+      minRunwayRounds: plan?.minRunwayRounds ?? null,
+      last: this.lastFleetPlan ? { at: this.lastFleetPlan.at, transfers: this.lastFleetPlan.plan.transfers.length, executed: this.lastFleetPlan.executed, dry: this.lastFleetPlan.dry } : null,
+    };
+  }
+
   private async maybeSweep(): Promise<void> {
     if (!this.state.miner || this.sweepInFlight) return;
     if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
@@ -2817,6 +2969,10 @@ export class Orchestrator {
       this.refreshRivalProfiles();
     }, 30_000);
     this.walletDriftTimer.unref?.();
+    if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
+      this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
+      this.fleetTimer.unref?.();
+    }
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
     // path is otherwise entirely untouched.
     if (this.cfg.VAULT_STRATEGY_ENABLED) this.startVaultManager();
@@ -2846,6 +3002,7 @@ export class Orchestrator {
     this.candidates.clear();
     this.health.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
+    if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();
     this.prices.stop();
     this.tokenFeed?.stop();
