@@ -101,6 +101,8 @@ export interface HealthReport {
   solBalance: number | null;
   usdcBalance: number | null;
   dbError: string | null;
+  eventLoop?: { p99Ms: number; worstBlockMs: number; blocks: number; worstEverMs: number; worstEverAt: number | null } | null | undefined;
+  jobs?: Record<string, { lastMs: number; maxMs: number; meanMs: number; count: number }> | undefined;
 }
 
 export interface TelegramDeps {
@@ -341,6 +343,21 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
         `SOL: ${h.solBalance === null ? "?" : h.solBalance.toFixed(4)}`,
         `USDC: ${h.usdcBalance === null ? "?" : usdn(h.usdcBalance)}`,
         `db: ${h.dbError ? `ERROR ${h.dbError}` : "ok"}`,
+        ...(h.eventLoop
+          ? [
+              `event loop: p99 ${h.eventLoop.p99Ms} ms · worst block this window ${h.eventLoop.worstBlockMs} ms · lifetime worst ${h.eventLoop.worstEverMs} ms${h.eventLoop.worstEverAt ? ` at ${new Date(h.eventLoop.worstEverAt).toISOString().slice(11, 19)}` : ""}`,
+            ]
+          : []),
+        ...(h.jobs && Object.keys(h.jobs).length > 0
+          ? [
+              "jobs (last/max/mean ms × runs): " +
+                Object.entries(h.jobs)
+                  .sort((a, b) => b[1].maxMs - a[1].maxMs)
+                  .slice(0, 6)
+                  .map(([k, v]) => `${k} ${v.lastMs}/${v.maxMs}/${v.meanMs}×${v.count}`)
+                  .join(", "),
+            ]
+          : []),
       ].join("\n"),
     );
   });

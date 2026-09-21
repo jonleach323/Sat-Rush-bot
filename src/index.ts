@@ -94,6 +94,7 @@ import { createAssociatedTokenAccountIdempotentInstruction, createTransferChecke
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { buildInfo } from "./ops/build-info.js";
+import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
 
 /** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
 const REFRESH_MIN_INTERVAL_MS = 750;
@@ -229,6 +230,11 @@ export class Orchestrator {
   private telegram: TelegramOps | null = null;
   private api: MonitorApi | null = null;
   private readonly health: HealthMonitor;
+  /** Event-loop instrumentation: a block gets a duration and a job name (ops/loop-lag.ts). */
+  private readonly loop = new EventLoopMonitor();
+  private readonly jobs = new JobTimer({
+    onSlow: (name, ms, budgetMs) => this.log.warn({ job: name, ms: Math.round(ms), budgetMs }, "slow job — the event loop was held this long"),
+  });
   private readonly monitor: MonitorData;
   private readonly startedAtMs = Date.now();
 
@@ -271,6 +277,8 @@ export class Orchestrator {
         },
         dbLastWriteError: () => this.db.lastWriteError(),
         alert: (m) => this.alert(m),
+        loop: () => this.loop.snapshot(),
+        slowestJob: () => this.jobs.window(),
       },
       {
         solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
@@ -291,6 +299,11 @@ export class Orchestrator {
       maxPerRoundBase: () => this.bankroll.maxPerRoundBase,
       dailyLossCapBase: () => this.bankroll.dailyLossCapBase,
       myAuthority: this.payer.publicKey.toBase58(),
+      loopHealth: () => {
+        const last = this.health.lastLoopSnapshot();
+        return last ? { ...last, worstEverMs: Math.round(this.loop.worstEverMs), worstEverAt: this.loop.worstEverAt } : null;
+      },
+      jobStats: () => this.jobs.stats(),
       deposit: () => this.depositBlock ?? { ...depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size), usdcQr: "", solQr: "" },
       solBalanceLamports: () =>
         this.connection.getBalance(this.payer.publicKey, "processed"),
@@ -824,7 +837,7 @@ export class Orchestrator {
    * candidate" (round 68883: blanket +73 bps, selector empty).
    */
   private async armAndFire(): Promise<void> {
-    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
+    if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
     await this.refreshNow("armed");
     await this.tryFire();
   }
@@ -846,7 +859,8 @@ export class Orchestrator {
     this.refreshTimer = null;
     this.refreshInFlight = true;
     this.lastRefreshStartMs = Date.now();
-    const p = this.refreshCandidates(trigger)
+    const p = this.jobs
+      .timed("candidate_refresh", () => this.refreshCandidates(trigger), 1_000)
       .then(() => {
         if (fireAfter && this.botState === "ARMED") void this.tryFire();
       })
@@ -1742,7 +1756,7 @@ export class Orchestrator {
     // denominator for the payout-fraction measurement in onRevealed().
     const pool = this.state.strikePoolUsd();
     if (pool > 0n) this.strikePoolBeforeReveal = pool;
-    void this.refreshAutomationBook();
+    void this.jobs.timed("automation_book", () => this.refreshAutomationBook(), 5_000);
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;
@@ -1829,7 +1843,7 @@ export class Orchestrator {
     }
     // Refresh the blanket-at-cap signal every round (it drives the auto-ramp
     // and the alert), not only when the selector has already skipped.
-    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
+    if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
     const candidate = this.candidates.best(this.roundId);
     if (!candidate) {
       this.skipOnce("no_candidate", {
@@ -3376,6 +3390,7 @@ export class Orchestrator {
       }
     });
 
+    this.loop.start();
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
     // same tick refreshes the measured hashrate-per-deploy for the unified EV.
@@ -3385,17 +3400,19 @@ export class Orchestrator {
     this.walletDriftTimer = setInterval(() => {
       // The drift check re-reads every wallet's balances itself; derive the
       // limits from that read rather than reading all 21 wallets twice.
-      void this.checkWalletDrift().then(() => this.refreshLimits());
-      this.validateHashrateFormula();
-      this.refreshFireOffset();
-      this.refreshRivalProfiles();
-      this.maybePruneObservations();
+      void this.jobs.timed("wallet_drift", () => this.checkWalletDrift(), 5_000).then(() => this.refreshLimits());
+      this.jobs.timedSync("tick30s_queries", () => {
+        this.validateHashrateFormula();
+        this.refreshFireOffset();
+        this.refreshRivalProfiles();
+        this.maybePruneObservations();
+      }, 500);
     }, 30_000);
     this.walletDriftTimer.unref?.();
     void this.buildDepositBlock();
     if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
       void this.ensureAffiliateTag();
-      this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
+      this.fleetTimer = setInterval(() => void this.jobs.timed("treasury", () => this.fleetTreasuryCycle(), 20_000), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
       this.fleetTimer.unref?.();
     }
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
@@ -3433,6 +3450,7 @@ export class Orchestrator {
     this.log.info({ reason }, "shutting down");
     this.candidates.clear();
     this.health.stop();
+    this.loop.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();

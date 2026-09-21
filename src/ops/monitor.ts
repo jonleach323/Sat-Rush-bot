@@ -10,6 +10,7 @@ import type { PriceStatus } from "../ingest/prices.js";
 import type { TokenFeedStatus } from "../ingest/token-feed.js";
 import type { WalletSnapshot } from "../exec/wallets.js";
 import { buildIntel, type IntelJson } from "./intel.js";
+import type { JobStats, LoopSnapshot } from "./loop-lag.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
 import type { Pnl } from "../state/pnl.js";
@@ -82,6 +83,10 @@ export interface HealthJson {
   solBalance: number | null;
   usdcBalance: number | null;
   dbError: string | null;
+  /** Event-loop delay over the last health window plus the lifetime worst block. */
+  eventLoop: (LoopSnapshot & { worstEverMs: number; worstEverAt: number | null }) | null;
+  /** Timed jobs: last/max/mean ms and how often they ran. */
+  jobs: Record<string, JobStats>;
 }
 
 /**
@@ -188,6 +193,10 @@ export interface MonitorContext {
   hashrateValue: () => VaultJson["hashrateValue"];
   /** Fire offset in force, for the "which rivals fire after us" split. */
   fireOffsetSlots: () => number;
+  /** Event-loop health (last window + lifetime worst), when instrumented. */
+  loopHealth?: (() => HealthJson["eventLoop"]) | undefined;
+  /** Timed-job statistics, when instrumented. */
+  jobStats?: (() => Record<string, JobStats>) | undefined;
   /** USD value of ONE sats-vault BTC share, net of the claim fee. 0 if unknown. */
   shareValueUsd: () => number;
   /** USD value of ONE RUSH-vault share, net of the exit fee. 0 unless the token feed is live. */
@@ -410,6 +419,8 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         solBalance: sol,
         usdcBalance: usdc,
         dbError: ctx.db.lastWriteError(),
+        eventLoop: ctx.loopHealth?.() ?? null,
+        jobs: ctx.jobStats?.() ?? {},
       };
     },
   };
