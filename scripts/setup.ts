@@ -42,6 +42,7 @@ const cfg = loadConfig();
 
 // 2. keys
 if (WalletSet.ensurePrimary(cfg.KEYPAIR_PATH)) console.log(`created the primary keypair at ${cfg.KEYPAIR_PATH}`);
+else console.log(`using the existing keypair at ${cfg.KEYPAIR_PATH} as the primary (wallet 1, tile 1, the deposit address, the affiliate)`);
 const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
 const set = WalletSet.load([], cfg.KEYPAIR_PATH, { dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
 console.log(`fleet: ${set.size} wallets (${created} created) under ${cfg.FLEET_DIR}`);
@@ -57,6 +58,24 @@ try {
   console.log(`rpc ok (slot ${slot}) · SatrushConfig ${conf ? "decoded (fees " + conf.strike_fee_bps + "/" + conf.epoch_fee_bps + "/" + conf.one_btc_fee_bps + "/" + conf.protocol_fee_bps + "/" + conf.buybacks_fee_bps + " bps)" : "NOT readable — check RPC_HTTP_URL"}`);
 } catch (e) {
   console.log(`rpc check failed: ${(e as Error).message} — set RPC_HTTP_URL in .env`);
+}
+
+// 3b. what the primary already holds on the program (an existing V1/V2 wallet keeps everything: shares, hashrate, history)
+try {
+  const api = process.env["SATRUSH_API_URL"] ?? "https://api.satrush.io/api/v1";
+  const [prof, board] = await Promise.all([
+    fetch(`${api}/users/${primary.toBase58()}/profile`, { signal: AbortSignal.timeout(15_000) }).then((r) => r.json()) as Promise<{ data: { miner: Record<string, string | number | null> } | null }>,
+    fetch(`${api}/board`, { signal: AbortSignal.timeout(15_000) }).then((r) => r.json()) as Promise<{ data: { prices: { sat: number; token_share: number } } }>,
+  ]);
+  const m = prof.data?.miner;
+  if (m) {
+    const satsUsd = Number(m["unclaimed_sats_shares"] ?? 0) * board.data.prices.sat;
+    const tokUsd = Number(m["unclaimed_token_shares"] ?? 0) * board.data.prices.token_share;
+    console.log(`primary on-chain: ${m["total_rounds"]} rounds played · BTC shares $${satsUsd.toFixed(2)} · RUSH shares $${tokUsd.toFixed(2)} · unclaimed USD $${(Number(m["unclaimed_usd_amount"] ?? 0) / 1e6).toFixed(2)} · hashrate ${(Number(m["hashrate_amount"] ?? 0) / 100).toFixed(2)} (+${(Number(m["unclaimed_hashrate_amount"] ?? 0) / 100).toFixed(2)} deferred) · streak ${m["current_streak_count"]} · affiliate tag ${m["tag"] ?? "none (setup registers one)"}`);
+    console.log(`  shares stay unclaimed (they earn the vault carry); the bot claims USD and spends hashrate itself.`);
+  } else console.log(`primary on-chain: no Miner yet (first deploy creates it)`);
+} catch {
+  /* API optional */
 }
 
 // 4. deposit

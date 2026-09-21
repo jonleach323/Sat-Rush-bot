@@ -415,7 +415,12 @@ address.
    `pnpm fleet:init` does the same from the shell and prints the 21 public
    keys with their tiles. Idempotent; WALLET_PATHS stays empty.
 2. **Fund it.** Send USDC and SOL to the PRIMARY (wallet 1, the first key
-   printed). Nothing else needs funding by hand.
+   printed). Nothing else needs funding by hand. An EXISTING wallet (the
+   V1 operator key at `KEYPAIR_PATH`) is the right primary: it keeps its
+   Miner, its vault shares (left unclaimed, earning the carry), its
+   hashrate and deferred hashrate, and it becomes the affiliate the extras
+   bind to; `pnpm setup` prints what it holds. Its streak restarts like
+   everyone's (the V2 ramp is ~100 rounds).
 3. **The treasury does the rest.** Every `FLEET_REBALANCE_INTERVAL_MS` it
    refreshes balances, claims every wallet's unclaimed USD (the 89% refund
    coming home, fee-free), then moves USDC and SOL from the primary to the
