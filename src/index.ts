@@ -94,6 +94,13 @@ import { createAssociatedTokenAccountIdempotentInstruction, createTransferChecke
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { buildInfo } from "./ops/build-info.js";
+
+/** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
+const REFRESH_MIN_INTERVAL_MS = 750;
+/** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
+const SNAPSHOT_MIN_SLOTS = 5;
+/** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
+const OBSERVATION_KEEP_ROUNDS = 6_000;
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
 import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
@@ -780,6 +787,48 @@ export class Orchestrator {
     this.log.info({ roundId: this.roundId, reason: key, ...detail }, "fire skipped");
     // Persisted too: a log line cannot answer "why has it not fired all day".
     if (this.roundId !== null) this.db.recordSkip(this.roundId, key, detail);
+  }
+
+  /** Coalescing state for occupancy-driven refreshes (see requestRefresh). */
+  private refreshInFlight = false;
+  private refreshQueued = false;
+  private refreshTimer: NodeJS.Timeout | null = null;
+  private lastRefreshStartMs = 0;
+
+  /**
+   * Occupancy updates arrive in bursts — every deploy on the board rewrites
+   * the Round account, and the automation crank fires dozens at round open.
+   * Each refresh runs the selector (three variants) and signs one leg per
+   * wallet, all synchronously, so refreshing per update spends seconds of
+   * CPU per round inside the event loop. This coalesces: one refresh in
+   * flight at a time, at most one per REFRESH_MIN_INTERVAL_MS, and a burst
+   * collapses into a single trailing refresh that sees the final board.
+   * The fire check runs after each refresh while ARMED, as before.
+   */
+  private requestRefresh(trigger: string): void {
+    if (this.refreshInFlight || this.refreshTimer) {
+      this.refreshQueued = true;
+      return;
+    }
+    const wait = Math.max(0, this.lastRefreshStartMs + REFRESH_MIN_INTERVAL_MS - Date.now());
+    const run = () => {
+      this.refreshTimer = null;
+      this.refreshInFlight = true;
+      this.lastRefreshStartMs = Date.now();
+      void this.refreshCandidates(trigger)
+        .then(() => {
+          if (this.botState === "ARMED") void this.tryFire();
+        })
+        .finally(() => {
+          this.refreshInFlight = false;
+          if (this.refreshQueued) {
+            this.refreshQueued = false;
+            this.requestRefresh(`${trigger}_trailing`);
+          }
+        });
+    };
+    if (wait === 0) run();
+    else this.refreshTimer = setTimeout(run, wait);
   }
 
   private async refreshCandidates(trigger: string): Promise<void> {
@@ -3074,6 +3123,29 @@ export class Orchestrator {
     }
   }
 
+  /** Snapshot throttle: last slot a row was written, per round. */
+  private lastSnapshot: { roundId: number; slot: number } | null = null;
+  private shouldSnapshot(roundId: number, slot: number): boolean {
+    if (!this.lastSnapshot || this.lastSnapshot.roundId !== roundId || slot - this.lastSnapshot.slot >= SNAPSHOT_MIN_SLOTS) {
+      this.lastSnapshot = { roundId, slot };
+      return true;
+    }
+    return false;
+  }
+
+  /** Once an hour, drop observation history older than OBSERVATION_KEEP_ROUNDS. */
+  private lastPruneMs = 0;
+  private maybePruneObservations(): void {
+    if (this.roundId === null || Date.now() - this.lastPruneMs < 3_600_000) return;
+    this.lastPruneMs = Date.now();
+    try {
+      const removed = this.db.pruneObservations(this.roundId, OBSERVATION_KEEP_ROUNDS);
+      if (Object.values(removed).some((n) => n > 0)) this.log.info({ removed, keepRounds: OBSERVATION_KEEP_ROUNDS }, "observation history pruned");
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 120) }, "observation prune failed");
+    }
+  }
+
   private cacheRoundWindow(): void {
     const board = this.state.board;
     if (!board) return;
@@ -3178,7 +3250,11 @@ export class Orchestrator {
         if (applied.kind === "Board") this.cacheRoundWindow();
         if (applied.kind === "Round" && applied.roundId !== undefined) {
           const round = this.state.round(applied.roundId);
-          if (round) {
+          // One snapshot row per SNAPSHOT_MIN_SLOTS per round, not one per
+          // Round-account write: the readers (intel, the float planner) use
+          // the latest row per round, and a burst of deploys was writing a
+          // 21-stake JSON row per deploy.
+          if (round && this.shouldSnapshot(applied.roundId, u.slot)) {
             this.db.recordOccupancySnapshot(
               applied.roundId,
               u.slot,
@@ -3187,10 +3263,8 @@ export class Orchestrator {
             );
           }
           if (applied.roundId === this.state.board?.round_id) {
-            // Occupancy changed on the live round → re-run the selector.
-            void this.refreshCandidates("occupancy_update").then(() => {
-              if (this.botState === "ARMED") void this.tryFire();
-            });
+            // Occupancy changed on the live round → re-run the selector (coalesced).
+            this.requestRefresh("occupancy_update");
           }
         }
         if (applied.kind === "Miner" || applied.kind === "SatsVault" || applied.kind === "TokenVault") {
@@ -3275,11 +3349,13 @@ export class Orchestrator {
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
-      void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint).then(() => this.refreshLimits());
-      void this.checkWalletDrift();
+      // The drift check re-reads every wallet's balances itself; derive the
+      // limits from that read rather than reading all 21 wallets twice.
+      void this.checkWalletDrift().then(() => this.refreshLimits());
       this.validateHashrateFormula();
       this.refreshFireOffset();
       this.refreshRivalProfiles();
+      this.maybePruneObservations();
     }, 30_000);
     this.walletDriftTimer.unref?.();
     void this.buildDepositBlock();

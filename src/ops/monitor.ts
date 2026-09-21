@@ -205,7 +205,10 @@ export interface MonitorContext {
 const big = (v: { toString(): string } | null | undefined): bigint =>
   BigInt((v ?? "0").toString());
 
+const INTEL_CACHE_MS = 10_000;
+
 export function createMonitorData(ctx: MonitorContext): MonitorData {
+  const intelCache = new Map<number, { at: number; value: IntelJson }>();
   const roundStateName = (round: Round | null): string | null =>
     round ? (Object.keys(round.state)[0] ?? null) : null;
 
@@ -373,12 +376,19 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
     },
 
     intel(windowRounds) {
-      return buildIntel(ctx.db, {
-        windowRounds: Math.min(Math.max(1, windowRounds), 5000),
+      // Several aggregate scans over up to 5000 rounds of competitor history;
+      // the dashboard asks every 3 s per viewer. Serve a 10 s-old answer.
+      const w = Math.min(Math.max(1, windowRounds), 5000);
+      const hit = intelCache.get(w);
+      if (hit && Date.now() - hit.at < INTEL_CACHE_MS) return hit.value;
+      const value = buildIntel(ctx.db, {
+        windowRounds: w,
         fireOffsetSlots: ctx.fireOffsetSlots(),
         shareValueUsd: ctx.shareValueUsd(),
         tokenShareValueUsd: ctx.tokenShareValueUsd(),
       });
+      intelCache.set(w, { at: Date.now(), value });
+      return value;
     },
 
     async health(): Promise<HealthJson> {

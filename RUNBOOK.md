@@ -318,6 +318,29 @@ stream is at fault: send the output, the endpoint region and the timestamps
 to the provider. Keep `STALENESS_MS` at 1500: it is the fire gate, and a
 large value only delays the watchdog (a 20 s value gave a 100 s grace).
 
+### 7b. Load budget (what the process does per unit time)
+
+Audited 2026-09-21 after the event-loop blocks. Everything the bot does on
+a timer, with its cost, so a slow `/fleet` or a "silent" stream can be
+checked against the budget instead of the box being blamed:
+
+| every | job | cost |
+|---|---|---|
+| slot (~2.5/s) | apply slot, fire check while ARMED | µs; `evDiagnostics` a few EV evaluations while ARMED |
+| Round write (burst at round open) | apply account, **one** snapshot row per 5 slots, **one coalesced** candidate refresh per 750 ms (selector ×3 variants + one signature per wallet) | ~150 ms CPU per refresh, ≤ ~1.3/s during a burst |
+| 10 s | health: RPC `getSlot`, SOL + USDC balance | 3 RPC calls |
+| 30 s | drift check (21 wallets × 2 RPC), limits, fire-offset / hashrate / rival queries (LIMIT 200–500 rows), price feed | 42 RPC calls, ms of SQLite |
+| 30 s | token feed: API oracle + Jupiter quote | 2 HTTPS calls |
+| 60 s | treasury: 21 wallets × 2 RPC, USD claims, plan (uncapped want **memoized per round**) | 42 RPC calls + sends |
+| 20 rounds | automation book `getProgramAccounts` (~600 accounts) | one heavy RPC call |
+| 1 h | prune observation history older than 6000 rounds | one transaction |
+| dashboard viewer, 3 s | 8 JSON endpoints; intel **cached 10 s** | LIMIT queries |
+
+RSS is ~150–250 MB (node + Yellowstone napi + SQLite). On a 1 GB box keep
+the 2 GB swapfile (§6) and check `free -m`: swapping shows up as multi-second
+stalls that look exactly like the blocks above. `nproc` 1 is enough; the bot
+is single-threaded and the budget above is a few percent of one core.
+
 ## 8. Send-path infrastructure (latency + inclusion)
 
 Two independent latency paths — optimize them separately.
