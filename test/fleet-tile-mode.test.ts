@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -76,5 +76,16 @@ describe("fleet directory loading", () => {
     expect(set.indexOf(set.all()[2]!.keypair.publicKey.toBase58())).toBe(2);
     expect(WalletSet.fleetPaths({ dir: join(dir, "missing"), size: 21 })).toEqual([]);
     expect(WalletSet.load([], primary, { dir, size: 1 }).size).toBe(1);
+  });
+
+  it("ensureFleet creates only the missing keypairs and never rewrites an existing one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fleet-"));
+    expect(WalletSet.ensureFleet({ dir, size: 4 })).toBe(3);
+    const before = readFileSync(join(dir, "wallet-03.json"), "utf8");
+    expect(WalletSet.ensureFleet({ dir, size: 6 })).toBe(2);
+    expect(readFileSync(join(dir, "wallet-03.json"), "utf8")).toBe(before);
+    expect(WalletSet.fleetPaths({ dir, size: 6 })).toHaveLength(5);
+    expect(WalletSet.ensureFleet({ dir, size: 1 })).toBe(0);
+    expect((statSync(join(dir, "wallet-02.json")).mode & 0o777)).toBe(0o600);
   });
 });

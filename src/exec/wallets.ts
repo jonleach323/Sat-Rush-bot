@@ -17,7 +17,7 @@
  */
 import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadKeypair } from "./tx.js";
 
@@ -94,6 +94,24 @@ export class WalletSet {
       keypairs.push(kp);
     }
     return new WalletSet(keypairs);
+  }
+
+  /**
+   * Create the fleet's missing keypairs so that `dir` holds wallet-02 …
+   * wallet-<size>. Existing files are never touched; new ones are written 0600
+   * and nothing secret is returned or logged. Returns the number created.
+   */
+  static ensureFleet(fleet: { dir: string; size: number }): number {
+    if (fleet.size <= 1) return 0;
+    mkdirSync(fleet.dir, { recursive: true, mode: 0o700 });
+    let created = 0;
+    for (let i = 2; i <= fleet.size; i++) {
+      const file = join(fleet.dir, `wallet-${String(i).padStart(2, "0")}.json`);
+      if (existsSync(file)) continue;
+      writeFileSync(file, JSON.stringify(Array.from(Keypair.generate().secretKey)), { mode: 0o600 });
+      created++;
+    }
+    return created;
   }
 
   /**

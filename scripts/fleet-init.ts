@@ -11,9 +11,7 @@
  *
  * After this: send USDC and SOL to the PRIMARY. The treasury distributes.
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { Connection, Keypair } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js";
 import { loadConfig } from "../src/config.js";
 import { loadKeypair, assembleTx } from "../src/exec/tx.js";
 import { WalletSet } from "../src/exec/wallets.js";
@@ -28,16 +26,8 @@ const size = Number(process.argv[2] ?? cfg.FLEET_SIZE ?? 21);
 const tag = process.argv[3] ?? cfg.AFFILIATE_TAG;
 if (!Number.isInteger(size) || size < 1 || size > 64) throw new Error(`fleet size must be 1–64, got ${process.argv[2]}`);
 
-mkdirSync(cfg.FLEET_DIR, { recursive: true, mode: 0o700 });
 const primary = loadKeypair(cfg.KEYPAIR_PATH);
-let created = 0;
-for (let i = 2; i <= size; i++) {
-  const file = join(cfg.FLEET_DIR, `wallet-${String(i).padStart(2, "0")}.json`);
-  if (existsSync(file)) continue;
-  const kp = Keypair.generate();
-  writeFileSync(file, JSON.stringify(Array.from(kp.secretKey)), { mode: 0o600 });
-  created++;
-}
+const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size });
 const set = WalletSet.load([], cfg.KEYPAIR_PATH, { dir: cfg.FLEET_DIR, size });
 console.log(`fleet: ${set.size} wallets (${created} created, ${set.size - 1 - created} existing) in ${cfg.FLEET_DIR}`);
 set.pubkeys().forEach((k, i) => console.log(`  ${String(i + 1).padStart(2)}  tile ${String((i % 21) + 1).padStart(2)}  ${k.toBase58()}${i === 0 ? "  ← primary: deposit USDC + SOL here" : ""}`));

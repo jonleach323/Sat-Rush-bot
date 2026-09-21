@@ -46,6 +46,7 @@ import {
   buildSettleDeployPublic,
   buildTriggerEpochDraw,
   buildTriggerOneBtcDraw,
+  buildSetMinerTag,
   type InstructionContext,
 } from "./adapter/instructions.js";
 import {
@@ -292,6 +293,13 @@ export class Orchestrator {
     const connection = new Connection(cfg.RPC_HTTP_URL, "processed");
     // KEYPAIR_PATH is always the primary (it pays cranks and claims); WALLET_PATHS
     // adds the extra signers. Duplicates are refused inside WalletSet.load.
+    // The bot creates its own fleet: any wallet-NN.json missing below
+    // FLEET_SIZE is generated here (0600, never logged), so raising
+    // FLEET_SIZE and restarting is all it takes. The treasury funds them.
+    if (cfg.WALLET_PATHS.length === 0 && cfg.FLEET_SIZE > 1) {
+      const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
+      if (created > 0) log.info({ created, dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE }, "fleet keypairs created");
+    }
     const wallets = WalletSet.load(
       cfg.WALLET_PATHS.length > 0 ? [cfg.KEYPAIR_PATH, ...cfg.WALLET_PATHS] : [],
       cfg.KEYPAIR_PATH,
@@ -2546,6 +2554,29 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Register AFFILIATE_TAG on the primary once, so the extras bind to it at
+   * their first deploy. Skipped when the primary already has an Affiliate
+   * account, when no tag is configured, in dry mode, or with the kill switch
+   * engaged. Extras that deploy before this lands bind to nothing (the
+   * program only reads the slot at Miner creation) — the log says so.
+   */
+  private async ensureAffiliateTag(): Promise<void> {
+    const tag = this.cfg.AFFILIATE_TAG;
+    if (!tag || this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    try {
+      const info = await this.connection.getAccountInfo(affiliatePda(this.payer.publicKey, programId), "confirmed");
+      if (info) return;
+      const outcome = await this.fireClaim(buildSetMinerTag(this.ixCtx, { authority: this.payer.publicKey, tag }), { kind: "set_miner_tag", tag });
+      this.log.info({ tag, outcome }, "affiliate tag registered on the primary");
+      if (outcome === "landed") this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
+      else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — restart to retry`);
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
+    }
+  }
+
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
   private planFleetNow(): FleetPlan {
     const perRound = usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
@@ -2970,6 +3001,7 @@ export class Orchestrator {
     }, 30_000);
     this.walletDriftTimer.unref?.();
     if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
+      void this.ensureAffiliateTag();
       this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
       this.fleetTimer.unref?.();
     }

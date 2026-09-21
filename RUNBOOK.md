@@ -404,13 +404,13 @@ RUSH flows) with every wallet earning the single-tile hashrate rate (121
 raw/$ at the cap vs 101). One orchestrator, aggregate caps, one deposit
 address.
 
-1. **Create it.** `EXECUTION_MODE=mainnet MAINNET_CONFIRM=yes pnpm fleet:init 21 <tag>`
-   writes `keypairs/fleet/wallet-02.json` … `wallet-21.json` (0600, never
-   printed; the directory is gitignored), prints the 21 public keys with
-   their tiles, and registers `<tag>` on the primary (`set_miner_tag`) if
-   the primary has no Affiliate account yet. Idempotent. Then set
-   `FLEET_SIZE=21` (WALLET_PATHS stays empty). In dry mode it creates the
-   files and only prints what it would register.
+1. **Create it.** Set `FLEET_SIZE=21` and `AFFILIATE_TAG=<tag>` and start
+   the bot: on boot it generates any missing `keypairs/fleet/wallet-NN.json`
+   (0600, never logged; the directory is gitignored) and, in mainnet mode,
+   registers the tag on the primary (`set_miner_tag`) if the primary has no
+   Affiliate account yet. `pnpm fleet:init 21 <tag>` does the same from the
+   command line and prints the 21 public keys with their tiles. Both are
+   idempotent; WALLET_PATHS stays empty.
 2. **Fund it.** Send USDC and SOL to the PRIMARY (wallet 1, the first key
    printed). Nothing else needs funding by hand.
 3. **The treasury does the rest.** Every `FLEET_REBALANCE_INTERVAL_MS` it
