@@ -38,13 +38,14 @@ const get = async <T>(p: string): Promise<T> =>
 interface Board { round_duration: number; prices: { token: number; btc: number }; strike: { pool_combined_usd_amount: number } }
 interface RoundRow { id: number; state: string; total_gross_deployed_usd: string; minted_token: string }
 interface Conf { usd_mint: string; token_mint: string; strike_fee_bps: number; epoch_fee_bps: number; one_btc_fee_bps: number; protocol_fee_bps: number; vault_exit_fee_bps: number }
-interface Iter { id: number; pool_combined_usd_amount: number | null; total_tickets: string; ended_at: string | null }
+interface Iter { id: number; pool_combined_usd_amount: number | null; total_tickets: string; started_at: string | null; ended_at: string | null; first_round_id?: number; last_round_id?: number }
 interface Treasury { total_staked: string; total_reward_deposited: string; apr: number | null }
 interface Quote { inAmount: string; outAmount: string; priceImpactPct: string; routePlan: { swapInfo: { label: string }; percent: number }[] }
 
 const [board, conf, hist, treasury, roundRows] = await Promise.all([get<Board>("board"), get<Conf>("config"), get<Iter[]>("epoch/history?limit=3"), get<Treasury>("staking/treasury"), get<RoundRow[]>("rounds?limit=100")]);
 // The board: the MEAN of the last finished rounds, not one round — gross has a
 // 70% CV round to round and a single tile's own weight swings the toll with it.
+const head = roundRows[0]!.id;
 const finished = roundRows.filter((r) => r.state === "finished" && Number(r.total_gross_deployed_usd) > 0);
 const grossRows = finished.map((r) => Number(r.total_gross_deployed_usd) / 1e6);
 const gross = grossRows.reduce((a, b) => a + b, 0) / grossRows.length;
@@ -76,6 +77,12 @@ const stakeYield = (ours: number) => streamUsdPerDay / (stakedUsd + ours);
 
 // ── MINE: the model on today's board, RUSH leg priced at zero ──────────────
 const closed = hist.find((h) => h.ended_at && h.pool_combined_usd_amount !== null)!;
+// Round span of the closed iteration: the API history carries timestamps, not
+// round ids, so locate them by time against the current round's cadence.
+const nowMs = Date.now();
+const roundS = board.round_duration * 0.4;
+const closedStartRound = Math.round(head - (nowMs - Date.parse(closed.started_at ?? closed.ended_at!)) / 1000 / roundS);
+const closedEndRound = Math.round(head - (nowMs - Date.parse(closed.ended_at!)) / 1000 / roundS);
 // The API config omits the buybacks leg; the layer is a fixed 600 bps on the
 // tape (every V2 round: net = 94% of gross), so the leg is the remainder. It
 // was 50 bps until round 64175 and 108 bps from 64176 (2026-09-17 21:04 UTC,
@@ -87,7 +94,15 @@ const pool = closed.pool_combined_usd_amount as number;
 const field = Number(closed.total_tickets);
 const block = Math.round(0.05 * field);
 const ticketUsd = expectedWinningsUsd(block, field, pool, "epoch", EPOCH_DEDUP_UPLIFT.value, EPOCH_EQUAL_CURVE_BPS) / block;
-const rawUsd = ticketUsd / VAULT_HASHRATE_PER_TICKET.value;
+// The closed iteration's pool was funded at ITS epoch fee; the live fee may
+// differ (it moved 194 → 104 bps on 2026-09-17). Bracket the ticket value at
+// the pool scaled to the live fee — equal volume, equal field — as the low case.
+// Fee fields are on the single-round detail only, not the list rows.
+const midRound = await get<{ epoch_fee_usd: string; total_gross_deployed_usd: string }>(`rounds/${Math.round((closedStartRound + closedEndRound) / 2)}`).catch(() => null);
+const closedEpochBps = midRound && Number(midRound.total_gross_deployed_usd) > 0 ? (1e4 * Number(midRound.epoch_fee_usd)) / Number(midRound.total_gross_deployed_usd) : conf.epoch_fee_bps;
+const poolScale = conf.epoch_fee_bps / closedEpochBps;
+const rawUsdAt = (scale: number) => (ticketUsd * scale) / VAULT_HASHRATE_PER_TICKET.value;
+const rawUsd = rawUsdAt(1);
 const others = new Array<bigint>(TILES_COUNT).fill(usdToBase((gross * (1 - econ.feeLayerBps / 1e4)) / TILES_COUNT));
 const mintRate = Number.isFinite(mintLive) && mintLive > 0 ? mintLive : RUSH_MINT_PER_USD.value;
 // The strike jackpot leg, pro rata on the winning tile: the strike fee of every
@@ -97,14 +112,14 @@ const mintRate = Number.isFinite(mintLive) && mintLive > 0 ? mintLive : RUSH_MIN
 // pot ÷ modulus per round; today's pot gives the second figure printed.)
 const strikeSteadyPerRound = (conf.strike_fee_bps / 1e4) * STRIKE_PAYOUT_FRACTION.value; // × volume
 const strikeLivePerRound = (board.strike.pool_combined_usd_amount * STRIKE_PAYOUT_FRACTION.value) / 1440;
-const netNonToken = (tiles: number, streak: number, withStrike = true): number => {
+const netNonToken = (tiles: number, streak: number, withStrike = true, ticketScale = 1): number => {
   const alloc = new Array<bigint>(TILES_COUNT).fill(0n);
   const per = usdToBase(STAKE_USD / tiles);
   for (let i = 0; i < tiles; i++) alloc[i] = per;
   const volume = STAKE_USD + gross;
   return evOfAllocationV2({ predictedStakes: others, econ, mintedTokenValueBase: 0, tokenYieldPerVolume: 0,
     strikeExpectedPot: withStrike ? strikeSteadyPerRound * volume * 1e6 : 0,
-    hashrate: { streak, valueUsdPerRawUnit: rawUsd, multiplier: 1 } }, alloc) / 1e6 / STAKE_USD;
+    hashrate: { streak, valueUsdPerRawUnit: rawUsdAt(ticketScale), multiplier: 1 } }, alloc) / 1e6 / STAKE_USD;
 };
 const roundsPerDay = 86400 / (board.round_duration * 0.4);
 const configs: [string, number, number][] = [["fresh wallet, 1 tile", 1, 1], ["1 tile at streak cap", 1, REWARD_MAX_STREAK], ["21-tile blanket at cap", TILES_COUNT, REWARD_MAX_STREAK]];
@@ -126,15 +141,18 @@ console.log(`  (steady state ${pct(strikeSteadyPerRound)} of gross; today's $${b
 console.log(`  · hashrate → epoch tickets at the equal-prize curve × ${EPOCH_DEDUP_UPLIFT.value}x uplift. Shares at full vault ratio (held, no exit fee).`);
 console.log(`  NOT credited (each can only add): the 1-BTC lottery (≤ ${(conf.one_btc_fee_bps / 100).toFixed(2)}% of gross, ticket-engine dependent), the affiliate rebate`);
 console.log(`  (10% of the protocol leg as grubstake), and the ${pct(SATS_VAULT_CARRY_DAILY.value, 2)}/day carry the mined BTC shares earn while held.`);
-console.log(`  configuration              toll per $ gross (no strike)   RUSH per $ gross   cost per RUSH   vs spot   gross volume for ${usd(TARGET_USD, 0)}   rounds (1 wallet)`);
-const mineCosts: { name: string; costPerRush: number; toll: number }[] = [];
+console.log(`  epoch ticket value: closed iteration ${closed.id} (pool $${pool.toFixed(0)} at ${closedEpochBps.toFixed(0)} bps epoch fee) → $${ticketUsd.toFixed(4)}/ticket; at the LIVE ${conf.epoch_fee_bps} bps fee, equal volume and field: ×${poolScale.toFixed(2)} → $${(ticketUsd * poolScale).toFixed(4)} (low case)`);
+console.log(`  configuration              toll per $ gross (no strike)   RUSH per $ gross   cost per RUSH   vs spot   at live epoch fee   gross volume for ${usd(TARGET_USD, 0)}   rounds (1 wallet)`);
+const mineCosts: { name: string; costPerRush: number; costLow: number; toll: number }[] = [];
 for (const [name, tiles, streak] of configs) {
   const toll = -netNonToken(tiles, streak);
   const tollNoStrike = -netNonToken(tiles, streak, false);
+  const tollLow = -netNonToken(tiles, streak, true, poolScale);
   const costPerRush = toll / mintRate;
+  const costLow = tollLow / mintRate;
   const volume = TARGET_USD / (mintRate * spot);
-  mineCosts.push({ name, costPerRush, toll });
-  console.log(`  ${name.padEnd(26)} ${pct(toll).padStart(8)} (${pct(tollNoStrike)})   ${(mintRate).toExponential(3).padStart(10)}   ${usd(costPerRush).padStart(13)}   ${(costPerRush / spot).toFixed(2).padStart(5)}×   ${usd(volume, 0).padStart(22)}   ${(volume / STAKE_USD).toFixed(0).padStart(6)} ≈ ${(volume / STAKE_USD / roundsPerDay).toFixed(1)} d`);
+  mineCosts.push({ name, costPerRush, costLow, toll });
+  console.log(`  ${name.padEnd(26)} ${pct(toll).padStart(8)} (${pct(tollNoStrike)})   ${(mintRate).toExponential(3).padStart(10)}   ${usd(costPerRush).padStart(13)}   ${(costPerRush / spot).toFixed(2).padStart(5)}×   ${(usd(costLow) + " " + (costLow / spot).toFixed(2) + "×").padStart(16)}   ${usd(volume, 0).padStart(22)}   ${(volume / STAKE_USD).toFixed(0).padStart(6)} ≈ ${(volume / STAKE_USD / roundsPerDay).toFixed(1)} d`);
 }
 
 console.log(`\n══ WHAT EACH DOLLAR OF RUSH EARNS AFTERWARDS ══`);
@@ -149,7 +167,7 @@ for (const days of [30, 90]) {
   console.log(`  ${String(days).padStart(3)} d   buy+stake → ${usd(buyVal, 0)}   |   mine+hold → ${line}`);
 }
 console.log(`\n  crossover: mining beats buying only when spot exceeds the cost per RUSH above (the mint is volume-proportional, so that`);
-console.log(`  cost is a $ figure independent of price): ${mineCosts.map((m) => `${m.name} ${usd(m.costPerRush)}`).join(" · ")}.`);
+console.log(`  cost is a $ figure independent of price): ${mineCosts.map((m) => `${m.name} ${usd(m.costPerRush)} (${usd(m.costLow)} at the live epoch fee)`).join(" · ")}.`);
 console.log(`  Bracket: if the mint instead targets a $ yield at a lagging price, cost per RUSH scales WITH spot and there is no crossover;`);
 console.log(`  the mint rate has been rising (pnpm mint-rule prints the drift; +1.74%/day over 09-12→21 per RUSH_MINT_PER_USD's note), which lowers the mine cost by the same fraction per day while it persists.`);
 console.log(`  Throughput: buying is one transaction; mining ${usd(TARGET_USD, 0)} of RUSH needs the volume above through one wallet, or /21 with the fleet.`);

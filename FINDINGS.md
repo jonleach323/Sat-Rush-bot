@@ -1707,3 +1707,14 @@ wallets $36 (0.84×). The verdicts stand: buy for any single-tile play; a
 small blanket at the cap mines under spot, now with the strike leg
 measured rather than bracketed. Its remaining uncertainty is the hashrate
 credit (epoch ticket value under the halved epoch fee) and the mint rate.
+
+Addendum (same day): the blanket-at-cap row's hashrate credit was priced
+on iteration 15's pool, funded at the OLD 194 bps epoch fee. `pnpm
+buy-vs-mine` now prints the low case at the live 104 bps (pool × 0.54 at
+equal volume and field): blanket at the cap $32 → $57 per RUSH (1.34×
+spot), single tile at the cap $104 → $135, fresh $159 → $165. So on the
+fee split in force since 09-17, no configuration mines RUSH under spot
+unless iteration 16 closes with a pool per ticket near 15's — its live
+$0.0377 vs 15's $0.0315 says the field is shrinking faster than the fee
+did, which is the one thing that would keep the blanket under spot.
+Re-run at the close of iteration 16.
