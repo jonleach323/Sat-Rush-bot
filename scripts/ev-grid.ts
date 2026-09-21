@@ -73,3 +73,33 @@ const cB = nonHashrateToll(STRIKE_HASHRATE_MULTIPLIER.value) / (rawPerUsd(STRIKE
 console.log(`\n  read: a boosted ticket costs $${cB.toFixed(4)} at the steady pot — epoch tickets beat that up to ~30% of the field, 1-BTC tickets until the draw holds ~${(board.prices.btc / cB / 1e6).toFixed(1)}M tickets.`);
 console.log(`  An unboosted ticket costs $${cU.toFixed(4)}: it pays only at a tiny share of a fat field, or when the pot is fat enough to carry it (table A). The pot, not the ticket, is what makes an unboosted round positive.`);
 console.log(`  Fraction of rounds with the pot above $2k / $3k / $5k / $8k (memoryless trigger, refill $${refill.toFixed(2)}/round): ${[2000, 3000, 5000, 8000].map((p) => pct(Math.exp(-((p - seed) / refill) / modulus), 0)).join(" / ")}.`);
+
+// ── C. fleet shape: one tile per wallet (fleet covers the board) vs each wallet blanketing ──
+console.log(`\n══ C. FLEET SHAPE — k wallets × $${STAKE}: one DISTINCT tile each vs each wallet blanketing (per $ of fleet gross per round, steady pot, 5%-block ticket) ══`);
+const potMean = seed + refill * modulus / 2;
+const evAlloc = (alloc: bigint[], othersNet: bigint[], tiles: number, mult: number, stake: number): number =>
+  evOfAllocationV2({ predictedStakes: othersNet, econ, mintedTokenValueBase: 0, tokenYieldPerVolume: yieldNow,
+    strikeExpectedPot: (potMean * STRIKE_PAYOUT_FRACTION.value / modulus) * 1e6,
+    hashrate: { streak: REWARD_MAX_STREAK, valueUsdPerRawUnit: ticketSmall / VAULT_HASHRATE_PER_TICKET.value, multiplier: mult } }, alloc) / 1e6 / stake;
+const netOf = (g: number) => usdToBase(g * (1 - econ.feeLayerBps / 1e4));
+console.log(`  k     one tile each (unboosted)   blanket each (unboosted)   one tile each (boosted)   blanket each (boosted)   hashrate raw/$: single 121 vs blanket 101`);
+for (const k of [1, 5, 10, 21]) {
+  const res: number[] = [];
+  for (const mult of [1, STRIKE_HASHRATE_MULTIPLIER.value]) {
+    // one tile each: wallet i on tile i; the other k-1 fleet stakes sit on other tiles (as others' NET stake)
+    let evSingle = 0;
+    for (let i = 0; i < k; i++) {
+      const o = others.map((s, j) => (j !== i && j < k ? s + netOf(STAKE) : s));
+      const a = new Array<bigint>(TILES_COUNT).fill(0n); a[i] = usdToBase(STAKE);
+      evSingle += evAlloc(a, o, 1, mult, STAKE);
+    }
+    evSingle /= k;
+    // blanket each: every fleet-mate spreads $STAKE/21 on every tile
+    const oB = others.map((s) => s + BigInt(k - 1) * netOf(STAKE / TILES_COUNT));
+    const aB = new Array<bigint>(TILES_COUNT).fill(usdToBase(STAKE / TILES_COUNT));
+    const evBlanket = evAlloc(aB, oB, TILES_COUNT, mult, STAKE);
+    res.push(evSingle, evBlanket);
+  }
+  console.log(`  ${String(k).padEnd(3)}   ${pct(res[0]!).padStart(22)}   ${pct(res[1]!).padStart(22)}   ${pct(res[2]!).padStart(21)}   ${pct(res[3]!).padStart(20)}`);
+}
+console.log(`  (k = 21 one-tile-each is a blanket at the FLEET level: identical refund/sats/pot flows, +20% hashrate; below 21 the uncovered tiles are simply not played)`);
