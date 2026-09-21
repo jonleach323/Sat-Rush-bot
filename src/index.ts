@@ -138,6 +138,8 @@ export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
   private paused = false;
+  /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
+  private rampAlertArmed = true;
   private fireInFlight = false;
   private skipLogged = new Set<string>();
   private wasStale = false;
@@ -942,14 +944,21 @@ export class Orchestrator {
       // at 121 raw/$ instead of today's. Positive here and negative above
       // means the streak ramp (~100 rounds of a minimum deploy) would pay —
       // `pnpm streak-ramp` prices it; it has not been positive yet.
-      const atCap = (() => {
+      const capped = (() => {
         const base = this.v2Base();
         if (!("model" in src) || !base?.hashrate) return null;
-        const capped = v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK } });
-        return bps(capped.ev(single), cap);
+        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK } });
       })();
+      const atCap = capped ? bps(capped.ev(single), cap) : null;
+      // The blanket at the cap is the "flip" signal: a blanket is parimutuel
+      // (the refund, sats and strike legs come back pro rata whatever wins),
+      // so its EV at the cap is the non-token toll against the RUSH yield —
+      // positive means mining RUSH is cheaper than buying it (pnpm buy-vs-mine).
+      const blanketAtCap = capped ? bps(capped.ev(blanket), cap - (cap % BigInt(TILES_COUNT))) : null;
+      this.rampSignal(blanketAtCap);
       return {
         blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
+        blanketEvBpsAtStreakCap: blanketAtCap,
         emptiestTile: emptiest,
         emptiestEvBps: bps(model.ev(single), cap),
         emptiestEvBpsAtStreakCap: atCap,
@@ -958,6 +967,27 @@ export class Orchestrator {
       };
     } catch {
       return {};
+    }
+  }
+
+  /**
+   * One alert when a blanket at the streak cap clears RAMP_ALERT_MIN_BPS —
+   * the ramp would pay and mining RUSH beats buying it — then silence until
+   * the signal has dropped below zero and cleared the margin again. The bot
+   * does not start the ramp by itself: that is the operator's call
+   * (`pnpm streak-ramp` prices it).
+   */
+  private rampSignal(blanketAtCapBps: number | null): void {
+    const min = this.cfg.RAMP_ALERT_MIN_BPS;
+    if (blanketAtCapBps === null || !(min > 0)) return;
+    if (this.rampAlertArmed && blanketAtCapBps >= min) {
+      this.rampAlertArmed = false;
+      this.alert(
+        `ramp pays: an even blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
+        `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
+      );
+    } else if (!this.rampAlertArmed && blanketAtCapBps < 0) {
+      this.rampAlertArmed = true;
     }
   }
 

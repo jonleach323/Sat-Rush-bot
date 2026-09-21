@@ -701,6 +701,21 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0.5),
     ),
+    /**
+     * The "flip" signal. While the board is −EV the bot skips rounds; the
+     * selector prices the wallet's CURRENT streak, so it would never begin
+     * the ~100-round ramp to the cap even when a blanket AT the cap pays.
+     * When an even blanket at MAX_PER_ROUND with the streak at REWARD_MAX_STREAK
+     * clears this margin (bps of gross), the skip log carries it and one
+     * Telegram alert fires (re-armed once it falls back below zero). That
+     * condition is "mining RUSH is cheaper than buying it" with the RUSH leg
+     * at spot (`pnpm buy-vs-mine`); the margin absorbs the inputs' standard
+     * errors (uplift ±0.10 ≈ 20 bps, mint CV 5% ≈ 9 bps). 0 disables.
+     */
+    RAMP_ALERT_MIN_BPS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).default(50),
+    ),
     /** Ceiling on our share of a vault's projected final ticket count.
      *
      * Replaces the old basis for the deploy-side hashrate credit, which capped
