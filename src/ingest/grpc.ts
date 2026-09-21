@@ -5,7 +5,10 @@
  *      (discriminator-filtered, so round rotation needs no resubscribe),
  *  (c) this wallet's Miner PDA + the SatsVault ("wallet" stream),
  *  (d) program transactions (log messages) for event capture.
- * Reconnects forever with exponential backoff + jitter.
+ * Reconnects forever with exponential backoff + jitter. A silence watchdog
+ * destroys a stream whose slot feed has gone quiet (a half-open connection
+ * emits neither error nor end — the 2026-09-21 four-minute outage) so the
+ * reconnect loop takes over.
  */
 import * as yellowstoneNs from "@triton-one/yellowstone-grpc";
 import type {
@@ -57,6 +60,7 @@ const PING_INTERVAL_MS = 15_000;
 /** connect/subscribe must resolve within this or the attempt is abandoned —
  * a hung native connect would otherwise freeze the reconnect loop forever. */
 const CONNECT_TIMEOUT_MS = 15_000;
+const WATCHDOG_INTERVAL_MS = 2_500;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -76,6 +80,9 @@ export class YellowstoneIngest extends IngestSource {
   private stream: ClientDuplexStream | null = null;
   private endStream: (() => void) | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  /** When the current stream came up — silence is measured from here or the last slot, whichever is later. */
+  private streamStartedAtMs = 0;
   private stopped = false;
   private attempt = 0;
   private runLoop: Promise<void> | null = null;
@@ -166,7 +173,9 @@ export class YellowstoneIngest extends IngestSource {
           this.attempt = 0; // live traffic resets the backoff
           this.handleUpdate(update);
         });
+        this.streamStartedAtMs = Date.now();
         this.startPing();
+        this.startWatchdog();
         this.emit("status", { connected: true });
 
         await new Promise<void>((resolve, reject) => {
@@ -213,10 +222,42 @@ export class YellowstoneIngest extends IngestSource {
     }, PING_INTERVAL_MS);
   }
 
+  /** Silence grace before a stream is declared dead and rebuilt. */
+  private watchdogGraceMs(): number {
+    return Math.max(this.stalenessMs * 5, 7_500);
+  }
+
+  /**
+   * Kill a stream whose slot feed has gone silent past the grace. The
+   * connect loop sees the destroy as a stream error and reconnects with
+   * backoff. Silence is measured from the later of the last slot and the
+   * stream's own start, so a fresh stream gets the full grace and a dead
+   * upstream is retried at the backoff cadence instead of every tick.
+   */
+  private startWatchdog(): void {
+    this.watchdogTimer = setInterval(() => {
+      const stream = this.stream;
+      if (!stream || this.stopped) return;
+      const quietFor = Math.min(this.lastUpdateAgeMs("slots"), Date.now() - this.streamStartedAtMs);
+      const grace = this.watchdogGraceMs();
+      if (quietFor <= grace) return;
+      this.emit("status", {
+        connected: false,
+        detail: `slot stream silent ${Math.round(quietFor)}ms — rebuilding connection`,
+      });
+      stream.destroy(new Error(`watchdog: slot stream silent ${Math.round(quietFor)}ms`));
+    }, WATCHDOG_INTERVAL_MS);
+    this.watchdogTimer.unref?.();
+  }
+
   private teardownStream(): void {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
+    }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
     }
     if (this.stream) {
       this.endStream?.(); // settle the connect-loop's ended-promise first

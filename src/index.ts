@@ -99,7 +99,7 @@ import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } 
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
 import { PriceFeed } from "./ingest/prices.js";
-import { bootstrapGameState, type GameState } from "./ingest/snapshot.js";
+import { bootstrapGameState, reseedGameState, type GameState } from "./ingest/snapshot.js";
 import type { IngestSource } from "./ingest/types.js";
 import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
@@ -171,6 +171,8 @@ export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
   private paused = false;
+  /** Set on an ingest drop; the next connect re-reads the tracked accounts over RPC. */
+  private ingestWasDown = false;
   /** Affiliate tag confirmed on chain (or registered) — the treasury cycle retries until then. */
   private affiliateTagDone = false;
   /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
@@ -3043,6 +3045,25 @@ export class Orchestrator {
 
   // ── event wiring ────────────────────────────────────────────────────────────
 
+  /**
+   * After an ingest reconnect the stream has a hole: every Board/Round/Miner
+   * write during the outage is gone (Yellowstone does not replay). Re-read
+   * them over RPC, stamped at the head slot, then re-run the selector.
+   */
+  private async reseedAfterReconnect(): Promise<void> {
+    try {
+      const r = await reseedGameState(this.connection, this.state, {
+        minerAuthority: this.wallets.pubkeys(),
+        programId: new PublicKey(this.cfg.PROGRAM_ID),
+      });
+      this.cacheRoundWindow();
+      this.log.info({ slot: r.slot, roundId: r.roundId }, "snapshot re-seeded from RPC after ingest reconnect");
+      await this.refreshCandidates("reseed");
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "snapshot re-seed after reconnect failed — stream updates will catch up");
+    }
+  }
+
   private cacheRoundWindow(): void {
     const board = this.state.board;
     if (!board) return;
@@ -3225,8 +3246,16 @@ export class Orchestrator {
     });
 
     this.source.on("status", (s) => {
-      if (!s.connected) this.log.warn({ detail: s.detail }, "ingest disconnected");
-      else this.log.info({ detail: s.detail }, "ingest connected");
+      if (!s.connected) {
+        this.ingestWasDown = true;
+        this.log.warn({ detail: s.detail }, "ingest disconnected");
+        return;
+      }
+      this.log.info({ detail: s.detail }, "ingest connected");
+      if (this.ingestWasDown) {
+        this.ingestWasDown = false;
+        void this.reseedAfterReconnect();
+      }
     });
 
     this.health.start(10_000);
