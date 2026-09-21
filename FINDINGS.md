@@ -1578,3 +1578,27 @@ positive the ramp pays, and `pnpm streak-ramp` gives the cost and payback.
 What would flip it: a bigger board (own weight falls), a higher token yield
 (the mint rate is rising 1.7%/day), or a richer epoch pool per ticket.
 
+
+### Addendum: hold unclaimed vs claim-and-stake, over horizons (2026-09-21)
+
+`pnpm hold-vs-stake [wallet] [rush-usd] [btc-usd]` reads the wallet's live
+position from `/users/{addr}/profile` and compares leaving winnings as
+unclaimed vault shares (earning the ratio ratchet) against claiming them
+(10% exit fee) and staking the RUSH. The carry's decay is the uncertain
+dimension, so it is bracketed: constant, halving every 90 d, halving every
+30 d.
+
+```
+  operator wallet: RUSH shares $626.56 · BTC shares $1,702.99 · unclaimed USD $0
+  rates/day: token carry 0.240% · sats carry 0.300% · staking 0.224%
+  RUSH leg   30 d and 90 d: hold wins on every decay path
+             180 d / 365 d: claim+stake wins only if the carry halves every 30–90 d
+  break-even (claim+stake ever pays back the fee): carry < 0.197%/day sustained a year;
+             carry to zero tomorrow → 45 d payback on the fee
+  BTC leg    no yield alternative exists for claimed cbBTC; claiming buys liquidity only
+             (hold $1,863 at 30 d vs $1,532.69 claimed today)
+```
+
+Waiting is free: the fee is the same whenever it is paid, so "hold, then
+decide" dominates "claim now" on both legs. Claim USD always (fee-free).
+Re-run when `pnpm vault-carry` prints a token carry below 0.197%/day.
