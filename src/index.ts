@@ -298,7 +298,7 @@ export class Orchestrator {
     // FLEET_SIZE and restarting is all it takes. The treasury funds them.
     if (cfg.WALLET_PATHS.length === 0 && cfg.FLEET_SIZE > 1) {
       const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
-      if (created > 0) log.info({ created, dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE }, "fleet keypairs created");
+      if (created > 0) logger.info({ created, dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE }, "fleet keypairs created");
     }
     const wallets = WalletSet.load(
       cfg.WALLET_PATHS.length > 0 ? [cfg.KEYPAIR_PATH, ...cfg.WALLET_PATHS] : [],
