@@ -10,7 +10,9 @@ describe("config defaults", () => {
     expect(cfg.DB_PATH).toBe("./data/satrush.db");
     expect(cfg.SECONDARY_RPC_URLS).toEqual([]);
     expect(cfg.STAKE_LADDER_USD.length).toBeGreaterThan(0);
-    expect(cfg.MAX_PER_ROUND_USD).toBeLessThanOrEqual(cfg.DAILY_LOSS_CAP_USD);
+    expect(cfg.MAX_PER_ROUND_USD).toBe(0); // auto: the fleet's deployable USDC
+    expect(cfg.DAILY_LOSS_CAP_USD).toBe(0); // auto: AUTO_DAILY_LOSS_FRACTION of the day's opening USDC
+    expect(cfg.FLEET_SIZE).toBe(21);
     // Vault strategy is ON by default — spends idle hashrate on +share raffles
     // (bounded, and EXECUTION_MODE-gated so dry mode still sends nothing).
     expect(cfg.VAULT_STRATEGY_ENABLED).toBe(true);

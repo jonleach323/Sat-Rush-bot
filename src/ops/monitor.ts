@@ -164,8 +164,8 @@ export interface MonitorContext {
   ingestSourceName: string;
   isPaused: () => boolean;
   killSwitchEngaged: () => boolean;
-  maxPerRoundBase: bigint;
-  dailyLossCapBase: bigint;
+  maxPerRoundBase: () => bigint;
+  dailyLossCapBase: () => bigint;
   myAuthority: string;
   solBalanceLamports: () => Promise<number>;
   usdcBalanceBaseUnits: () => Promise<bigint>;
@@ -281,10 +281,10 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
           };
         })(),
         caps: {
-          maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
-          dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase),
+          maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase()),
+          dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase()),
           dailyLossLeftUsd: baseToUsd(
-            ctx.dailyLossCapBase > dailyLoss ? ctx.dailyLossCapBase - dailyLoss : 0n,
+            ctx.dailyLossCapBase() > dailyLoss ? ctx.dailyLossCapBase() - dailyLoss : 0n,
           ),
         },
         prices: ctx.priceStatus(),

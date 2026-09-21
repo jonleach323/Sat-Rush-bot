@@ -18,7 +18,7 @@
 import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { loadKeypair } from "./tx.js";
 
 export interface WalletState {
@@ -94,6 +94,14 @@ export class WalletSet {
       keypairs.push(kp);
     }
     return new WalletSet(keypairs);
+  }
+
+  /** Create the primary keypair file if it does not exist (0600). Returns true when created. */
+  static ensurePrimary(path: string): boolean {
+    if (existsSync(path)) return false;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify(Array.from(Keypair.generate().secretKey)), { mode: 0o600 });
+    return true;
   }
 
   /**

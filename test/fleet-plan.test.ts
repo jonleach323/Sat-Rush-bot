@@ -70,3 +70,17 @@ describe("dynamic float target", () => {
   });
 });
 
+describe("auto risk limits", () => {
+  it("per-round cap is the fleet's USDC; daily cap a fraction of the day's opening USDC; configured values win", async () => {
+    const { deriveLimits, autoAffiliateTag } = await import("../src/index.js");
+    const auto = { MAX_PER_ROUND_USD: 0, DAILY_LOSS_CAP_USD: 0, AUTO_DAILY_LOSS_FRACTION: 0.5 };
+    expect(deriveLimits(auto, 2_000_000_000n, null)).toEqual({ maxPerRound: 2_000_000_000n, dailyLossCap: 1_000_000_000n });
+    expect(deriveLimits(auto, 500_000n, null)).toEqual({ maxPerRound: 1_000_000n, dailyLossCap: 5_000_000n }); // floors
+    expect(deriveLimits(auto, 100_000_000n, 2_000_000_000n).dailyLossCap).toBe(1_000_000_000n); // anchored to the day's open
+    expect(deriveLimits({ MAX_PER_ROUND_USD: 50, DAILY_LOSS_CAP_USD: 300, AUTO_DAILY_LOSS_FRACTION: 0.5 }, 9_000_000_000n, null)).toEqual({ maxPerRound: 50_000_000n, dailyLossCap: 300_000_000n });
+    const { Keypair } = await import("@solana/web3.js");
+    const tag = autoAffiliateTag(Keypair.generate().publicKey);
+    expect(tag).toMatch(/^sr[a-z0-9]{10}$/);
+  });
+});
+

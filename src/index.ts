@@ -138,6 +138,31 @@ export type BotState =
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
+/**
+ * The risk limits in auto mode. Per round: the fleet's deployable USDC (cash
+ * is the only cap; the selector and Kelly size below it). Daily: a fraction
+ * of the day's opening USDC, never below $5. A configured positive value is a
+ * hard figure instead. Exported for tests.
+ */
+export function deriveLimits(
+  cfg: { MAX_PER_ROUND_USD: number; DAILY_LOSS_CAP_USD: number; AUTO_DAILY_LOSS_FRACTION: number },
+  fleetUsdcBase: bigint,
+  dayOpenUsdcBase: bigint | null,
+): { maxPerRound: bigint; dailyLossCap: bigint } {
+  const floor = usdToBase(1);
+  const maxPerRound = cfg.MAX_PER_ROUND_USD > 0 ? usdToBase(cfg.MAX_PER_ROUND_USD) : fleetUsdcBase > floor ? fleetUsdcBase : floor;
+  const base = dayOpenUsdcBase ?? fleetUsdcBase;
+  const autoDaily = BigInt(Math.round(Number(base) * cfg.AUTO_DAILY_LOSS_FRACTION));
+  const dailyFloor = usdToBase(5);
+  const dailyLossCap = cfg.DAILY_LOSS_CAP_USD > 0 ? usdToBase(cfg.DAILY_LOSS_CAP_USD) : autoDaily > dailyFloor ? autoDaily : dailyFloor;
+  return { maxPerRound, dailyLossCap };
+}
+
+/** Affiliate tag derived from the primary's public key when none is configured: `sr` + the first 10 alphanumerics, lower-cased. */
+export function autoAffiliateTag(primary: PublicKey): string {
+  return ("sr" + primary.toBase58().toLowerCase().replace(/[^a-z0-9]/g, "")).slice(0, 12);
+}
+
 export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
@@ -168,6 +193,7 @@ export class Orchestrator {
   private readonly crankBackoff = new Map<string, { failures: number; nextAttemptMs: number }>();
   private walletDriftTimer: NodeJS.Timeout | null = null;
   private fleetTimer: NodeJS.Timeout | null = null;
+  private dayAnchor: { day: string; usdcBase: bigint } | null = null;
   private fleetCycleInFlight = false;
   private lastFleetPlan: { at: number; plan: FleetPlan; executed: number; dry: boolean } | null = null;
   private fleetShortfallAlerted = false;
@@ -231,7 +257,7 @@ export class Orchestrator {
       },
       {
         solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
-        usdcFloorBaseUnits: usdToBase(cfg.MAX_PER_ROUND_USD),
+        usdcFloorBaseUnits: undefined, // auto mode: the fleet treasury watches balances; no fixed floor
         slotLagThreshold: cfg.SLOT_LAG_ALERT_SLOTS,
       },
     );
@@ -245,8 +271,8 @@ export class Orchestrator {
       ingestSourceName: cfg.GRPC_URL ? "yellowstone-grpc" : "ws-rpc",
       isPaused: () => this.paused,
       killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
-      maxPerRoundBase: usdToBase(cfg.MAX_PER_ROUND_USD),
-      dailyLossCapBase: usdToBase(cfg.DAILY_LOSS_CAP_USD),
+      maxPerRoundBase: () => this.bankroll.maxPerRoundBase,
+      dailyLossCapBase: () => this.bankroll.dailyLossCapBase,
       myAuthority: this.payer.publicKey.toBase58(),
       solBalanceLamports: () =>
         this.connection.getBalance(this.payer.publicKey, "processed"),
@@ -298,6 +324,9 @@ export class Orchestrator {
     // The bot creates its own fleet: any wallet-NN.json missing below
     // FLEET_SIZE is generated here (0600, never logged), so raising
     // FLEET_SIZE and restarting is all it takes. The treasury funds them.
+    if (WalletSet.ensurePrimary(cfg.KEYPAIR_PATH)) {
+      logger.warn({ path: cfg.KEYPAIR_PATH }, "primary keypair CREATED — fund its address (printed below) with USDC and SOL");
+    }
     if (cfg.WALLET_PATHS.length === 0 && cfg.FLEET_SIZE > 1) {
       const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
       if (created > 0) logger.info({ created, dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE }, "fleet keypairs created");
@@ -308,6 +337,7 @@ export class Orchestrator {
       { dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE },
     );
     const payer = wallets.primary().keypair;
+    logger.info({ deposit: payer.publicKey.toBase58(), fleet: wallets.size }, "deposit address (the primary): send USDC and SOL here");
     const db = new StateDb(cfg.DB_PATH);
 
     const state = await bootstrapGameState(connection, {
@@ -360,11 +390,13 @@ export class Orchestrator {
       tokenMint: state.satrushConfig.token_mint,
     };
 
+    await wallets.refreshBalances(connection, state.satrushConfig.usd_mint);
+    const initialLimits = deriveLimits(cfg, wallets.totals().usdcBase, null);
     const bankroll = new Bankroll(
       {
         ladder: cfg.STAKE_LADDER_USD.map(usdToBase),
-        maxPerRound: usdToBase(cfg.MAX_PER_ROUND_USD),
-        dailyLossCap: usdToBase(cfg.DAILY_LOSS_CAP_USD),
+        maxPerRound: initialLimits.maxPerRound,
+        dailyLossCap: initialLimits.dailyLossCap,
         minDeploy: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
         killSwitchFile: cfg.KILL_SWITCH_FILE,
         // V2: the board can take at most the toll of a stake (1 − refund);
@@ -460,7 +492,6 @@ export class Orchestrator {
         : undefined;
     // Fleet: balances must be known before the first allocate(); the drift
     // tick keeps them fresh afterwards.
-    if (wallets.size > 1) await wallets.refreshBalances(connection, ixCtx.usdMint);
     const primaryKey = payer.publicKey;
     const affiliateAuthority = cfg.AFFILIATE_AUTHORITY ? new PublicKey(cfg.AFFILIATE_AUTHORITY) : primaryKey;
     // Grubstake USD (affiliate rebate exchanged into the Miner, or an airdrop)
@@ -592,7 +623,7 @@ export class Orchestrator {
       thresholdBaseUnits: usdToBase(this.cfg.STRIKE_BOOST_THRESHOLD_USD),
       boost: this.cfg.STRIKE_SIZE_BOOST,
     });
-    return (usdToBase(this.cfg.MAX_PER_ROUND_USD) * BigInt(Math.round(boost * 100))) / 100n;
+    return (this.bankroll.maxPerRoundBase * BigInt(Math.round(boost * 100))) / 100n;
   }
 
   private attachTelegram(): void {
@@ -699,9 +730,8 @@ export class Orchestrator {
       todayNet: this.pnl.todayNet(),
       unclaimedUsd: BigInt(this.state.miner?.unclaimed_usd_amount.toString() ?? "0"),
       unclaimedShares: BigInt(this.state.miner?.unclaimed_btc_shares.toString() ?? "0"),
-      perRoundCapLeft: usdToBase(this.cfg.MAX_PER_ROUND_USD),
-      dailyLossCapLeft:
-        usdToBase(this.cfg.DAILY_LOSS_CAP_USD) - this.pnl.realizedLossToday(),
+      perRoundCapLeft: this.bankroll.maxPerRoundBase,
+      dailyLossCapLeft: this.bankroll.dailyLossCapBase - this.pnl.realizedLossToday(),
       killSwitch: this.bankroll.killSwitchEngaged(),
       paused: this.paused,
       boardTotalUsd: m.board.totalUsd,
@@ -1094,7 +1124,7 @@ export class Orchestrator {
     const miner = this.state.miner;
     const usd = streakOptionValueUsd({
       streak: miner?.current_streak_count ?? 1,
-      deployPerRoundUsd: this.cfg.MAX_PER_ROUND_USD,
+      deployPerRoundUsd: Number(this.bankroll.maxPerRoundBase) / 1e6,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
       liquidFraction:
         1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
@@ -2627,8 +2657,8 @@ export class Orchestrator {
    * program only reads the slot at Miner creation) — the log says so.
    */
   private async ensureAffiliateTag(): Promise<void> {
-    const tag = this.cfg.AFFILIATE_TAG;
-    if (!tag || this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    const tag = this.cfg.AFFILIATE_TAG ?? autoAffiliateTag(this.payer.publicKey);
+    if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
     try {
       const info = await this.connection.getAccountInfo(affiliatePda(this.payer.publicKey, programId), "confirmed");
@@ -2639,6 +2669,23 @@ export class Orchestrator {
       else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — restart to retry`);
     } catch (err) {
       this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
+    }
+  }
+
+  /**
+   * Auto limits: re-derive the guard's per-round and daily caps from the
+   * fleet's USDC. The daily cap anchors to the UTC day's first reading so a
+   * day's losses cannot shrink their own cap.
+   */
+  private refreshLimits(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    const usdc = this.wallets.totals().usdcBase;
+    if (this.dayAnchor?.day !== today) this.dayAnchor = { day: today, usdcBase: usdc };
+    const limits = deriveLimits(this.cfg, usdc, this.dayAnchor.usdcBase);
+    try {
+      this.bankroll.setLimits(limits);
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 120) }, "auto limits not applied");
     }
   }
 
@@ -2683,7 +2730,7 @@ export class Orchestrator {
     return dynamicFloatBase({
       observedPeakLegBase: observed,
       floorBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
-      perRoundCapBase: usdToBase(this.cfg.MAX_PER_ROUND_USD) / tiles,
+      perRoundCapBase: this.bankroll.maxPerRoundBase / tiles,
       floatRounds: this.cfg.FLEET_FLOAT_ROUNDS,
       headroom: this.cfg.FLEET_FLOAT_HEADROOM,
     });
@@ -2691,7 +2738,7 @@ export class Orchestrator {
 
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
   private planFleetNow(): FleetPlan {
-    const perRound = usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    const perRound = this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
     const balances = this.wallets.all().map((w) => ({
       pubkey: w.keypair.publicKey.toBase58(),
       usdcBase: w.usdcBase,
@@ -2756,7 +2803,7 @@ export class Orchestrator {
   /** Fleet view for Telegram /fleet and the status API: balances, runway, the last plan. */
   fleetReport(): FleetReport {
     const plan = this.wallets.size > 1 ? this.planFleetNow() : null;
-    const perRound = this.wallets.size > 1 ? Number(usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.min(this.wallets.size, TILES_COUNT))) / 1e6 : this.cfg.MAX_PER_ROUND_USD;
+    const perRound = Number(this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)))) / 1e6;
     return {
       size: this.wallets.size,
       tileMode: this.cfg.FLEET_TILE_MODE && this.wallets.size > 1,
@@ -3109,7 +3156,7 @@ export class Orchestrator {
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
-      if (this.wallets.size > 1) void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint).then(() => this.refreshLimits());
       void this.checkWalletDrift();
       this.validateHashrateFormula();
       this.refreshFireOffset();

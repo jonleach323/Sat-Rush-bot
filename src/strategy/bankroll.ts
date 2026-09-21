@@ -50,7 +50,7 @@ export class Bankroll {
   private tripped: string | null = null;
 
   constructor(
-    private readonly cfg: BankrollConfig,
+    private cfg: BankrollConfig,
     private readonly deps: BankrollDeps,
   ) {
     if (cfg.ladder.length === 0 || cfg.ladder.some((l) => l <= 0n)) {
@@ -63,6 +63,21 @@ export class Bankroll {
       throw new RangeError(`lossFractionAtRisk must be in (0, 1], got ${f}`);
     }
     this.quantum = cfg.ladder.reduce((a, b) => (b < a ? b : a));
+  }
+
+  /**
+   * Replace the limits the guard enforces. The orchestrator derives them from
+   * the bankroll (auto mode: per-round cap = deployable USDC, daily cap = a
+   * fraction of the fleet's USDC at the day's start) and calls this on every
+   * balance refresh; every authorize() after that checks the new figures. The
+   * enforcement path is unchanged — only where the numbers come from.
+   */
+  setLimits(limits: { maxPerRound?: bigint | undefined; dailyLossCap?: bigint | undefined }): void {
+    const maxPerRound = limits.maxPerRound ?? this.cfg.maxPerRound;
+    const dailyLossCap = limits.dailyLossCap ?? this.cfg.dailyLossCap;
+    if (maxPerRound <= 0n) throw new RangeError("maxPerRound must be positive");
+    if (dailyLossCap <= 0n) throw new RangeError("dailyLossCap must be positive");
+    this.cfg = { ...this.cfg, maxPerRound, dailyLossCap };
   }
 
   // Accessors so the pre-send invariant guard can re-verify against the SAME

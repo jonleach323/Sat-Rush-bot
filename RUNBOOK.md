@@ -406,13 +406,14 @@ RUSH flows) with every wallet earning the single-tile hashrate rate (121
 raw/$ at the cap vs 101). One orchestrator, aggregate caps, one deposit
 address.
 
-1. **Create it.** Set `FLEET_SIZE=21` and `AFFILIATE_TAG=<tag>` and start
-   the bot: on boot it generates any missing `keypairs/fleet/wallet-NN.json`
-   (0600, never logged; the directory is gitignored) and, in mainnet mode,
-   registers the tag on the primary (`set_miner_tag`) if the primary has no
-   Affiliate account yet. `pnpm fleet:init 21 <tag>` does the same from the
-   command line and prints the 21 public keys with their tiles. Both are
-   idempotent; WALLET_PATHS stays empty.
+1. **Create it.** Start the bot. With the defaults (`FLEET_SIZE=21`) it
+   creates the primary keypair if `KEYPAIR_PATH` is missing, generates any
+   missing `keypairs/fleet/wallet-NN.json` (0600, never logged; the
+   directory is gitignored), logs the deposit address, and in mainnet mode
+   registers an affiliate tag derived from the primary's key (`sr` + ten
+   characters; `AFFILIATE_TAG` overrides) if the primary has none.
+   `pnpm fleet:init` does the same from the shell and prints the 21 public
+   keys with their tiles. Idempotent; WALLET_PATHS stays empty.
 2. **Fund it.** Send USDC and SOL to the PRIMARY (wallet 1, the first key
    printed). Nothing else needs funding by hand.
 3. **The treasury does the rest.** Every `FLEET_REBALANCE_INTERVAL_MS` it
@@ -435,7 +436,12 @@ address.
    Non-blanket selections fall back to the slice split. Every wallet binds
    to the primary's affiliate at its first deploy (10 bps of its volume
    comes back to the primary as grubstake and is deployed from there).
-5. **Sizing.** The selector adds $1 quanta to the best tile while the
+5. **Sizing — nothing to set.** `MAX_PER_ROUND_USD=0` (default) makes the
+   per-round cap the fleet's deployable USDC, refreshed every 30 s, and
+   `DAILY_LOSS_CAP_USD=0` makes the daily cap half of the day's opening
+   USDC (never under $5); both are still enforced by the bankroll guard on
+   every fire (`Bankroll.setLimits`). A positive value in either is a hard
+   ceiling if you want one. The selector adds $1 quanta to the best tile while the
    marginal EV is positive, so it finds the EV-maximizing stake itself; the
    hashrate leg is priced on the dilution curve (our tickets lower the value
    of every ticket we hold), so the marginal bends down and the stop is the

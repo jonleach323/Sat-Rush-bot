@@ -327,14 +327,29 @@ const schema = z
     ),
     STAKE_LADDER_USD: commaListOfUsd,
 
+    /**
+     * 0 = AUTO (default): the per-round cap is the fleet's deployable USDC,
+     * refreshed every 30 s, so cash is the only thing that ever caps a
+     * round; the selector's marginal EV (dilution-priced) and Kelly on the
+     * bankroll do the sizing. A positive value is a hard ceiling on top.
+     * Still enforced in the execution path (Bankroll.setLimits).
+     */
     MAX_PER_ROUND_USD: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().positive().default(1),
+      z.coerce.number().finite().nonnegative().default(0),
     ),
+    /**
+     * 0 = AUTO (default): AUTO_DAILY_LOSS_FRACTION of the fleet's USDC at
+     * the start of the UTC day (never below $5) — a ruin guard against a
+     * broken model, not a variance guard; the reconcile tripwire and kill
+     * switch cover model breakage round by round. A positive value is a
+     * hard figure instead.
+     */
     DAILY_LOSS_CAP_USD: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().positive().default(5),
+      z.coerce.number().finite().nonnegative().default(0),
     ),
+    AUTO_DAILY_LOSS_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().gt(0).max(1).default(0.5)),
     MAX_UNCLAIMED_USD_VALUE: z.preprocess(
       emptyToUndef,
       z.coerce.number().finite().positive().default(50),
@@ -609,7 +624,7 @@ const schema = z
      * wallet. Deposits go to the PRIMARY only; the treasury distributes.
      */
     FLEET_DIR: z.preprocess(emptyToUndef, z.string().default("./keypairs/fleet")),
-    FLEET_SIZE: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(64).default(1)),
+    FLEET_SIZE: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(64).default(21)),
     /** Affiliate tag `pnpm fleet:init` registers for the primary (3–16 chars, a-z 0-9 _ -). */
     AFFILIATE_TAG: z.preprocess(emptyToUndef, z.string().regex(/^[a-z0-9_-]{3,16}$/).optional()),
     /**
@@ -876,7 +891,7 @@ const schema = z
         message: "FIRE_OFFSET_CEILING must not be below FIRE_OFFSET_FLOOR",
       });
     }
-    if (cfg.MAX_PER_ROUND_USD > cfg.DAILY_LOSS_CAP_USD) {
+    if (cfg.MAX_PER_ROUND_USD > 0 && cfg.DAILY_LOSS_CAP_USD > 0 && cfg.MAX_PER_ROUND_USD > cfg.DAILY_LOSS_CAP_USD) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["MAX_PER_ROUND_USD"],
@@ -884,7 +899,7 @@ const schema = z
       });
     }
     for (const stake of cfg.STAKE_LADDER_USD) {
-      if (stake > cfg.MAX_PER_ROUND_USD) {
+      if (cfg.MAX_PER_ROUND_USD > 0 && stake > cfg.MAX_PER_ROUND_USD) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["STAKE_LADDER_USD"],
