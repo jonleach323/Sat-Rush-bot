@@ -24,9 +24,25 @@ const curve = useV1 ? EPOCH_REWARD_CURVE_BPS : EPOCH_EQUAL_CURVE_BPS;
 const get = async <T>(p: string): Promise<T> =>
   ((await (await fetch(`${BASE}/${p}`, { signal: AbortSignal.timeout(20_000) })).json()) as { data: T }).data;
 
+
+async function allParticipants<T extends { id: number }>(iterationId: number): Promise<T[]> {
+  // Pages are newest-first; `before` walks back by entry id. Dedupe by id in
+  // case a page boundary moves under us.
+  const seen = new Map<number, T>();
+  let before: number | undefined;
+  for (let page = 0; page < 200; page++) {
+    const batch = await get<T[]>(`epoch/iterations/${iterationId}/participants?limit=100${before !== undefined ? `&before=${before}` : ""}`);
+    let fresh = 0;
+    for (const b of batch) if (!seen.has(b.id)) { seen.set(b.id, b); fresh++; }
+    if (batch.length < 100 || fresh === 0) break;
+    before = Math.min(...batch.map((b) => b.id));
+  }
+  return [...seen.values()];
+}
+
 const hist = await get<{ id: number; total_tickets: string; total_participants: number; ended_at: string | null }[]>("epoch/history?limit=3");
 const live = hist.find((h) => h.ended_at === null) ?? hist[0]!;
-const parts = await get<{ authority: string; tickets: string }[]>(`epoch/iterations/${live.id}/participants?limit=500`);
+const parts = await allParticipants<{ id: number; authority: string; tickets: string }>(live.id);
 // One block per wallet — the API lists entries; a wallet that topped up has several.
 const byWallet = new Map<string, number>();
 for (const p of parts) byWallet.set(p.authority, (byWallet.get(p.authority) ?? 0) + Number(p.tickets));

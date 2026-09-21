@@ -17,6 +17,17 @@
 export interface TokenFeedOptions {
   /** `https://api.satrush.io/api/v1` — no trailing slash. */
   apiUrl: string;
+  /**
+   * Independent price source for the RUSH mint (Jupiter price API v3 by
+   * default; DexScreener also serves it). The app marks RUSH from the Orca
+   * pool itself, so a second reader of the same market is a check on the
+   * app's marking, not on the market. Empty string disables the check.
+   */
+  dexPriceUrl?: string | undefined;
+  /** RUSH mint address, for the DEX lookup. */
+  tokenMint?: string | undefined;
+  /** Reject the quote when |api/dex − 1| exceeds this (default 5%). */
+  maxPriceDivergence?: number | undefined;
   /** Cold-start values (and what a never-live feed reports). */
   fallback: { tokenUsd: number; mintRushPerUsd: number };
   pollMs?: number | undefined;
@@ -41,6 +52,10 @@ export interface TokenFeedStatus {
   /** App-reported vault carry, simple APR as a fraction; null until read. */
   satsVaultApr: number | null;
   tokenVaultApr: number | null;
+  /** Independent DEX quote for RUSH (null when the check is off or unreachable). */
+  dexUsd: number | null;
+  /** api/dex − 1 at the last accepted read; null when unchecked. */
+  priceDivergence: number | null;
 }
 
 export interface BoardMintSample {
@@ -121,6 +136,8 @@ export class TokenFeed {
   private sampleRounds = 0;
   private satsApr: number | null = null;
   private tokenApr: number | null = null;
+  private dexUsdValue: number | null = null;
+  private divergence: number | null = null;
   private timer: NodeJS.Timeout | null = null;
   private lastWarn = "";
 
@@ -159,6 +176,8 @@ export class TokenFeed {
       mintSampleRounds: this.sampleRounds,
       satsVaultApr: this.satsApr,
       tokenVaultApr: this.tokenApr,
+      dexUsd: this.dexUsdValue,
+      priceDivergence: this.divergence,
     };
   }
 
@@ -182,6 +201,28 @@ export class TokenFeed {
         "token feed quote rejected — holding last values",
       );
       return;
+    }
+    // Cross-check the app's marking against an independent reader of the
+    // market. A DEX read that fails is not a rejection (the app's number
+    // stands, unchecked); a DEX read that disagrees is.
+    const dexUrl = this.dexUrl();
+    if (dexUrl) {
+      let dex: number | null = null;
+      try {
+        dex = parseDexPrice(await (this.opts.fetchJson ?? defaultFetchJson)(dexUrl), this.opts.tokenMint ?? "");
+      } catch (err) {
+        this.warn({ err: String(err) }, "dex price read failed — api price unchecked this poll");
+      }
+      if (dex !== null) {
+        const div = (parsed.tokenUsd as number) / dex - 1;
+        this.dexUsdValue = dex;
+        this.divergence = div;
+        if (Math.abs(div) > (this.opts.maxPriceDivergence ?? 0.05)) {
+          this.liveFlag = false;
+          this.warn({ apiUsd: parsed.tokenUsd, dexUsd: dex, divergence: div }, "api RUSH price disagrees with the DEX — holding last values");
+          return;
+        }
+      }
     }
     this.tokenUsdValue = parsed.tokenUsd as number;
     this.mintRate = parsed.mintRushPerUsd as number;
@@ -207,12 +248,36 @@ export class TokenFeed {
     this.timer = null;
   }
 
+  private dexUrl(): string | null {
+    if (this.opts.dexPriceUrl === "") return null;
+    if (!this.opts.tokenMint) return null;
+    return (this.opts.dexPriceUrl ?? "https://lite-api.jup.ag/price/v3?ids=") + this.opts.tokenMint;
+  }
+
   private warn(obj: Record<string, unknown>, msg: string): void {
     const key = `${msg}:${JSON.stringify(obj)}`;
     if (key === this.lastWarn) return; // one line per distinct condition, not per poll
     this.lastWarn = key;
     this.opts.log?.(obj, msg);
   }
+}
+
+/** Jupiter price v3 (`{ [mint]: { usdPrice } }`) or DexScreener (`{ pairs: [{ priceUsd }] }`). */
+export function parseDexPrice(payload: unknown, mint: string): number | null {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  const byMint = (p[mint] ?? {}) as Record<string, unknown>;
+  const jup = Number(byMint["usdPrice"] ?? byMint["price"]);
+  if (Number.isFinite(jup) && jup > 0) return jup;
+  const pairs = p["pairs"];
+  if (Array.isArray(pairs)) {
+    // Deepest pool first: the app marks from Orca, and the deepest pair is the market.
+    const best = [...pairs]
+      .map((x) => x as Record<string, unknown>)
+      .sort((a, b) => Number(((b["liquidity"] ?? {}) as Record<string, unknown>)["usd"] ?? 0) - Number(((a["liquidity"] ?? {}) as Record<string, unknown>)["usd"] ?? 0))[0];
+    const px = Number(best?.["priceUsd"]);
+    if (Number.isFinite(px) && px > 0) return px;
+  }
+  return null;
 }
 
 function within(v: number, [lo, hi]: [number, number]): boolean {

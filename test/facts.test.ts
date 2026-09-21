@@ -160,7 +160,7 @@ describe("describe() surfaces provenance in one line", () => {
     expect(describeFact("EXAMPLE", f)).toContain("ASSUMED");
   });
   it("dates measurements", () => {
-    expect(describeFact("EPOCH_DEDUP_UPLIFT", EPOCH_DEDUP_UPLIFT)).toContain("n=85");
+    expect(describeFact("EPOCH_DEDUP_UPLIFT", EPOCH_DEDUP_UPLIFT)).toContain("n=267");
   });
   it("names the pool constant's units", () => {
     expect(describeFact("EPOCH_LAST_CLOSE_POOL_USD", EPOCH_LAST_CLOSE_POOL_USD))

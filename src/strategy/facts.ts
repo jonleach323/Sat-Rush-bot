@@ -193,13 +193,13 @@ export const STRIKE_BOOST_WINDOW_ROUNDS = fact(STRIKE_BOOST_ROUNDS, "rounds", {
  * Fraction of the epoch field funded by hashrate banked before the iteration
  * opened, and so insensitive to current volume.
  */
-export const EPOCH_FIELD_BANKED_SHARE = fact(0.128, "fraction", {
+export const EPOCH_FIELD_BANKED_SHARE = fact(0.107, "fraction", {
   kind: "measured",
-  source: "pnpm epoch-history: tickets bought in the first tenth of each iteration over its total, "
-    + "iterations 8–13 (5.0%…23.3%); buying is back-loaded so this proxy is a floor on the banked share",
-  at: "2026-09-11",
-  n: 6,
-  stderr: 0.033,
+  source: "pnpm epoch-history (paginated): tickets bought in the first tenth of each iteration over its total, "
+    + "iterations 12–15 (3.0%…18.6%); buying is back-loaded so this proxy is a floor on the banked share",
+  at: "2026-09-21",
+  n: 4,
+  stderr: 0.039,
   halfLifeDays: 7,
   recheck: "pnpm epoch-history",
 });
@@ -212,33 +212,35 @@ export const EPOCH_FIELD_BANKED_SHARE = fact(0.128, "fraction", {
  * the field's shape moves. The live field is 52 wallets against 21 winner
  * slots, a far more favourable regime than the 127 this was measured on.
  */
-export const EPOCH_DEDUP_UPLIFT = fact(3.31, "multiple", {
+export const EPOCH_DEDUP_UPLIFT = fact(1.37, "multiple", {
   kind: "measured",
-  source: "pnpm epoch-uplift: 21-draw simulation on the live V2 field (iteration 14: 85 wallets, top-1 32%, "
-    + "top-10 79%) under the equal-prize curve — 3.47x at 144 tickets, 3.31x at 500, 2.59x at 2000",
-  at: "2026-09-11",
-  n: 85,
+  source: "pnpm epoch-uplift (paginated field): 21-draw simulation on iteration 16 (267 wallets, 429,819 tickets, "
+    + "top-1 9.0%, top-10 45.3%) under the equal-prize curve — 1.46x at 144 tickets, 1.37x at 500 and 2000. "
+    + "Launch week's 3.3x was an 85-wallet field with a 32% whale; the field has tripled and flattened since",
+  at: "2026-09-21",
+  n: 267,
   stderr: 0.10,
   halfLifeDays: 3,
   recheck: "pnpm epoch-uplift",
 });
 
 /** Ticket count at the last COMPLETE epoch draw. Anchors field projection. */
-export const EPOCH_LAST_CLOSE_TICKETS = fact(458_473, "tickets", {
+export const EPOCH_LAST_CLOSE_TICKETS = fact(882_469, "tickets", {
   kind: "measured",
-  source: "pnpm epoch-history: API epoch/history, iteration 13 (triggered 2026-09-09T18:02Z); "
-    + "the six closes before it ranged 174k–693k",
-  at: "2026-09-11",
+  source: "pnpm epoch-history (paginated participants): iteration 15, 369 wallets, closed 2026-09-18; "
+    + "iteration 14 closed at 1,098,101 (441 wallets), 13 at 458,473 (90)",
+  at: "2026-09-21",
   n: 1,
   halfLifeDays: 3,
   recheck: "pnpm epoch-history",
 });
 
 /** Pool at that same draw, USD. */
-export const EPOCH_LAST_CLOSE_POOL_USD = fact(11_458, "USD", {
+export const EPOCH_LAST_CLOSE_POOL_USD = fact(27_798, "USD", {
   kind: "measured",
-  source: "pnpm epoch-history: pool_combined_usd_amount of iteration 13 at its draw (USD + BTC legs)",
-  at: "2026-09-11",
+  source: "pnpm epoch-history: pool_combined_usd_amount of iteration 15 at its draw (USD + BTC legs); "
+    + "21 equal prizes of $1,192 = 0.9 × pool / 21, verified (iteration 14: 21 × $1,712)",
+  at: "2026-09-21",
   n: 1,
   halfLifeDays: 3,
   recheck: "pnpm epoch-history",
@@ -359,14 +361,34 @@ export const RUSH_MINT_PER_USD_VOLUME = fact(1 / 500, "RUSH per USD of gross vol
  * not monotone at the round scale. Treat the yield as falling until a day of
  * readings says otherwise: a one-day half-life, re-measured every run.
  */
-export const RUSH_MINT_USD_YIELD = fact(0.0137, "USD of RUSH per USD of gross volume", {
+export const RUSH_MINT_USD_YIELD = fact(0.0173, "USD of RUSH per USD of gross volume", {
   kind: "measured",
-  source: "minted_token_amount × prices.token / total_gross_deployed_usd over V2 rounds 55440–55446 (spot at read)",
-  at: "2026-09-11",
-  n: 6,
-  stderr: 0.00005,
+  source: "pnpm mint-rule: 0.405 RUSH per $1k of gross (n=300 settled rounds 56580–68540, ratio CV 5%) × $42.60 spot 2026-09-21",
+  at: "2026-09-21",
+  n: 300,
+  stderr: 0.0002,
   halfLifeDays: 1,
-  recheck: "pnpm v2-strategy",
+  recheck: "pnpm mint-rule",
+});
+
+/**
+ * The mint RULE, settled: RUSH minted is PROPORTIONAL to the round's gross
+ * (M = 0.0075 + 0.3626·V/1000, R² 0.996 over 300 rounds; the ratio's CV is
+ * 5% against 70% for volume). A fixed-per-round mint would have made thin
+ * rounds pay more per dollar and rewarded timing; it does not — thin rounds
+ * pay 0.416 vs 0.386 RUSH/$1k on fat ones, a difference of 8% that the
+ * upward drift over the sample explains. Timing the mint is worth nothing.
+ */
+export const RUSH_MINT_PER_USD = fact(0.000405, "RUSH per USD of gross", {
+  kind: "measured",
+  source: "pnpm mint-rule: slope 0.3626 ± 0.0014 RUSH/$1k, intercept 0.0075 RUSH; mean ratio 0.4047/$1k; "
+    + "rising +0.0070 RUSH/$1k per day (+1.74%/day of the mean) over 2026-09-12→21 — the owner said the ratio "
+    + "would fall; it has risen 40% since launch (0.29 → 0.40)",
+  at: "2026-09-21",
+  n: 300,
+  stderr: 0.0000014,
+  halfLifeDays: 1,
+  recheck: "pnpm mint-rule",
 });
 
 /**
@@ -381,15 +403,15 @@ export const RUSH_MINT_USD_YIELD = fact(0.0137, "USD of RUSH per USD of gross vo
  * which is churn, not a rate. It is a transfer from leavers and decays as
  * they run out; the one-day half-life says so. BTC-denominated.
  */
-export const SATS_VAULT_CARRY_DAILY = fact(0.0025, "fraction of share value per day", {
+export const SATS_VAULT_CARRY_DAILY = fact(0.0030, "fraction of share value per day", {
   kind: "measured",
-  source: "pnpm vault-carry: settlement ratio series, the two 6 h buckets before the V2 cutover " +
-    "(2026-09-10 03:17–15:17 UTC, rounds 54286–54916) ran +0.057%/day and +0.276%/day; the 14.5 h to the cutover +0.33%/day. " +
-    "V2 day one ran +8–9%/day on 28% of the shares exiting — churn, not a rate (FINDINGS E-v2-carry)",
-  at: "2026-09-11",
-  n: 22,
-  stderr: 0.0012,
-  halfLifeDays: 1,
+  source: "pnpm vault-carry: settlement ratio series rounds 64580–68540 (2026-09-18→21, 2.94 d, 67 samples): "
+    + "+0.301%/day with no step changes; 6 h buckets 0.05–0.73%/day. Launch week (28% of shares exiting in a day) "
+    + "is over; the pre-cutover V1 tail ran 0.06–0.33%/day (FINDINGS E-v2-carry)",
+  at: "2026-09-21",
+  n: 67,
+  stderr: 0.0007,
+  halfLifeDays: 3,
   recheck: "pnpm vault-carry",
 });
 
@@ -400,14 +422,61 @@ export const SATS_VAULT_CARRY_DAILY = fact(0.0025, "fraction of share value per 
  * launch rate, recorded so the ledger can show what it is worth if it held,
  * with a half-life that forces a re-measure before it is believed twice.
  */
-export const TOKEN_VAULT_CARRY_DAILY = fact(0.073, "fraction of share value per day", {
+export const TOKEN_VAULT_CARRY_DAILY = fact(0.0024, "fraction of share value per day", {
   kind: "measured",
-  source: "pnpm vault-carry: token settlement ratio series rounds 55124–55574 (2026-09-10/11), base drift excl. >0.5% steps",
-  at: "2026-09-11",
-  n: 16,
-  stderr: 0.03,
-  halfLifeDays: 1,
+  source: "pnpm vault-carry: token settlement ratio series rounds 64580–68540 (2026-09-18→21, 2.94 d, 67 samples): "
+    + "+0.238%/day, no step changes; the airdrop exits of launch day (+35%/day, 57% of shares gone) are over",
+  at: "2026-09-21",
+  n: 67,
+  stderr: 0.0006,
+  halfLifeDays: 3,
   recheck: "pnpm vault-carry",
+});
+
+/**
+ * What the staking treasury pays a staked RUSH: cbBTC from the buybacks'
+ * staking share, streamed to stakers — a yield from VOLUME, unlike the vault
+ * carry, which is a transfer from leavers. Lifetime average since the stream
+ * opened, so a window rate, not the last day's; the app's own `apr` (54%)
+ * is lower, its window unpublished.
+ */
+export const STAKING_YIELD_DAILY = fact(0.00224, "fraction of staked value per day", {
+  kind: "measured",
+  source: "pnpm staking-yield: /staking/treasury total_reward_deposited 0.0851 BTC over 10.4 d on $297k staked "
+    + "(6,969 RUSH at $42.60, 221 stakers)",
+  at: "2026-09-21",
+  n: 1,
+  stderr: 0.0005,
+  halfLifeDays: 7,
+  recheck: "pnpm staking-yield",
+});
+
+/**
+ * Rival timing on V2 rounds. 93% of gross is automation firing at round
+ * open, and NO deploy of any kind lands in the last 40 s of a 92 s round:
+ * the board the bot sees at its fire offset is the final board. Manual
+ * deploys land at the 59 s mark (median). Volume is $121/round gross,
+ * down from $580 at launch; 87% of it is all-21-tile blankets.
+ */
+export const V2_BOARD_FINAL_BEFORE_CUTOFF_S = fact(40, "seconds", {
+  kind: "measured",
+  source: "pnpm v2-timing: 100 rounds 68443–68542, 4,880 deploys; 100.0% of final gross on the table 40 s before cutoff, "
+    + "0.02 deploys/round after; automations at 90 s (10th–90th 87–92 s), manuals at 59 s (58–82 s)",
+  at: "2026-09-21",
+  n: 100,
+  stderr: 0,
+  halfLifeDays: 7,
+  recheck: "pnpm v2-timing",
+});
+
+export const V2_AUTOMATION_GROSS_SHARE = fact(0.933, "fraction of round gross", {
+  kind: "measured",
+  source: "pnpm v2-timing: 100 rounds 68443–68542; blankets (all 21 tiles) carry 86.7% of gross",
+  at: "2026-09-21",
+  n: 100,
+  stderr: 0.01,
+  halfLifeDays: 7,
+  recheck: "pnpm v2-timing",
 });
 
 /**
@@ -490,8 +559,12 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   RUSH_LAUNCH_PRICE_USD,
   RUSH_MINT_PER_USD_VOLUME,
   RUSH_MINT_USD_YIELD,
+  RUSH_MINT_PER_USD,
   SATS_VAULT_CARRY_DAILY,
   TOKEN_VAULT_CARRY_DAILY,
+  STAKING_YIELD_DAILY,
+  V2_BOARD_FINAL_BEFORE_CUTOFF_S,
+  V2_AUTOMATION_GROSS_SHARE,
   V2_BUYBACKS_FEE_BPS,
   EPOCH_WINNER_SLOTS,
 });

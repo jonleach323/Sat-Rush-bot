@@ -165,6 +165,9 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
         apiUrl: cfg.SATRUSH_API_URL,
         fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
         pollMs: 0,
+        dexPriceUrl: cfg.DEX_PRICE_URL,
+        tokenMint: satrushConfig.token_mint.toBase58(),
+        maxPriceDivergence: cfg.TOKEN_PRICE_MAX_DIVERGENCE,
       });
       await feed.refresh();
       const st = feed.status();
@@ -172,7 +175,7 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
         "token_feed_live",
         st.live,
         st.live
-          ? `RUSH $${st.tokenUsd.toFixed(2)} × ${(st.mintRushPerUsd * 1000).toFixed(3)} RUSH/$1k over ${st.mintSampleRounds} rounds → yield ${(st.yieldPerVolume * 100).toFixed(2)}% of volume`
+          ? `RUSH $${st.tokenUsd.toFixed(2)}${st.dexUsd !== null ? ` (DEX $${st.dexUsd.toFixed(2)}, ${((st.priceDivergence ?? 0) * 100).toFixed(1)}% apart)` : " (unchecked)"} × ${(st.mintRushPerUsd * 1000).toFixed(3)} RUSH/$1k over ${st.mintSampleRounds} rounds → yield ${(st.yieldPerVolume * 100).toFixed(2)}% of volume`
           : `API ${cfg.SATRUSH_API_URL} not answering — token leg priced at the fallback (${(st.yieldPerVolume * 100).toFixed(2)}%)`,
         false,
       );

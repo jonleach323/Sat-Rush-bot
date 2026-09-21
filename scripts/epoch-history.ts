@@ -17,13 +17,29 @@ const get = async <T>(p: string): Promise<T> =>
 const usd = (n: number): string => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
 interface Iter { id: number; pool_combined_usd_amount: number | null; total_participants: number; total_tickets: string; started_at: string; triggered_at: string | null; ended_at: string | null }
-interface Part { authority: string; tickets: string; created_at: string; is_won: boolean | null; rank: number | null; won_combined_usd_amount: number | null }
+interface Part { id: number; authority: string; tickets: string; created_at: string; is_won: boolean | null; rank: number | null; won_combined_usd_amount: number | null }
+
+
+async function allParticipants<T extends { id: number }>(iterationId: number): Promise<T[]> {
+  // Pages are newest-first; `before` walks back by entry id. Dedupe by id in
+  // case a page boundary moves under us.
+  const seen = new Map<number, T>();
+  let before: number | undefined;
+  for (let page = 0; page < 200; page++) {
+    const batch = await get<T[]>(`epoch/iterations/${iterationId}/participants?limit=100${before !== undefined ? `&before=${before}` : ""}`);
+    let fresh = 0;
+    for (const b of batch) if (!seen.has(b.id)) { seen.set(b.id, b); fresh++; }
+    if (batch.length < 100 || fresh === 0) break;
+    before = Math.min(...batch.map((b) => b.id));
+  }
+  return [...seen.values()];
+}
 
 const hist = await get<Iter[]>(`epoch/history?limit=${N + 1}`);
 console.log("  iter   status    participants   tickets      pool        duration    bought in first 10%   prizes (min…max of 21)");
 const closed: { id: number; tickets: number; pool: number; banked: number }[] = [];
 for (const it of hist) {
-  const parts = await get<Part[]>(`epoch/iterations/${it.id}/participants?limit=500`);
+  const parts = await allParticipants<Part>(it.id);
   const start = Date.parse(it.started_at);
   const end = it.triggered_at ? Date.parse(it.triggered_at) : Date.now();
   const tenth = start + (end - start) / 10;

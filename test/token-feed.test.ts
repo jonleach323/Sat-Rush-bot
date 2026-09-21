@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseBoardPayload, TokenFeed } from "../src/ingest/token-feed.js";
+import { parseBoardPayload, parseDexPrice, TokenFeed } from "../src/ingest/token-feed.js";
 
 // Shape of GET /v1/board as served on 2026-09-11 (amounts in base units:
 // USD 6 decimals, RUSH 9 decimals).
@@ -88,3 +88,53 @@ describe("TokenFeed", () => {
     expect(warnings.length).toBe(2);
   });
 });
+
+describe("DEX price cross-check", () => {
+  const MINT = "SATqS9DYpLQsM2z51P4QCoqJRHa5wboV4qjJerJRUSH";
+  it("parses Jupiter v3 and DexScreener payloads (deepest pool wins)", () => {
+    expect(parseDexPrice({ [MINT]: { usdPrice: 42.15, decimals: 9 } }, MINT)).toBeCloseTo(42.15, 6);
+    expect(parseDexPrice({ pairs: [{ priceUsd: "43.10", liquidity: { usd: 595 } }, { priceUsd: "42.16", liquidity: { usd: 537570 } }] }, MINT)).toBeCloseTo(42.16, 6);
+    expect(parseDexPrice({}, MINT)).toBeNull();
+  });
+
+  it("holds the last values when the app's price disagrees with the DEX, and accepts when it agrees", async () => {
+    let dex = 42.0;
+    const feed = new TokenFeed({
+      apiUrl: "https://api.example/v1",
+      fallback: { tokenUsd: 0, mintRushPerUsd: 0 },
+      pollMs: 0,
+      maxAgeMs: 1000,
+      dexPriceUrl: "https://dex.example/?ids=",
+      tokenMint: MINT,
+      maxPriceDivergence: 0.05,
+      fetchJson: async (url: string) => (url.startsWith("https://dex.example") ? { [MINT]: { usdPrice: dex } } : payload),
+      now: () => 5,
+    });
+    await feed.refresh();
+    let s = feed.status();
+    expect(s.live).toBe(false); // 51.1 vs 42.0 is a 22% gap
+    expect(s.tokenUsd).toBe(0);
+    dex = 50.5;
+    await feed.refresh();
+    s = feed.status();
+    expect(s.live).toBe(true);
+    expect(s.dexUsd).toBeCloseTo(50.5, 6);
+    expect(s.priceDivergence).toBeCloseTo(51.107912 / 50.5 - 1, 6);
+  });
+
+  it("a DEX read failure leaves the app's price unchecked rather than rejected", async () => {
+    const feed = new TokenFeed({
+      apiUrl: "https://api.example/v1",
+      fallback: { tokenUsd: 0, mintRushPerUsd: 0 },
+      pollMs: 0,
+      dexPriceUrl: "https://dex.example/?ids=",
+      tokenMint: MINT,
+      fetchJson: async (url: string) => { if (url.startsWith("https://dex.example")) throw new Error("timeout"); return payload; },
+      now: () => 5,
+    });
+    await feed.refresh();
+    expect(feed.status().live).toBe(true);
+    expect(feed.status().dexUsd).toBeNull();
+  });
+});
+

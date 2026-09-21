@@ -85,6 +85,7 @@ describe("CandidateSet with a wallet set", () => {
     expect(best.legs.reduce((a, l) => a + l.amountGross, 0n)).toBe(best.selection.totalGross);
     expect(new Set(best.legs.map((l) => l.wallet)).size).toBe(3);
     expect(best.signature).toBe(best.legs[0]!.signature);
+    expect(best.legs.every((l) => l.grubstake === false)).toBe(true);
     // Every leg is signed by its own wallet and deploys under its own PDAs.
     for (const leg of best.legs) {
       const tx = VersionedTransaction.deserialize(leg.serialized);
@@ -205,3 +206,33 @@ describe("WalletSet.refreshBalances", () => {
     ]);
   });
 });
+
+describe("grubstake-funded legs", () => {
+  it("pays a leg from the Miner grubstake when the callback says so, and flags it", async () => {
+    const set = makeSet(2);
+    const [a] = set.pubkeys();
+    const cs = new CandidateSet({
+      connection: conn,
+      payer: set.primary().keypair,
+      wallets: set,
+      fundingFloor: { minDeployBase: usdToBase(1), minLamports: 0 },
+      grubstakeFor: (w) => w.equals(a!),
+      ixCtx,
+      feeEstimator,
+      computeUnitLimit: 400_000,
+    });
+    const built = await cs.refresh(45, chaseCtx(), selCfg(4));
+    const legs = built[0]!.legs;
+    const legA = legs.find((l) => l.wallet === a!.toBase58())!;
+    const legB = legs.find((l) => l.wallet !== a!.toBase58())!;
+    expect(legA.grubstake).toBe(true);
+    expect(legB.grubstake).toBe(false);
+    const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
+    const txA = VersionedTransaction.deserialize(legA.serialized);
+    const keysA = txA.message.staticAccountKeys.map((k) => k.toBase58());
+    // grubstake leg: the funding ATA is the Miner PDA's, not the wallet's
+    expect(keysA).toContain(getAssociatedTokenAddressSync(ixCtx.usdMint, minerPda(a!), true).toBase58());
+    expect(keysA).not.toContain(getAssociatedTokenAddressSync(ixCtx.usdMint, a!).toBase58());
+  });
+});
+

@@ -1463,3 +1463,93 @@ set far more by the wallet count than by its ticket share. That is the
 mechanism the wallet set is built on (§ E-v2-sdk, `pnpm wallet-set`).
 Sensitive to concentration; the fact keeps its 3-day half-life.
 
+## E-v2-week2: ten days in — the mint rule, the field, the carry, the timing, all re-measured from the API (2026-09-21)
+
+Every fact with a short half-life had expired, and the answers to the open
+strategy questions were all measurable from the public API, so this pass
+replaced guesses with measurements. Four new scripts (`pnpm mint-rule`,
+`pnpm v2-timing`, `pnpm staking-yield`, and the paginated `pnpm
+epoch-history` / `pnpm epoch-uplift`) produced them.
+
+### The mint is a RATE, and it is rising
+
+```
+  300 settled rounds 56580…68540 (9.2 d), gross $238/round mean (CV 70%)
+  M = 0.0075 + 0.3626·(V/$1k) RUSH      R² 0.996      RUSH per $1k: mean 0.405, CV 5%
+  thin third $120 → 0.416/$1k · middle $174 → 0.412 · fat $420 → 0.386
+  drift +0.0070 RUSH/$1k per day (+1.74%/day of the mean)
+```
+
+Proportional to volume, not fixed per round: timing thin rounds is worth
+nothing (the 8% thin/fat gap is the drift over the sample). And the rate
+has RISEN 40% since launch, 0.29 → 0.40 RUSH per $1k, while the owner said
+it would fall. At $42.5 that is a 1.7–1.8% token yield against 1.4% on
+launch day. `RUSH_MINT_PER_USD` carries the rule; `RUSH_MINT_USD_YIELD` the
+yield; both one-day half-lives, because the drift is real.
+
+### The field tripled and flattened; equal prizes verified twice
+
+```
+  iter   wallets   tickets       pool      first-tenth   21 prizes
+    16    267 (live)  429,819     open       26.0%
+    15    369         882,469   $27,798      16.2%       $1,192 each = 0.9 × 27,798 / 21 ✓
+    14    441       1,098,101   $39,940       3.0%       $1,712 each = 0.9 × 39,940 / 21 ✓
+    13     90         458,473   $11,458       5.0%       $176 … $3,667 (V1 rank curve)
+```
+
+The participants endpoint pages by 100 (`before=<entry id>`); the first
+pass read one page and undercounted every iteration since 13. Corrected:
+`EPOCH_LAST_CLOSE_TICKETS` 882,469, `EPOCH_LAST_CLOSE_POOL_USD` $27,798,
+`EPOCH_FIELD_BANKED_SHARE` 10.7% ± 3.9, and the dedup uplift on a 267-wallet
+field with a 9% top holder is **1.37x ± 0.10**, not launch week's 3.3x on 85
+wallets under a 32% whale. The uplift is a property of the field's shape
+and keeps its 3-day half-life.
+
+### The carry settled at its steady state
+
+```
+  sats vault  rounds 64580…68540 (2.94 d): +0.301%/day, no steps, buckets 0.05–0.73%/day   app apr 142%
+  token vault same window:                 +0.238%/day, no steps                            app apr 134%
+  staking treasury (lifetime): 0.0851 BTC on $297k staked over 10.4 d = 0.21–0.22%/day       app apr 54%
+```
+
+`SATS_VAULT_CARRY_DAILY` 0.30%, `TOKEN_VAULT_CARRY_DAILY` 0.24%, and a new
+`STAKING_YIELD_DAILY` 0.22%. Claiming token shares to stake never pays back
+the 10% exit fee: the vault carry matches the staking yield to within
+0.03%/day. Hold.
+
+### Rival timing: the board is final 40 s before cutoff
+
+```
+  100 rounds 68443…68542, 4,880 deploys, 230-slot (~92 s) rounds, $121 gross/round
+  automation share of gross 93.3% · all-21 blankets 86.7% of gross · single-tile 14% of deploys
+  final gross on the table: 95.5% at 60 s before cutoff, 100.0% at 40 s and after
+  automations fire at 90 s (round open); manual deploys at 59 s (10th–90th 58–82 s); none in the last 40 s
+```
+
+`V2_BOARD_FINAL_BEFORE_CUTOFF_S` 40, `V2_AUTOMATION_GROSS_SHARE` 0.933. The
+board the bot fires into at its 4-slot offset IS the final board, so
+`ENDGAME_CONVERGENCE` now defaults to 0 (V1's 0.5 was inventing occupancy
+that never arrives). Volume is down 5x from launch's $580/round.
+
+### What changed in the strategy on these numbers
+
+- The per-round decision now credits the hashrate a deploy earns
+  (`HASHRATE_DEPLOY_CREDIT_ENABLED` default on) at the measured epoch ticket
+  value under the equal curve with the 1.37x uplift, and the streak option
+  (`STREAK_OPTION_VALUE_ENABLED` default on) so the 2-round grace is priced.
+  This is the fleet ledger's epoch leg finally reaching the selector.
+- Kelly needs no change: it already sizes on the model's own per-outcome
+  returns, where a miss costs the 11% toll, so the feasible fraction is 1
+  and the bounded downside sizes near the cap by construction.
+- Grubstake USD (the exchanged affiliate rebate) funds a wallet's leg when it
+  covers the amount and is not about to expire; the primary exchanges its
+  affiliate points into grubstake on the sweep cadence. No hashrate on those
+  legs, by program rule.
+- The token feed cross-checks the app's RUSH price against Jupiter and
+  rejects the quote beyond 5% divergence (today: $42.15 on both).
+
+`pnpm v2-ledger 1000 21` on today's numbers: **−0.28% per dollar before the
+carry** (token leg 1.83%, epoch 1.11% at 106% recovery, strike 1.68%), and
+the sats carry alone covers that in about 10 days of holding.
+

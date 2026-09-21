@@ -24,6 +24,7 @@ import {
   buildClaimOneBtcReward,
   buildClaimSats,
   buildClaimToken,
+  buildExchangeAffiliatePoints,
   buildClaimUsd,
   buildDeployPublic,
   buildSelectEpochWinner,
@@ -54,6 +55,7 @@ import {
   satsVaultPda,
   tokenVaultPda,
   affiliatePda,
+  treasuryPda,
 } from "../src/adapter/pdas.js";
 
 const authority = Keypair.generate().publicKey;
@@ -607,3 +609,24 @@ describe("distribute_epoch_reward (V2 replaces claim_epoch_reward)", () => {
     ).toThrow(RangeError);
   });
 });
+
+describe("exchange_affiliate_points (V2)", () => {
+  const ix = buildExchangeAffiliatePoints(ctx, { authority, pointsAmount: 1_500_000n });
+
+  it("matches the IDL account list (affiliate's own miner credited from the treasury)", () => {
+    expectMatchesIdl("exchange_affiliate_points", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      affiliate: affiliatePda(authority),
+      miner: minerPda(authority),
+      treasury: treasuryPda(),
+      usd_mint: usdMint,
+      treasury_usd_ata: getAssociatedTokenAddressSync(usdMint, treasuryPda(), true),
+      miner_usd_ata: getAssociatedTokenAddressSync(usdMint, minerPda(authority), true),
+    });
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("exchange_affiliate_points");
+    expect((decoded?.data as { points_amount: BN }).points_amount.toString()).toBe("1500000");
+  });
+});
+

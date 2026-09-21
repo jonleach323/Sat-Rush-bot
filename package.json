@@ -50,7 +50,10 @@
     "v1:strike-concentration": "tsx scripts/v1/strike-concentration.ts",
     "v1:v2-edge": "tsx scripts/v1/v2-edge.ts",
     "v1:carry-check": "tsx scripts/v1/carry-check.ts",
-    "v1:full-accounting": "tsx scripts/v1/full-accounting.ts"
+    "v1:full-accounting": "tsx scripts/v1/full-accounting.ts",
+    "mint-rule": "tsx scripts/mint-rule.ts",
+    "staking-yield": "tsx scripts/staking-yield.ts",
+    "v2-timing": "tsx scripts/v2-timing.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

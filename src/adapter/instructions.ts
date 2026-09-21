@@ -37,6 +37,7 @@ import {
   satsVaultBtcAta,
   satsVaultPda,
   tokenVaultPda,
+  treasuryPda,
 } from "./pdas.js";
 
 /**
@@ -590,3 +591,45 @@ export function buildDistributeEpochReward(
     data: instructionCoder.encode("distribute_epoch_reward", { rank }),
   });
 }
+
+export interface ExchangeAffiliatePointsParams {
+  /** The affiliate's authority (only it may exchange). */
+  authority: PublicKey;
+  /** Points to convert (Affiliate.point_amount units). */
+  pointsAmount: bigint;
+}
+
+/**
+ * V2: convert accrued affiliate points into grubstake USD on the affiliate's
+ * own Miner (paid from the treasury into the Miner PDA's USD ATA, so the
+ * credit stays program-controlled). The Miner is created if absent.
+ */
+export function buildExchangeAffiliatePoints(
+  ctx: InstructionContext,
+  params: ExchangeAffiliatePointsParams,
+): TransactionInstruction {
+  const programId = ctx.programId ?? PROGRAM_ID;
+  const { authority } = params;
+  const miner = minerPda(authority, programId);
+  const treasury = treasuryPda(programId);
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(authority, true, true),
+      meta(satrushConfigPda(programId)),
+      meta(affiliatePda(authority, programId), true),
+      meta(miner, true),
+      meta(treasury, true),
+      meta(ctx.usdMint),
+      meta(getAssociatedTokenAddressSync(ctx.usdMint, treasury, true), true),
+      meta(getAssociatedTokenAddressSync(ctx.usdMint, miner, true), true),
+      meta(TOKEN_PROGRAM_ID),
+      meta(ASSOCIATED_TOKEN_PROGRAM_ID),
+      meta(SystemProgram.programId),
+    ],
+    data: instructionCoder.encode("exchange_affiliate_points", {
+      points_amount: toBn(params.pointsAmount, "points_amount"),
+    }),
+  });
+}
+

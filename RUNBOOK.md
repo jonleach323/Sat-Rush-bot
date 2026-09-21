@@ -370,6 +370,11 @@ operationally — everything else in this runbook still applies:
   leg landed. The kill switch and pause apply to the whole fleet.
 - **RPC load.** Do not point the bot at `rpc.satrush.io`: it rate-limits a
   poller within minutes (429 → Cloudflare 1015). Helius as before.
+- **Re-measure before any live start.** `pnpm mint-rule`, `pnpm vault-carry`,
+  `pnpm epoch-uplift`, `pnpm epoch-history`, `pnpm v2-timing`,
+  `pnpm staking-yield` refresh every short-lived fact; preflight refuses a
+  stale one. The mint rate drifts ~1.7% a day and the field's shape sets
+  the dedup uplift, so a week-old number is wrong, not approximate.
 - **Before the first live V2 round** (still outstanding): a real deploy +
   settle on a $1 stake with `MAX_PER_ROUND_USD=1`, watching the reconcile
   line; the first extra wallet's deploy (affiliate binding); and a vault

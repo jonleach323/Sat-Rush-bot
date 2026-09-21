@@ -198,6 +198,17 @@ it is how deployment rent and winnings come back.
   85-wallet field) feed the config defaults directly. V1-only research scripts
   live under `scripts/v1/` (`pnpm v1:<name>`) with a README mapping each to its
   V2 replacement; do not re-run their conclusions as current.
+- Week two (FINDINGS § E-v2-week2, 2026-09-21): the mint is PROPORTIONAL to
+  volume (R² 0.996; `pnpm mint-rule`), so timing thin rounds is worth nothing,
+  and the rate has risen 40% since launch (0.40 RUSH/$1k, yield 1.7–1.8%).
+  The board is final 40 s before cutoff (`pnpm v2-timing`; 93% automation),
+  so ENDGAME_CONVERGENCE defaults to 0. Carry settled at 0.30%/day (sats) and
+  0.24%/day (token); staking pays 0.22%/day, so never claim to stake
+  (`pnpm staking-yield`). The participants endpoint pages by 100 — the epoch
+  scripts paginate; uplift 1.37x on a 267-wallet field. The selector now
+  credits deploy hashrate and the streak option by default under V2, funds
+  legs from grubstake, exchanges affiliate points, and cross-checks the RUSH
+  price against Jupiter. Ledger: −0.28%/$ before carry with 21 wallets.
 
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned

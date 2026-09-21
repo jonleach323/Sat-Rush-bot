@@ -308,3 +308,24 @@ describe("vault carry on the share legs", () => {
   });
 });
 
+describe("Kelly on V2 outcome returns", () => {
+  it("the worst outcome is the toll, not the stake, so the feasible fraction is 1 (Kelly never throttles below the cap)", async () => {
+    const { kellyFraction } = await import("../src/strategy/kelly.js");
+    const econ = { feeLayerBps: 600, losingRefundBps: 8900, vaultExitFeeBps: 1000 };
+    const uniform = new Array<bigint>(TILES_COUNT).fill(usdToBase(20));
+    const alloc = new Array<bigint>(TILES_COUNT).fill(0n);
+    alloc[4] = usdToBase(5);
+    // Give the round a real edge (a fat carry) so Kelly has something to size.
+    const returns = outcomeReturnsV2({ predictedStakes: uniform, econ, mintedTokenValueBase: 0, tokenYieldPerVolume: 0.02, shareCarry: { sats: 1.5, token: 0 } }, alloc);
+    const worst = Math.min(...returns);
+    expect(worst).toBeGreaterThan(-0.2); // ≈ −11% toll, not −100%
+    expect(worst).toBeLessThan(0);
+    const f = kellyFraction(returns);
+    expect(f).toBeGreaterThan(0);
+    // The same edge with V1-shaped misses (−100% of stake) sizes far smaller:
+    // the bounded downside is what lets V2 stake near the cap.
+    const v1Shaped = returns.map((r) => (r < 0 ? -1 : r));
+    expect(kellyFraction(v1Shaped)).toBeLessThan(f / 3);
+  });
+});
+

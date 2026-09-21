@@ -111,6 +111,21 @@ const schema = z
       emptyToUndef,
       z.string().url().default("https://api.satrush.io/api/v1"),
     ),
+    /**
+     * Independent RUSH price for the token feed's cross-check (Jupiter price
+     * v3 by default; the RUSH mint is appended). The app marks RUSH from its
+     * own Orca pool, so this catches a wrong marking, not a moved market.
+     * Empty = no cross-check.
+     */
+    DEX_PRICE_URL: z.preprocess(
+      (v) => (typeof v === "string" ? v : undefined),
+      z.string().default("https://lite-api.jup.ag/price/v3?ids="),
+    ),
+    /** Reject the app's RUSH price when it differs from the DEX by more than this fraction. */
+    TOKEN_PRICE_MAX_DIVERGENCE: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0).max(1).default(0.05),
+    ),
     TOKEN_FEED_POLL_MS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(0).default(30_000),
@@ -249,11 +264,17 @@ const schema = z
     /** Endgame convergence ∈ [0,1]: fraction of the gap to the board's mean
      * stake that thin tiles are assumed to fill by close. Corrects the
      * predictor's proportional extrapolation (which forecasts ~zero inflow onto
-     * empty tiles and so overvalues sniping them). 0 = off. Calibrated from live
-     * data where wins paid ~2× vs the ~3.1× needed; revisit as the sample grows. */
+     * empty tiles and so overvalues sniping them). 0 = off.
+     *
+     * V1 calibrated 0.5 (wins paid ~2× vs the ~3.1× needed). V2 default 0:
+     * `pnpm v2-timing` measured 100.0% of final gross on the table 40 s
+     * before cutoff over 100 rounds, with 0.02 deploys/round after — the
+     * board the bot fires into IS the final board, and any convergence
+     * assumed on top of it is invented occupancy (facts.ts
+     * V2_BOARD_FINAL_BEFORE_CUTOFF_S). Re-measure before raising it. */
     ENDGAME_CONVERGENCE: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.5),
+      z.coerce.number().min(0).max(1).default(0),
     ),
     /** Minimum modeled edge to fire, in bps of the gross deploy. The selector
      * otherwise fires on any EV > 0, including thin edges a slightly-optimistic
@@ -564,6 +585,17 @@ const schema = z
      * deployed. Must have registered a tag (`set_miner_tag`) first.
      */
     AFFILIATE_AUTHORITY: optionalPubkey,
+    /**
+     * Fund a wallet's leg from its Miner grubstake (affiliate rebate / airdrop
+     * USD held by the program) when it covers the amount and has not expired.
+     * That money can only be realised by deploying it: the USD refund
+     * recycles into the grubstake, the BTC/RUSH legs escape as shares, and
+     * NO hashrate is credited on a grubstake-funded deploy. Off = deploy from
+     * the wallet and let an expiring grubstake lapse.
+     */
+    GRUBSTAKE_DEPLOYS: boolFromEnv(true),
+    /** Convert accrued affiliate points into grubstake USD on the primary's Miner (fee-free apart from the tx). */
+    AFFILIATE_EXCHANGE_ENABLED: boolFromEnv(true),
     /** Lamports a wallet must retain to be considered fundable for a round. */
     WALLET_MIN_LAMPORTS: z.preprocess(
       emptyToUndef,
@@ -648,8 +680,17 @@ const schema = z
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(EPOCH_FIELD_BANKED_SHARE.value),
     ),
-    HASHRATE_DEPLOY_CREDIT_ENABLED: boolFromEnv(false),
-    STREAK_OPTION_VALUE_ENABLED: boolFromEnv(false),
+    /**
+     * V2 DEFAULTS ON. Under V1 these backtested negative (a marginal round's
+     * hashrate was worth less than the board toll). Under V2 the toll is
+     * bounded at 11%, the epoch pays 21 equal slots, and the per-round
+     * credit for the hashrate a deploy earns (streak + 21/n raw per $, priced
+     * at the measured epoch ticket value with the dedup uplift) is what
+     * closes the gap between the −4% round-level EV and the fleet ledger.
+     * Set false to replay V1 or to judge rounds on the board alone.
+     */
+    HASHRATE_DEPLOY_CREDIT_ENABLED: boolFromEnv(true),
+    STREAK_OPTION_VALUE_ENABLED: boolFromEnv(true),
     /** Confidence haircut on the streak option value (0–1).
      *
      * The loss is real but projected: it assumes we keep deploying at this rate

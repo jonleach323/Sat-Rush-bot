@@ -29,7 +29,7 @@ describe("config defaults", () => {
     // Payout-dilution corrections are ON by default (they only make the bot
     // more selective): thin tiles converge toward the board mean, and a
     // minimum modeled edge is required to fire.
-    expect(cfg.ENDGAME_CONVERGENCE).toBeGreaterThan(0);
+    expect(cfg.ENDGAME_CONVERGENCE).toBe(0); // V2: the board is final at the fire offset (pnpm v2-timing)
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
     expect(cfg.MIN_EDGE_BPS).toBeGreaterThan(0);
     // Full Kelly by default (growth-maximizing); clamped at 1.0.

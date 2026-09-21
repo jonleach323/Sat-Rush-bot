@@ -58,6 +58,8 @@ export interface CandidateLeg {
   /** Signing wallet, base58. */
   wallet: string;
   amountGross: bigint;
+  /** Paid from the Miner grubstake rather than the wallet (no hashrate on this leg). */
+  grubstake: boolean;
   signature: string;
   serialized: Buffer;
   lastValidBlockHeight: number;
@@ -81,6 +83,12 @@ export interface CandidateSetOptions {
    * is refused on chain).
    */
   affiliateFor?: ((wallet: PublicKey) => PublicKey | undefined) | undefined;
+  /**
+   * Whether a wallet's leg of `amountGross` should be paid from its Miner
+   * grubstake (V2 `is_grubstake_funded`) instead of its USDC ATA. Called per
+   * leg; default: never.
+   */
+  grubstakeFor?: ((wallet: PublicKey, amountGross: bigint) => boolean) | undefined;
   ixCtx: InstructionContext;
   feeEstimator: FeeEstimator;
   computeUnitLimit: number;
@@ -296,12 +304,14 @@ export class CandidateSet {
     const legs: CandidateLeg[] = [];
     for (const { signer, amountGross } of split) {
       const affiliateAuthority = this.opts.affiliateFor?.(signer.publicKey);
+      const isGrubstakeFunded = this.opts.grubstakeFor?.(signer.publicKey, amountGross) === true;
       const instructions: TransactionInstruction[] = [
         buildDeployPublic(this.opts.ixCtx, {
           authority: signer.publicKey,
           roundId,
           selectionMask: selection.mask,
           amountBaseUnits: amountGross,
+          isGrubstakeFunded,
           ...(affiliateAuthority ? { affiliateAuthority } : {}),
         }),
       ];
@@ -336,6 +346,7 @@ export class CandidateSet {
       legs.push({
         wallet: signer.publicKey.toBase58(),
         amountGross,
+        grubstake: isGrubstakeFunded,
         signature: bs58.encode(tx.signatures[0]!),
         serialized: Buffer.from(tx.serialize()),
         lastValidBlockHeight,

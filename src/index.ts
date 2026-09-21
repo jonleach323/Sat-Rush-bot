@@ -27,6 +27,7 @@ import type {
   OneBtcVaultIteration,
   PublicAutomation,
   PublicDeployCreated,
+  Affiliate,
   PublicDeploySettled,
   Round,
   RoundRevealed,
@@ -38,6 +39,7 @@ import {
   buildDistributeEpochReward,
   buildClaimOneBtcReward,
   buildClaimSats,
+  buildExchangeAffiliatePoints,
   buildClaimUsd,
   buildSelectEpochWinner,
   buildSettleDeployPublic,
@@ -55,6 +57,7 @@ import {
   oneBtcVaultPda,
   satsVaultPda,
   tokenVaultPda,
+  affiliatePda,
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
@@ -409,6 +412,9 @@ export class Orchestrator {
         fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
         pollMs: cfg.TOKEN_FEED_POLL_MS,
         maxAgeMs: cfg.TOKEN_FEED_MAX_AGE_MS,
+        dexPriceUrl: cfg.DEX_PRICE_URL,
+        tokenMint: state.satrushConfig.token_mint.toBase58(),
+        maxPriceDivergence: cfg.TOKEN_PRICE_MAX_DIVERGENCE,
         log: (obj, msg) => logger.warn(obj, msg),
       });
       await tokenFeed.start();
@@ -437,9 +443,22 @@ export class Orchestrator {
     if (wallets.size > 1) await wallets.refreshBalances(connection, ixCtx.usdMint);
     const primaryKey = payer.publicKey;
     const affiliateAuthority = cfg.AFFILIATE_AUTHORITY ? new PublicKey(cfg.AFFILIATE_AUTHORITY) : primaryKey;
+    // Grubstake USD (affiliate rebate exchanged into the Miner, or an airdrop)
+    // can only be realised by deploying it, so it funds a leg whenever it
+    // covers the amount and has not expired — at the cost of that leg's
+    // hashrate. Read from the streamed Miner at build time.
+    const grubstakeFor = (w: PublicKey, amountGross: bigint): boolean => {
+      if (!cfg.GRUBSTAKE_DEPLOYS) return false;
+      const m = state.minerAt(minerPda(w, programId));
+      if (!m) return false;
+      const bal = BigInt(m.grubstake_usd_amount.toString());
+      const expires = Number(m.grubstake_expiration_timestamp.toString());
+      return bal >= amountGross && expires > Math.floor(Date.now() / 1000) + 120;
+    };
     const candidates = new CandidateSet({
       connection,
       payer,
+      grubstakeFor,
       ...(wallets.size > 1
         ? {
             wallets,
@@ -2403,9 +2422,36 @@ export class Orchestrator {
         await this.claimUsdCompound(w); // fee-free — the compound loop
         await this.claimSatsSweep(w); // fee-bearing (10% claim fee) — opt-in
       }
+      await this.exchangeAffiliatePoints(); // the primary's rebate → grubstake USD
     } finally {
       this.sweepInFlight = false;
     }
+  }
+
+  /**
+   * V2: the affiliate rebate the extras earn accrues as points on the
+   * primary's Affiliate account; exchanging converts them into grubstake USD
+   * on the primary's Miner, which `grubstakeFor` then deploys. Read by RPC on
+   * the sweep cadence (the Affiliate PDA is not streamed).
+   */
+  private async exchangeAffiliatePoints(): Promise<void> {
+    if (!this.cfg.AFFILIATE_EXCHANGE_ENABLED) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const authority = this.payer.publicKey;
+    let points = 0n;
+    try {
+      const info = await this.connection.getAccountInfo(affiliatePda(authority, programId), "processed");
+      if (!info) return; // no tag registered — nothing accrues
+      points = BigInt(decodeAccount<Affiliate>("Affiliate", info.data).point_amount.toString());
+    } catch {
+      return;
+    }
+    if (points <= 0n) return;
+    const outcome = await this.fireClaim(
+      buildExchangeAffiliatePoints(this.ixCtx, { authority, pointsAmount: points }),
+      { kind: "exchange_affiliate_points", points: points.toString() },
+    );
+    this.log.info({ points: points.toString(), outcome }, "affiliate points exchanged into grubstake");
   }
 
   /** A fleet wallet's Miner from the streamed state (null before its first deploy). */
