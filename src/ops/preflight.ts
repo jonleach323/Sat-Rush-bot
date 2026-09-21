@@ -167,12 +167,19 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
   // 5. economics within tolerance of the measured baseline
   if (satrushConfig) {
     const econ = compareEconomics(satrushConfig);
+    // Non-fatal: every fee leg is read from the config account at use time
+    // (and re-read on every on-chain change while running), so a moved split
+    // does not stale the model — it stales THIS baseline and the measured
+    // facts that depend on the split (epoch pool per ticket, strike pot
+    // growth). The owner announced a bigger strike cut on 2026-09-21; a
+    // fatal gate here would have refused the restart that carries the fix.
     gate(
       "economics_within_tolerance",
       econ.ok,
       econ.ok
         ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of the mainnet V2 baseline`
-        : `ECONOMICS CHANGED — EV model is stale: ${econ.deviations.join("; ")}`,
+        : `fee split moved on chain (model reads it live; re-baseline MEASURED_ECONOMICS and re-measure the epoch/strike facts): ${econ.deviations.join("; ")}`,
+      false,
     );
     // 5b. the model version must match the program on chain. A V2 config
     // carries a real token_mint; V1's layout decodes that slot as zeros.

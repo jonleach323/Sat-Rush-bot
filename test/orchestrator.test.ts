@@ -168,3 +168,28 @@ describe("ramp signal sizing (V2)", () => {
     expect(diag["unboostedDeployUsd"] as number).toBeGreaterThan(0);
   });
 });
+
+describe("on-chain config retune", () => {
+  it("a rewritten SatrushConfig is priced live: the state updates, the change is named, candidates re-price", async () => {
+    h = await bootHarness({ env: { GAME_VERSION: "v2" } });
+    const { encode, makeConfig } = await import("./harness/fixtures.js");
+    const { satrushConfigPda } = await import("../src/adapter/pdas.js");
+    const refresh = vi.spyOn(h.orch["candidates" as never] as { refresh: () => unknown }, "refresh");
+    const alerts: string[] = [];
+    vi.spyOn(h.orch, "alert").mockImplementation((m: string) => void alerts.push(m));
+    h.slotsTo(1_001);
+    await h.settle();
+    const before = refresh.mock.calls.length;
+    // The announced retune: a bigger strike cut, funded from the epoch leg, layer unchanged.
+    const retuned = await encode.config(makeConfig({ strike_fee_bps: 276, epoch_fee_bps: 68 }));
+    h.source.account(satrushConfigPda(h.programId), retuned, 1_002, h.programId, "wallet");
+    await h.settle(60);
+    expect(h.state.satrushConfig?.strike_fee_bps).toBe(276);
+    expect(alerts.some((a) => /strike_fee_bps 240→276/.test(a) && /epoch_fee_bps 104→68/.test(a))).toBe(true);
+    expect(refresh.mock.calls.length).toBeGreaterThan(before);
+    // The same values again: nothing to say.
+    h.source.account(satrushConfigPda(h.programId), retuned, 1_003, h.programId, "wallet");
+    await h.settle(30);
+    expect(alerts.filter((a) => /config changed/.test(a))).toHaveLength(1);
+  });
+});

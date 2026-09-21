@@ -57,6 +57,7 @@ import {
   minerPda,
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
+  satrushConfigPda,
   satsVaultPda,
   tokenVaultPda,
   affiliatePda,
@@ -619,6 +620,7 @@ export class Orchestrator {
     });
 
     const watch = [
+      satrushConfigPda(programId), // the fee split and durations: re-priced live when the owner moves them
       satsVaultPda(programId),
       tokenVaultPda(programId),
       ...wallets.pubkeys().map((w) => minerPda(w, programId)),
@@ -3268,6 +3270,41 @@ export class Orchestrator {
     }
   }
 
+  /** The fee split and durations as last seen, to name what changed when the config account is rewritten. */
+  private configSnapshot: Record<string, number> | null = null;
+  private static readonly CONFIG_WATCH_FIELDS = [
+    "strike_fee_bps", "epoch_fee_bps", "one_btc_fee_bps", "sats_vault_round_fee_bps", "vault_exit_fee_bps",
+    "protocol_fee_bps", "buybacks_fee_bps", "unclaimed_hashrate_bps", "strike_trigger_modulus",
+    "min_deploy_usd_amount", "epoch_vault_iteration_duration",
+  ] as const;
+
+  private configFields(): Record<string, number> | null {
+    const c = this.state.satrushConfig;
+    if (!c) return null;
+    return Object.fromEntries(Orchestrator.CONFIG_WATCH_FIELDS.map((f) => [f, Number((c as unknown as Record<string, { toString(): string }>)[f]?.toString() ?? 0)]));
+  }
+
+  /**
+   * The owner retunes the game in place (the 2026-09-17 split move, the
+   * announced strike-cut increase and weekly epochs). The model reads the
+   * config account at use time, so a change is priced from the next round;
+   * this names it, drops the per-round memos, re-prices, and alerts once.
+   */
+  private onConfigUpdate(): void {
+    const now = this.configFields();
+    if (!now) return;
+    const prev = this.configSnapshot;
+    this.configSnapshot = now;
+    if (!prev) return;
+    const changes = Orchestrator.CONFIG_WATCH_FIELDS.filter((f) => prev[f] !== now[f]).map((f) => `${f} ${prev[f]}→${now[f]}`);
+    if (changes.length === 0) return;
+    this.log.warn({ changes }, "on-chain SatrushConfig changed — re-pricing from the live values");
+    this.alert(`⚙ on-chain config changed: ${changes.join(", ")} — fee legs re-priced live from this round; preflight's MEASURED_ECONOMICS baseline and the epoch/strike facts want a re-measure`);
+    this.cycleMemo = null;
+    this.floatWantMemo = null;
+    if (this.roundId !== null) this.requestRefresh("config_change");
+  }
+
   /** Per-round memo of the boost-cycle pricing at the streak cap (see boostCycleAtCap). */
   private cycleMemo: {
     roundId: number | null;
@@ -3471,6 +3508,7 @@ export class Orchestrator {
         if (applied.kind === "Miner" || applied.kind === "SatsVault" || applied.kind === "TokenVault") {
           void this.maybeSweep();
         }
+        if (applied.kind === "SatrushConfig") this.onConfigUpdate();
       } catch (err) {
         if (err instanceof HaltError) {
           // Persist the halt (KILL file) so a restart can't resume on bad data.
@@ -3543,6 +3581,7 @@ export class Orchestrator {
       }
     });
 
+    this.configSnapshot = this.configFields();
     this.loop.start();
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
