@@ -36,6 +36,7 @@
  * has confirmed. Do not size epoch farming off this until it is settled.
  */
 import { TILES_COUNT } from "./ev.js";
+import { fleetEpochWinningsUsd, oneBtcWinningsUsd } from "./vault.js";
 import { REWARD_MAX_STREAK as REWARD_MAX_STREAK_FACT } from "./facts.js";
 
 /**
@@ -67,6 +68,24 @@ export interface HashrateValuation {
   /** Promo multiplier on earned hashrate (2 during the post-Strike window). */
   multiplier: number;
   /**
+   * Tiles each SIGNER actually covers when that differs from the allocation's
+   * tile count: the fleet's tile mode deploys a 21-tile allocation as 21
+   * single-tile legs, so every wallet earns (streak + 21/1) raw per $, not
+   * (streak + 21/21). Undefined = the allocation's own count.
+   */
+  coveredOverride?: number | undefined;
+  /**
+   * Price the hashrate on the DILUTION CURVE instead of the flat
+   * valueUsdPerRawUnit: the tickets this round's raw would accumulate if the
+   * same stake were repeated for `roundsHeld` rounds are valued against the
+   * field (epoch: fleet dedup closed form; 1-BTC: proportional), and the
+   * per-round credit is that total ÷ roundsHeld. The water-filler's marginal
+   * then bends down as our share grows — the "not too much" the flat price
+   * cannot express (it needed VAULT_MAX_SHARE as a hard brake). The flat price
+   * still applies to the deferred-hashrate path; the cap still applies on top.
+   */
+  dilution?: HashrateDilution | undefined;
+  /**
    * Raw units this round's deploy can actually be MONETISED into, i.e. converted
    * to vault tickets before the hashrate goes stale. Undefined = uncapped.
    *
@@ -92,6 +111,55 @@ export interface HashrateValuation {
  * marginal dollar earns hashrate we cannot spend and is therefore worth zero.
  * Water-filling relies on that concavity to stop at the right size.
  */
+export interface HashrateDilution {
+  /** Rounds the stake is expected to repeat over the vaults' horizon (≥ 1). */
+  roundsHeld: number;
+  /** Raw units per vault ticket (program constant, 100). */
+  rawPerTicket: number;
+  /** Tickets already held, added to the accumulation before valuing. */
+  ticketsHeld?: number | undefined;
+  epoch?: { othersTickets: number; poolUsd: number; wallets: number; curve: readonly number[]; uplift: number } | undefined;
+  /**
+   * The 1-BTC draw accumulates until the vault fills, not per epoch: its
+   * horizon is the rounds to the draw (`roundsToDraw`, default roundsHeld)
+   * and `othersTickets` the field projected at the draw.
+   */
+  oneBtc?: { othersTickets: number; prizeUsd: number; roundsToDraw?: number | undefined; ticketsHeld?: number | undefined } | undefined;
+}
+
+/**
+ * Value of `raw` hashrate units under the dilution curve, per the raw itself
+ * (not per round): the better vault's total for the tickets they buy on top
+ * of what is held, minus the value of what is held. Exported for tests.
+ */
+export function dilutedHashrateValueUsd(rawUnits: number, d: HashrateDilution): number {
+  return dilutedPerRoundValueUsd(rawUnits / Math.max(1, d.roundsHeld), d) * Math.max(1, d.roundsHeld);
+}
+
+/**
+ * Per-ROUND value of earning `rawPerRound` every round: each vault values the
+ * pile the stream builds over ITS horizon (epoch: rounds left in the
+ * iteration; 1-BTC: rounds to the draw), net of what is already held, spread
+ * back per round; the better vault wins. Concave in rawPerRound — that is the
+ * whole point.
+ */
+export function dilutedPerRoundValueUsd(rawPerRound: number, d: HashrateDilution): number {
+  if (!(rawPerRound > 0) || !(d.rawPerTicket > 0)) return 0;
+  const perRoundTickets = rawPerRound / d.rawPerTicket;
+  let best = 0;
+  if (d.epoch && d.epoch.poolUsd > 0) {
+    const rounds = Math.max(1, d.roundsHeld), held = Math.max(0, d.ticketsHeld ?? 0);
+    const v = (t: number) => fleetEpochWinningsUsd(t, d.epoch!.othersTickets, d.epoch!.poolUsd, d.epoch!.wallets, d.epoch!.curve, d.epoch!.uplift);
+    best = Math.max(best, (v(held + perRoundTickets * rounds) - v(held)) / rounds);
+  }
+  if (d.oneBtc && d.oneBtc.prizeUsd > 0) {
+    const rounds = Math.max(1, d.oneBtc.roundsToDraw ?? d.roundsHeld), held = Math.max(0, d.oneBtc.ticketsHeld ?? 0);
+    const v = (t: number) => oneBtcWinningsUsd(t, d.oneBtc!.othersTickets, d.oneBtc!.prizeUsd);
+    best = Math.max(best, (v(held + perRoundTickets * rounds) - v(held)) / rounds);
+  }
+  return Math.max(0, best);
+}
+
 export function hashrateRebateUsd(
   v: HashrateValuation,
   tilesCovered: number,
@@ -99,10 +167,14 @@ export function hashrateRebateUsd(
 ): number {
   if (!(grossUsd > 0)) return 0;
   if (v.valueUsdPerRawUnit === 0) return 0;
-  const rawPerUsd = hashrateRawPerUsd(v.streak, tilesCovered) * v.multiplier;
+  const rawPerUsd = hashrateRawPerUsd(v.streak, v.coveredOverride ?? tilesCovered) * v.multiplier;
   const earned = rawPerUsd * grossUsd;
   const cap = v.maxRawUnitsPerRound;
   const realisable = cap === undefined ? earned : Math.min(earned, Math.max(0, cap));
+  if (v.dilution && v.dilution.roundsHeld >= 1) {
+    // Each vault values the pile this round's raw builds over ITS horizon; one round's share comes back.
+    return dilutedPerRoundValueUsd(realisable, v.dilution);
+  }
   return realisable * v.valueUsdPerRawUnit;
 }
 
@@ -127,7 +199,7 @@ export function hashrateRebateFraction(
     throw new RangeError(`invalid multiplier: ${v.multiplier}`);
   }
   if (v.valueUsdPerRawUnit === 0) return 0;
-  return hashrateRawPerUsd(v.streak, tilesCovered) * v.multiplier * v.valueUsdPerRawUnit;
+  return hashrateRawPerUsd(v.streak, v.coveredOverride ?? tilesCovered) * v.multiplier * v.valueUsdPerRawUnit;
 }
 
 /**

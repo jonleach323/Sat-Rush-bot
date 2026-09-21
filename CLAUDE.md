@@ -140,6 +140,105 @@ Operational lesson (see FINDINGS.md interlude): the owner's settle crank can be
 offline for long stretches — SELF_SETTLE=true is load-bearing, not an optimization:
 it is how deployment rent and winnings come back.
 
+## V2 (program upgrade, cutover 2026-09-11) — READ V2-STRATEGY.md
+- The program is upgraded IN PLACE (same address) with account migrations. The
+  "Game facts" section above describes V1 (`satrush-v1.json`). `satrush.json`
+  is now the V2 IDL, REGENERATED from the SDK's Codama codecs by `pnpm idl:gen`
+  (`scripts/idl/gen-idl-from-sdk.ts`, which also emits
+  `src/adapter/generated-types.ts`) — never hand-edit either. `pnpm idl:verify`
+  decodes live mainnet accounts + a settled event through it and diffs the
+  deploy/settle builders against real transactions (FINDINGS.md § E-v2-idl).
+- `@satrush/client@0.1.15` (published 2026-09-10) is the V2 SDK and is pinned.
+  It settled the fee layer, the 89% losing-tile refund, the 5% sats leg, the
+  RUSH 64/16/14/6 split, the coupled 10% vault exit fee, equal epoch prizes and
+  the 2-round streak grace — see FINDINGS.md § E-v2-sdk. It does NOT contain the
+  mint program: the RUSH emission rule and price are measured, never assumed.
+- The V2 economics live in `src/strategy/ev-v2.ts` (`v2Model` plugs into the
+  unchanged selector through the `EvModel` swap point in `ev.ts`); the numbers
+  are `pnpm v2-strategy`. Sizing is on the 11% toll at risk, not the stake.
+- V2 IS LIVE (2026-09-11). FINDINGS.md § E-v2-live verified the model to the cent:
+  fee legs 208/194/48/100/50 bps (moved to 240/104/48/100/108 at round 64176,
+  2026-09-17; layer still 600), 89% losing-tile refund, swap = 5%·V + 89%·W_win,
+  RUSH legs pro-rata by stake, hashrate on gross at the cap. The mint program
+  (`sAtmiNt6…`) has no IDL and mints 1 RUSH per ~$3,600 (1.38% at spot), not the
+  stated 1 per $500 — `RUSH_MINT_USD_YIELD` has a one-day half-life for that reason.
+  Deploys must append the four rotor remaining accounts (`getRngRemainingAccounts`).
+  `GET /v1/rounds/{id}` returns per-deployment settlements: the reconcile tripwire
+  should be rebuilt on it. No docs exist outside the app; nothing publishes an IDL.
+- Built: adapter/IDL + builders (deploy with rotor accounts, settle with the
+  token leg, claim_token, distribute_epoch_reward replacing claim_epoch_reward),
+  preflight re-baseline, orchestrator wiring: `GAME_VERSION=v2` (default) routes
+  the selector through `v2Model` with the token yield from `src/ingest/token-feed.ts`
+  (API oracle price × mint rate measured over the last settled rounds; a feed
+  that is not live prices the RUSH leg at the configured fallback, default 0),
+  strike pot valued across USD/BTC/RUSH legs, streak grace in the presence
+  credit, and preflight gates `game_version_matches_chain` / `token_feed_live`.
+  Accounting/risk: settlements carry the RUSH leg, the daily-loss figure marks
+  the day's won shares (vault rate × live price × (1 − exit fee); unpriced RUSH
+  at 0) so V2 wins are not booked as losses, the tripwire checks the exact 89%
+  refund per deployment (`reconcileRoundOutcomeV2`), and the daily cap counts
+  the toll (`tollAtRiskFraction`, 11%) per stake while MAX_PER_ROUND stays on
+  gross. Wallet set: `WALLET_PATHS` adds signers behind the ONE orchestrator
+  (aggregate caps, one leg per wallet per round, per-wallet Miners/settles/
+  sweeps/vault engines, extras bound to `AFFILIATE_AUTHORITY` = the primary at
+  their first deploy). Dry-run on mainnet: FINDINGS.md § E-v2-dryrun — the
+  selector correctly skips every round at −4% EV.
+  Not yet live-tested: a real V2 send (deploy/settle verified against the tape
+  only), the affiliate binding, and the draw triggers' rotor accounts. On measured
+  numbers the game is −1.0% per dollar even with 21 wallets (`pnpm v2-ledger`)
+  BEFORE the vault carry: both vaults keep the 10% exit fee for holders who do
+  not claim (FINDINGS § E-v2-carry, `pnpm vault-carry`; `SATS_VAULT_CARRY_DAILY`
+  0.25%/day steady, launch day 8–9%/day on exits). Credited via
+  `V2EvContext.shareCarry` only when `VAULT_CARRY_HORIZON_DAYS` states a holding
+  intent, capped at `VAULT_CARRY_APR_CAP`; at the steady rate it covers the
+  fleet's −1% in ~6 weeks of holding, the single wallet's −4% in ~6 months.
+- Epoch vault under V2 (FINDINGS § E-v2-epoch): the engine prices 21 EQUAL
+  prizes (`EPOCH_EQUAL_CURVE_BPS`) under `GAME_VERSION=v2`; `pnpm epoch-history`
+  and `pnpm epoch-uplift` read the API, and the epoch facts (last close 458k
+  tickets / $11.5k, banked share 12.8% measured, dedup uplift 3.31x on the
+  85-wallet field) feed the config defaults directly. V1-only research scripts
+  live under `scripts/v1/` (`pnpm v1:<name>`) with a README mapping each to its
+  V2 replacement; do not re-run their conclusions as current.
+- Week two (FINDINGS § E-v2-week2, 2026-09-21): the mint is PROPORTIONAL to
+  volume (R² 0.996; `pnpm mint-rule`), so timing thin rounds is worth nothing,
+  and the rate has risen 40% since launch (0.40 RUSH/$1k, yield 1.7–1.8%).
+  The board is final 40 s before cutoff (`pnpm v2-timing`; 93% automation),
+  so ENDGAME_CONVERGENCE defaults to 0. Carry settled at 0.30%/day (sats) and
+  0.24%/day (token); staking pays 0.22%/day, so never claim to stake
+  (`pnpm staking-yield`). The participants endpoint pages by 100 — the epoch
+  scripts paginate; uplift 1.37x on a 267-wallet field. The selector now
+  credits deploy hashrate and the streak option by default under V2, funds
+  legs from grubstake, exchanges affiliate points, and cross-checks the RUSH
+  price against Jupiter. Ledger: −0.28%/$ before carry with 21 wallets.
+
+- **The complete map is `SAT-RUSH-MODEL.md`** (every instruction, every
+  number with its source, every action priced) and `pnpm ev-map` prints the
+  live EV table. Audit of 2026-09-21 (FINDINGS § E-v2-map): boost window is
+  240 ROUNDS (was mis-converted from minutes), strike modulus is 1097 on
+  chain (scripts read it), the mint is capped at $20 of RUSH per $1k at the
+  TWAP (so the RUSH leg is ≤ 2% of gross in dollars at any price), and the
+  staking yield is 29% of the buybacks leg ÷ staked — a volume yield.
+
+- **EV-max, zero-config (2026-09-21):** every round fires at the model's EV
+  argmax and no further (dilution-priced marginal → 0), if it clears the
+  two floors: `MIN_EDGE_BPS` 25 (model noise) and the economic hurdle
+  (`EDGE_HURDLE_ENABLED`: every leg's round-trip tx fees + the staking
+  yield the stake would earn over the round); other brakes are off — `KELLY_FRACTION=0`,
+  `VAULT_MAX_SHARE=1`, `STREAK_OPTION_DISCOUNT=1`; the risk limits derive
+  from the bankroll (`MAX_PER_ROUND_USD=0` → deployable USDC;
+  `DAILY_LOSS_CAP_USD=0` → the day's opening USDC; both still enforced by
+  `Bankroll.setLimits` on every fire), the fleet defaults to 21 with the
+  primary key and affiliate tag created on boot, the float per wallet is
+  derived from the observed peak leg, sizing is the dilution-priced marginal,
+  and the ramp starts itself. The operator supplies the deposit and the
+  execution-mode gate; everything economic is measured or derived.
+- **The fleet** (RUNBOOK § 10): `pnpm fleet:init 21 <tag>` creates the
+  wallets under `FLEET_DIR` and registers the affiliate tag; `FLEET_SIZE`
+  loads them; tile mode sends a blanket as one single-tile leg per wallet
+  (wallet i → tile i, hashrate priced at one tile); the treasury claims each
+  wallet's USD and tops up the thinnest wallets from the primary (deposit
+  address = the primary; `/fleet`; `src/exec/fleet-plan.ts` is the planner).
+
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned
   later, possibly transitioning to full-private. Launch is public-only. Therefore:

@@ -1021,3 +1021,792 @@ if the protocol leg is cut, which is what v2 proposes.** Previous verdicts of
 - **It decays as the field learns**, being funded entirely by claimers.
 
 Both need a time series on the vault ratio before any of this is sized.
+
+---
+
+## E-v2-sdk: the V2 SDK shipped a day early, and it settles most of the announcement (2026-09-10)
+
+The owner's V2 announcement (confidential, cutover 2026-09-11) arrived with no
+IDL. Per the E-sdk rule — check for a first-party package before modelling
+anything — `npm view @satrush/client time` showed 0.1.13 (09-04), 0.1.14
+(09-08) and **0.1.15 published 2026-09-10T01:29Z**, against the repo's 0.1.12.
+The 0.1.15 typings are 747 KB against 0.1.12's 488 KB and carry the V2
+program: `migrate_board/miner/satrush_config/treasury`, `TokenVault`,
+`Affiliate`, `GrubstakeAirdrop`, `airdrop_token`, `buyback_burn_token`,
+`claim_token`, `distribute_epoch_reward`, `settle_one_btc_draw`, the RNG
+program address, `STREAK_GRACE_ROUNDS`, `nextStreakMultiplier`, and errors
+6060–6090. Both packages are now pinned (`@satrush/client@0.1.15`,
+`@satrush/api@0.1.21`); `test/sdk-parity.test.ts` still passes, so the
+hashrate and share formulas are unchanged.
+
+### What the SDK settles
+
+```
+  announcement                       SDK
+  fee 8% → 6%                        whole deploy layer; new buybacks_fee_bps leg; split read at boot
+  losers get remaining USDC back     wonUsdAmount = "losing-tile refunds (89% of gross per losing tile)"
+  winning block's Sats Fee → BTC     satsVaultRoundFeeBps DEPRECATED, "swap budget derived per round";
+                                     1 − 6% − 89% = 5% of gross funds the winning tile's BTC pool
+  RUSH 64/16/14/6                    Round.mintedTokenAmount; RoundRevealed doc gives exactly this split;
+                                     empty-winner and all-on-winner legs reroute to the strike pot
+  same 10% claim tax                 vaultExitFeeBps, both vaults; claim_sats and claim_token are coupled
+  epoch equal prizes                 EpochWinnerSelected.rank "does not affect the pot share"
+  streak grace                       STREAK_GRACE_ROUNDS = 2; continues iff 1 ≤ gap ≤ 3
+  commit-reveal RNG                  rotor program SatRngpc6hC9uMXqS4dRk4trqhySktoxMXYSSRbjemd,
+                                     armed at end_slot; deploy cutoff unchanged (6005)
+```
+
+Not in the SDK: the mint program (emission rule, RUSH price), the exact
+swap-budget formula, whether the RUSH legs are pro-rata by stake. Those are
+day-one measurements, not assumptions — the model credits the token at zero
+until they exist.
+
+### The ledger per dollar, and what it does to the strategy
+
+```
+  fee layer   6.00%   losing tile back  89.00%   sats leg  5.00%   exit fee 10.00%
+  blanket at a uniform board:  1 − f + 0.80·y   (y = RUSH minted × price / gross volume)
+  break-even yield:  7.50% (whole layer as toll) … 1.34% (protocol leg only, scaled from V1's 142/800)
+  most a dollar can lose on the board in one round:  11%   (V1: 100%)
+  same dollars at risk:  $110 → V1 stake $110, V2 stake $1,000
+```
+
+The contested pool keyed to the winning tile is `C = 0.05·V + 0.64·M·P +
+E_strike`, shared pro-rata as V1's pot was — the water-filler is unchanged,
+it is handed `v2Model` instead of the V1 context (`EvModel` swap point in
+ev.ts). Against today's live board (last 99 rounds, `pnpm v2-strategy`):
+
+```
+  $219.87 gross/round · 31.0 miners · 98.9% of miners paid per round (the field blankets)
+  V2 contested pool at that volume: $10.99 of BTC per round plus 64% of the mint
+  $1 on an empty tile: +39.1% of stake · $10: −5.8% · $100: −10.3%   (token at zero)
+  sats vault APR reported by the API: 119.7% (7-day projected, annualized)
+```
+
+So the board edge is worth about a dollar a round at current volume; the
+token yield is the whole question, and it is a timing game if the mint is
+fixed per round (the bot sees `V` at cutoff). The rest of the strategy —
+hold both vaults, concentrate for hashrate (121 vs 101 raw/$), keep the
+streak with a minimum deploy every third round ($0.11 per three rounds),
+lower the epoch ticket share (a 10% share takes 0.58x of V1's) — is in
+V2-STRATEGY.md with the launch-day runbook.
+
+### Discrepancy to measure first
+
+"Significantly increased BTC for winning blocks" does not follow from a 5%
+pool at uniform occupancy (a blanket takes 9.2% of stake in BTC per round vs
+V1's 11%). Either the winning tile's pool is bigger than the ledger implies
+or the claim is per-winner. First V2 settlements: `won_shares × vault ratio ×
+price` against the winning-tile stake, and `RoundStakeSwapped.deployedUsdAmount`
+against `0.05·V + 0.89·W_win`.
+
+### Addendum, same day: the owner stated the mint rule and the launch price
+
+"Launching the token at $10 per token … initially 1 token per $500 volume."
+Both are in facts.ts as `stated`. The mint is proportional to volume, so the
+token yield is a per-dollar constant, `y = P/500 = 2%` at $10, and the
+timing question above is closed: nothing to time within a round, everything
+to time about the launch window (the replacement "algo" can only lower the
+rate under a 2.1M cap).
+
+```
+  blanket at a uniform board, $10:   1 − 6% + 0.80 × 2% = 95.6%   →  −4.4% board-only
+  all-in (fee legs recycle, protocol ~106 bps leaks):               ≈ +0.9% per dollar of volume
+  break-even RUSH price at 1/500:    $37.50 whole layer as toll  …  ≈$6.7 protocol leg only (~107 bps, scaled)
+  realisable through the exit fee:   y × 0.9 = 1.8%
+  supply at today's ~$306/round:     0.61 RUSH/round ≈ 660/day ≈ $6.6k/day at $10 (1,080 rounds/day)
+```
+
+So V2 is +EV at launch for a full participant only in the all-in view, only
+while the price holds, and the price is what every farmer's volume sells
+into. The trade is the price, not the board. `pnpm v2-strategy` now prints
+the measured mint rate against the stated 1/500 and the oracle price against
+both break-evens on every run.
+
+### Addendum 2: the wallet set — the epoch leg only recycles if you split (2026-09-10)
+
+The owner approved extra wallets under the operator's own affiliate tag.
+`pnpm wallet-set` simulates the V2 draw (21 flat slots, ticket-weighted,
+without replacement, one win per wallet) with our tickets split k ways
+against the last closed field (iteration 13: 90 participants, 458,473
+tickets, $11,458 pool), with the pool grown by our own epoch leg (174 bps,
+scaled from V1's 232 of 800):
+
+```
+  $1,000/round (92% of tickets)     $100/round (53% of tickets)
+  wallets  take    of own leg       take    of own leg
+        1   4.3%        5%           4.3%       11%
+        5  21.4%       25%          21.3%       54%
+       13  55.7%       64%          41.7%      105%
+       21  76.5%       88%          47.0%      119%
+       34  80.4%       93%          49.7%      125%
+  (se ≤ 0.15 pts on every take; fees ≈ $43/wallet/iteration at an ASSUMED $0.005/tx)
+```
+
+This corrects the "+0.9% all-in" figure above, which assumed the fee legs
+recycle pro-rata. The epoch leg does not, under equal prizes, for anyone
+above a few percent of the tickets: one wallet forfeits ~95% of it at
+scale. With ~21 wallets it comes back. Under V1's rank curve one wallet
+would have taken 21–31% of the pool, so this is a V2 effect, and the ten
+sub-10-ticket wallets already in the field show others have seen it.
+
+The affiliate rebate on the same wallets is 10% of the protocol leg ≈ 0.1%
+of volume as grubstake — free, but a rounding term next to the RUSH.
+
+### Method note
+
+Everything above came from reading a package that had been on npm for
+fifteen hours. The alternative was modelling three readings of a marketing
+paragraph. The rule from E-sdk held again: the SDK before the measurement,
+the measurement before the model.
+
+---
+
+## E-v2-live: V2 is live — every leg of the model verified on mainnet settlements (2026-09-11)
+
+The upgrade landed on 2026-09-10 (RUSH pool created 04:44Z; V2 config live by
+round ~55400). No docs exist outside the app: `docs.satrush.io` does not
+resolve, `satrush.io` is a SPA whose "How it works" is a client route, the
+API serves no OpenAPI, and none of the three programs publishes an on-chain
+IDL. Everything below is measured off the API and the chain.
+
+### Programs and accounts
+
+```
+  game      satRushGBRY2vgapeTAkoxz26vL2cYqyPi6CnBj7Tco   upgraded in place, accounts migrated
+  mint      sAtmiNt6gsZ9GmaABzuUfTufpBtbQCuTiQN8yGJzeH6   CPI'd by rotate_round; is handed the Orca pool
+  rng       SatRngpc6hC9uMXqS4dRk4trqhySktoxMXYSSRbjemd   rotors ['rotor','round'|'epoch'|'btc']
+  RUSH      SATqS9DYpLQsM2z51P4QCoqJRHa5wboV4qjJerJRUSH   9 decimals; mint authority PDA 6jH2zPwY…
+  staking   treasury BdJVbMKd… — stake RUSH (9 dec), earn cbBTC
+  token vault BfwR6ray…   sats vault 5ATZbUaB…   Orca pool AFdizLL2…
+```
+
+The deploy instructions ARM the round rotor by CPI and expect four remaining
+accounts `[rotor, rng config, rng program, SlotHashes]` (SDK
+`getRngRemainingAccounts`); the adapter's deploy builder must append them.
+
+### Config (live) and the fee legs, to the cent
+
+```
+  strike 208 · epoch 194 · one_btc 48 · protocol 100 · buybacks 50 (not in the API; measured)  = 600 bps
+  vault_exit_fee_bps 1000 · min deploy $1 · rounds 200 slots (~80 s, 1,080/day) · epoch 864,000 slots (3 days)
+  round 55437, gross $580.86: strike 12.08 / epoch 11.27 / 1-BTC 2.79 / protocol 5.75 + affiliate 0.05 / buybacks 2.90
+  rotate tx 3N5JbUniM9aC…: board USDC −73.85 = swap 51.83 + epoch 10.90 + treasury 8.43 (150 bps) + 1-BTC 2.70
+```
+
+### The board model (reading A), exact on four rounds
+
+```
+  round   gross    post-swap USD   swap actual   0.05·V + 0.89·W_win   Δ
+  55431   582.86        494.33         53.557          53.557        0.0000
+  55435   561.86        476.32         51.827          51.827       +0.000012
+  55436   581.86        491.24         55.715          55.715       +0.000012
+  55437   580.86        493.44         52.568          52.568       +0.000014
+  refund: post-swap USD = 0.89·(gross − W_win) on every round, same precision
+```
+
+Per deployment (round 55437, a $64.38 blanket automation at the streak
+cap): usd_earned 54.57 = 0.89 × 64.38 × 20/21; BTC $6.09 vs predicted 6.10;
+tokens 0.014744 RUSH = 64% × mint × 0.11599 (winning-tile stake share)
++ 16% × mint × 0.11060 (losing-stake share) = 0.014744 — the RUSH legs are
+pro-rata by stake, exactly; hashrate 6,502 raw = $64.38 gross × (100 + 21/21)
+— on GROSS dollars, at the cap. `pnpm v2-strategy` re-checks the swap on
+every run and says MISMATCH if it ever moves.
+
+### The mint: 1 RUSH per ~$3,600, not per $500 — and it is not keyed to spot
+
+```
+  rounds 55394–55433 (n=40):  0.2696 ± 0.0033 RUSH per $1,000 gross → 1 per $3,709
+  rounds 55440–55446 (n=6), with spot at read:
+    RUSH/$1,000  0.2772 → 0.2787   smooth, +0.09%/round, monotonic
+    spot         $49.07 … $50.16   both directions
+    USD yield    1.364% … 1.397%   jitters with spot
+  → tokens/$ is a smooth function of time, not of spot. 2% ÷ rate = $71.6 implied
+    reference price, near the day's high ($75 printed on a side pool).
+```
+
+Hypothesis, stated as such: the mint targets ~2% of volume in USD at a
+lagging reference price (the Orca pool is passed to the mint program; a
+TWAP would do this). If so the yield converges to 2% as the reference falls
+to spot; if the rate simply drifts, it does not. `RUSH_MINT_USD_YIELD` is a
+one-day-half-life fact; the script re-measures it. The mint config account
+(3JNuLyfQ…, 272 bytes) holds a 52,500 RUSH figure the DEX reports as total
+supply; undecodable without the IDL.
+
+### Market and supply
+
+```
+  RUSH $49.9 (oracle) · Orca $814k liquidity, $5.66M 24h volume, 9,337 buys / 5,857 sells
+  supply 44,763 RUSH: 23.4% one wallet (AEeAcZse…), 15.3% Orca pool, 13.2% token vault,
+  13.1% one wallet (Hk4ZhjM1…), 5.1% staking (2,267 RUSH, 89 stakers, 0.0042 BTC paid so far)
+  token vault: 5,898 RUSH; the $100k airdrop was 10,000 at $10 → ~4,100 already claimed,
+  their 10% left behind for holders. Our miner: 11.21e12 token shares ≈ 13.7 RUSH ≈ $675,
+  unrealised +0.83 RUSH already (the carry), streak 1, last play round 50491.
+```
+
+### The verdict, on measured numbers (`pnpm v2-ledger 1000 21`)
+
+```
+  USD/BTC legs back 94.00% · RUSH now 1.10% · RUSH later 0.27% · strike ×0.70 1.46%
+  epoch ×87% (21 wallets) 1.69% · 1-BTC ×92% 0.44% · affiliate 0.07% · fees −0.02%
+  NET −1.00% per dollar, expectation, before the vault carry (−0.48% if the strike buffer returns)
+  break-even token yield: 2.38% (21 wallets) · 4.20% (one wallet); live 1.38%
+```
+
+Not +EV as the program pays today, even with the wallet set. It reaches
+break-even only if the mint converges to 2% AND the strike buffer returns,
+or if the vault carry — real, already visible on our own shares — is worth
+more than a point of volume. The field (82–87 miners, 76–84 paid per round)
+still blankets, so the contested pool is untouched.
+
+### Method note
+
+The exact swap match on the first round was the moment the model stopped
+being a reading of a press release. Four rounds and one per-deployment ledger
+later every constant in ev-v2.ts is `measured`; the one that is not — the
+mint rule — is the one that decides the sign, and it lives in a program with
+no IDL. That is the question for the owner.
+
+## E-v2-idl: the V2 IDL, regenerated from the SDK and verified on mainnet (2026-09-11)
+
+Nothing publishes a V2 IDL, but `@satrush/client@0.1.15` ships the Codama
+codecs for every account, instruction and event, plus the discriminators and
+PDA seeds. `scripts/idl/gen-idl-from-sdk.ts` (`pnpm idl:gen`) parses them
+back into an Anchor IDL (`satrush.json`: 61 instructions, 19 accounts, 12
+events, 91 errors, 38 types; the V1 file is kept as `satrush-v1.json`) and
+emits `src/adapter/generated-types.ts`, so the "derive everything from the
+IDL" rule survives the upgrade unchanged. Every discriminator is asserted
+against the Anchor sha256 conventions during generation.
+
+`pnpm idl:verify` (`scripts/idl/verify-idl-live.ts`) then reads mainnet
+through the generated coders and compares against the public API and the
+tape:
+
+- Board, SatrushConfig (208/194/48/100 bps, `vault_exit_fee_bps` 1000,
+  `sats_vault_round_fee_bps` still 1200, `buybacks_fee_bps` 50,
+  `strike_trigger_modulus` 1097), SatsVault, TokenVault, EpochVault, the
+  live Round and our Miner: 40 fields identical to `/board`, `/config`,
+  `/users/{w}/profile`.
+- `PublicDeploySettled` decoded from the `emit_cpi` inner instruction of
+  `wK8UUSqvcDarU1vtUwvagNbsGrPPfscNBq1mrtdvbXLxYCsRGtjbRmjBS3DgBjhVzNmtDCKawXpoLCGbR5sbZf4`
+  (round 55508): winning_stake, won_usd, won_shares, won_token,
+  won_token_shares, hashrate_earned, is_grubstake_funded all equal the
+  API's per-deployment settlement.
+- `buildSettleDeployPublic` reproduces that transaction's 26 accounts (23
+  IDL accounts + the token-leg remaining accounts `[token_mint,
+  board_token_ata, token_vault_token_ata]`) key-for-key with identical
+  flags; `buildDeployPublic` reproduces the 18 accounts (14 + the four
+  rotor accounts) of the direct deploy
+  `3htxqWuAE7vkoa92bihYchAGF5W5VWmEBwM9huv2wb2Mb4yUcfeZXCnHeNr3dPyMR4KjiTtVBVN8iDbt32N2L188`
+  (round 55500, mask 1589003, $30).
+
+What moved under the builders (all in `src/adapter/instructions.ts`,
+pinned by `test/instructions.test.ts` against the IDL):
+
+- `deploy_public`: `is_grubstake_funded` arg (funding ATA becomes the
+  Miner's when true), optional `affiliate` PDA (program id when absent —
+  the SDK's "programId" strategy), four rotor remaining accounts
+  (`src/adapter/rng.ts`, pinned to the SDK's `getRngRemainingAccountsFor`
+  in `test/rng.test.ts`).
+- `settle_deploy_public`: `miner_usd_ata`, optional writable `affiliate`
+  (`Miner.affiliate`, default pubkey → none), `token_vault`, and the three
+  token-leg remaining accounts.
+- `claim_sats` gains the coupled token-vault leg; `claim_token` is new.
+- `claim_epoch_reward` is gone: `distribute_epoch_reward(rank)` is a
+  permissionless crank that credits the winner's Miner (USD to the board
+  pool, BTC to sats-vault shares, RUSH to the token vault) — nothing
+  reaches the wallet, so the orchestrator no longer measures the claim by
+  ATA deltas. `Winner.claimed` is now `Winner.distributed`.
+- `claim_one_btc_reward` takes `satrush_config`, `ticket` and a `winner`
+  (the ticket's owner, whoever signs).
+- The vault draw triggers lose the SlotHashes/event accounts from the IDL
+  list and arm their rotor by CPI, so the epoch/btc rotor sets ride as
+  remaining accounts. This is by analogy to `deploy_public` and the SDK's
+  exported rotor helpers; no trigger transaction has been diffed against
+  the tape yet (the owner's crank has fired every draw so far).
+
+Preflight is re-baselined to the live config (`MEASURED_ECONOMICS`). Not
+yet touched: the orchestrator's V1 economics, accounting and the wallet set
+(V2-STRATEGY.md § 5).
+
+## E-v2-dryrun: the rebuilt bot against mainnet, dry mode (2026-09-11)
+
+Three dry runs of the V2 orchestrator (`EXECUTION_MODE=dry`, `GAME_VERSION=v2`,
+throwaway keypair, ws-rpc ingest; no transaction can be sent in dry mode):
+
+- Boot: preflight passes all hard gates on the live config
+  (`game_version_matches_chain`: V2, `token_feed_live`: RUSH $50.4 × 0.294
+  RUSH/$1k → yield 1.48%); price feed primed; token feed primed
+  (`mintRushPerUsd` 2.96e-4, yield 1.50%); the at-risk fraction logged as
+  0.11 with share marking on.
+- Rounds 55524–55528 and 55532–55535 cycled ROUND_OPEN → ARMED → skip →
+  ROUND_OPEN without a halt, a kill, or a decode error; occupancy updates
+  re-ran the selector each round.
+- Every round skipped with `no_positive_marginal_ev`. At a $5 cap the
+  diagnostic reads blanket EV −406…−410 bps and the emptiest tile (13)
+  −438…−454 bps with the token yield at 1.50–1.53% of volume — the same
+  sign and size the ledger gave (−4.8% board return + strike leg; the
+  −1.0%/$ figure of `pnpm v2-ledger` only appears with 21 wallets' epoch
+  prizes and the hashrate legs, which the round-level selector does not
+  credit). Skipping is the correct behaviour on these numbers.
+- `rpc.satrush.io` rate-limits a bot that polls it (429, then Cloudflare
+  1015 after ~5 minutes of the vault manager's 5-second reads); the public
+  mainnet RPC carried a run with the vault poll off. Production stays on
+  the operator's Helius endpoints as before.
+
+Not exercised in dry mode, by design: the deploy/settle sends (verified
+against the tape in E-v2-idl instead), the affiliate binding of a fresh
+wallet, and the vault draw triggers' rotor accounts.
+
+## E-v2-carry: the vault carry, measured under V2 — real, launch-inflated, and not in the EV until now (2026-09-11)
+
+The V2 model held the shares (`valueNetOfExitFee=false`) but credited
+nothing for holding them. E-carry (V1) had already measured the mechanism:
+the 10% exit fee of every redemption stays in the vault, so the BTC-per-share
+of everyone who does not claim ratchets up when someone else does. V2 keeps
+it on both vaults (`vault_exit_fee_bps` 1000, coupled). `pnpm vault-carry`
+now measures it as a ratio series: a settlement's `btc_earned /
+sats_shares_earned` is the vault ratio at that settle, so the API's
+per-round settlements give the share price per round with no RPC.
+
+```
+  sats vault, 44 samples, rounds 54286…55576 (1.02 d)
+    total +3.95% = drift +1.02% + two single-round steps of +1.44% (55126→55156, 55336→55366)
+    implies 28% of the vault's shares exited in the day (a transfer from leavers)
+    6 h buckets:  03:17 +0.057%/d · 09:17 +0.276%/d  ← V1 tail, the steady state
+                  15:17 +9.18%/d  · 21:17 +7.99%/d   ← V2 launch exits
+    app's apr field: 315% today (119.7% before the cutover — it tracks the trailing rate)
+
+  token vault, 16 samples, rounds 55126…55576 (0.35 d, the vault's first day)
+    total +13.2%; steps +7.95%, +1.58%, +0.77%, +0.64%; 57% of the shares exited
+    (the airdrop cashing out through the fee)
+```
+
+What it is worth to a deploy: at a uniform board every dollar of gross
+becomes (0.05·21 + 0.89)/21 ≈ 9.2% sats shares whatever the mask (linear in
+stake — pinned in `test/ev-v2.test.ts`), plus RUSH shares of 80% × the token
+yield (≈1.2%). Credited per day held:
+
+```
+  rate                          sats carry per $ gross per day    covers −4.1% (1 wallet)   covers −1.0% (21 wallets)
+  steady 0.25%/d (fact)                     0.023%                       ~180 d                   ~43 d
+  launch day 3.9%/d                         0.36%                         11 d                     3 d
+```
+
+So: at the steady rate the carry turns a −4% round into break-even only for
+a holder with a half-year horizon, and a 21-wallet fleet at −1% into
+break-even in about six weeks — BTC-denominated, before the 10% fee that
+realising it costs, and only while other players keep claiming. Launch-day
+rates (the app's 315% / 20,848%) are one-off exits and are not to be sized
+on; `VAULT_CARRY_APR_CAP` (default 120%) keeps them out of the selector.
+
+Model: `V2EvContext.shareCarry {sats, token}` multiplies the share legs;
+the orchestrator fills it from the API's vault `apr` (capped) × the
+operator's stated `VAULT_CARRY_HORIZON_DAYS` (default 0 = not credited,
+because the credit is only real for a wallet that never claims — a stated
+intent, not a measurement). The ledger prints the carry row and the
+holding horizon at which it covers the net.
+
+Unchanged: never claiming is strictly better than claiming, and this is the
+one edge that costs no latency. What changed is that it is now a number in
+the model with provenance, instead of a note.
+
+## E-v2-epoch: the epoch vault re-measured for V2 — equal prizes, a 3.3x dedup uplift, and 27-day-old anchors replaced (2026-09-11)
+
+The ticket engine was still handing `expectedWinningsUsd` V1's rank curve
+(32% / 14% / 8% …) although V2 pays 21 equal prizes, and its field anchors
+were the iteration-4 draw of 2026-08-15. Both scripts now read the public
+API instead of scanning RPC signatures.
+
+```
+  pnpm epoch-history (API epoch/history + participants)
+  iter   status   wallets   tickets     pool      duration   first-tenth buys   prizes (21 winners)
+    14   LIVE        85     155,554     open      1.43 d       14.0%
+    13   closed      90     458,473   $11,458     3.17 d        5.0%           $176 … $3,667
+    12   closed      88     175,131    $7,564     3.16 d       18.6%           $116 … $2,421
+    11   closed      82     174,415    $6,625     2.37 d       23.3%           $102 … $2,120
+    10   closed      79     604,426   $10,732     2.38 d        5.2%           $165 … $3,434
+     9   closed      75     464,370   $13,232     2.59 d        6.3%           $204 … $4,234
+     8   closed     107     692,636   $19,168     2.74 d       18.2%           $295 … $6,134
+```
+
+Facts, all re-sourced: `EPOCH_LAST_CLOSE_TICKETS` 458,473 and
+`EPOCH_LAST_CLOSE_POOL_USD` $11,458 (iteration 13, the last close; the six
+before it ranged 174k–693k tickets and $6.6k–$19.2k, so the 3-day half-life
+stands). `EPOCH_FIELD_BANKED_SHARE` is no longer assumed: the tickets bought
+in the first tenth of an iteration over its total run 5–23% (mean 12.8% ±
+3.3, n=6) — a floor on the banked share, since buying is back-loaded — and
+the config defaults now read the facts instead of carrying a second copy.
+No assumed fact remains in `facts.ts`.
+
+Iterations 8–13 closed under V1 (ranked prizes, $102…$6,134 per winner);
+iteration 14 straddles the cutover and is the first that will pay equal
+prizes. The engine now prices against `EPOCH_EQUAL_CURVE_BPS` under
+`GAME_VERSION=v2` everywhere the epoch is valued (ticket economics, the
+per-wallet engines, the vault manager's ranking, the dashboard's ticket EV).
+
+`pnpm epoch-uplift`, re-run on the live field under the flat curve:
+
+```
+  iteration 14: 85 wallets, top-1 32.1%, top-10 79.4%
+  tickets   modelled    true (21-draw sim)   uplift
+      144   8.25e-4        2.86e-3             3.47x
+      500   2.79e-3        9.26e-3             3.31x
+     2000   1.01e-2        2.61e-2             2.59x
+  EPOCH_DEDUP_UPLIFT = 3.31 ± 0.10
+```
+
+Why so much larger than V1's 1.45: with 85 wallets against 21 equal slots a
+quarter of the field wins something every draw, and each whale drawn takes
+a third of the tickets out of the pool with it, so a small holder's odds are
+set far more by the wallet count than by its ticket share. That is the
+mechanism the wallet set is built on (§ E-v2-sdk, `pnpm wallet-set`).
+Sensitive to concentration; the fact keeps its 3-day half-life.
+
+## E-v2-week2: ten days in — the mint rule, the field, the carry, the timing, all re-measured from the API (2026-09-21)
+
+Every fact with a short half-life had expired, and the answers to the open
+strategy questions were all measurable from the public API, so this pass
+replaced guesses with measurements. Four new scripts (`pnpm mint-rule`,
+`pnpm v2-timing`, `pnpm staking-yield`, and the paginated `pnpm
+epoch-history` / `pnpm epoch-uplift`) produced them.
+
+### The mint is a RATE, and it is rising
+
+```
+  300 settled rounds 56580…68540 (9.2 d), gross $238/round mean (CV 70%)
+  M = 0.0075 + 0.3626·(V/$1k) RUSH      R² 0.996      RUSH per $1k: mean 0.405, CV 5%
+  thin third $120 → 0.416/$1k · middle $174 → 0.412 · fat $420 → 0.386
+  drift +0.0070 RUSH/$1k per day (+1.74%/day of the mean)
+```
+
+Proportional to volume, not fixed per round: timing thin rounds is worth
+nothing (the 8% thin/fat gap is the drift over the sample). And the rate
+has RISEN 40% since launch, 0.29 → 0.40 RUSH per $1k, while the owner said
+it would fall. At $42.5 that is a 1.7–1.8% token yield against 1.4% on
+launch day. `RUSH_MINT_PER_USD` carries the rule; `RUSH_MINT_USD_YIELD` the
+yield; both one-day half-lives, because the drift is real.
+
+### The field tripled and flattened; equal prizes verified twice
+
+```
+  iter   wallets   tickets       pool      first-tenth   21 prizes
+    16    267 (live)  429,819     open       26.0%
+    15    369         882,469   $27,798      16.2%       $1,192 each = 0.9 × 27,798 / 21 ✓
+    14    441       1,098,101   $39,940       3.0%       $1,712 each = 0.9 × 39,940 / 21 ✓
+    13     90         458,473   $11,458       5.0%       $176 … $3,667 (V1 rank curve)
+```
+
+The participants endpoint pages by 100 (`before=<entry id>`); the first
+pass read one page and undercounted every iteration since 13. Corrected:
+`EPOCH_LAST_CLOSE_TICKETS` 882,469, `EPOCH_LAST_CLOSE_POOL_USD` $27,798,
+`EPOCH_FIELD_BANKED_SHARE` 10.7% ± 3.9, and the dedup uplift on a 267-wallet
+field with a 9% top holder is **1.37x ± 0.10**, not launch week's 3.3x on 85
+wallets under a 32% whale. The uplift is a property of the field's shape
+and keeps its 3-day half-life.
+
+### The carry settled at its steady state
+
+```
+  sats vault  rounds 64580…68540 (2.94 d): +0.301%/day, no steps, buckets 0.05–0.73%/day   app apr 142%
+  token vault same window:                 +0.238%/day, no steps                            app apr 134%
+  staking treasury (lifetime): 0.0851 BTC on $297k staked over 10.4 d = 0.21–0.22%/day       app apr 54%
+```
+
+`SATS_VAULT_CARRY_DAILY` 0.30%, `TOKEN_VAULT_CARRY_DAILY` 0.24%, and a new
+`STAKING_YIELD_DAILY` 0.22%. Claiming token shares to stake never pays back
+the 10% exit fee: the vault carry matches the staking yield to within
+0.03%/day. Hold.
+
+### Rival timing: the board is final 40 s before cutoff
+
+```
+  100 rounds 68443…68542, 4,880 deploys, 230-slot (~92 s) rounds, $121 gross/round
+  automation share of gross 93.3% · all-21 blankets 86.7% of gross · single-tile 14% of deploys
+  final gross on the table: 95.5% at 60 s before cutoff, 100.0% at 40 s and after
+  automations fire at 90 s (round open); manual deploys at 59 s (10th–90th 58–82 s); none in the last 40 s
+```
+
+`V2_BOARD_FINAL_BEFORE_CUTOFF_S` 40, `V2_AUTOMATION_GROSS_SHARE` 0.933. The
+board the bot fires into at its 4-slot offset IS the final board, so
+`ENDGAME_CONVERGENCE` now defaults to 0 (V1's 0.5 was inventing occupancy
+that never arrives). Volume is down 5x from launch's $580/round.
+
+### What changed in the strategy on these numbers
+
+- The per-round decision now credits the hashrate a deploy earns
+  (`HASHRATE_DEPLOY_CREDIT_ENABLED` default on) at the measured epoch ticket
+  value under the equal curve with the 1.37x uplift, and the streak option
+  (`STREAK_OPTION_VALUE_ENABLED` default on) so the 2-round grace is priced.
+  This is the fleet ledger's epoch leg finally reaching the selector.
+- Kelly needs no change: it already sizes on the model's own per-outcome
+  returns, where a miss costs the 11% toll, so the feasible fraction is 1
+  and the bounded downside sizes near the cap by construction.
+- Grubstake USD (the exchanged affiliate rebate) funds a wallet's leg when it
+  covers the amount and is not about to expire; the primary exchanges its
+  affiliate points into grubstake on the sweep cadence. No hashrate on those
+  legs, by program rule.
+- The token feed cross-checks the app's RUSH price against Jupiter and
+  rejects the quote beyond 5% divergence (today: $42.15 on both).
+
+`pnpm v2-ledger 1000 21` on today's numbers: **−0.28% per dollar before the
+carry** (token leg 1.83%, epoch 1.11% at 106% recovery, strike 1.68%), and
+the sats carry alone covers that in about 10 days of holding.
+
+### Addendum: the streak ramp, priced (2026-09-21)
+
+Hashrate per dollar is (streak + 21/n), so a wallet at the cap earns 5.5×
+what a fresh one does, and at 92 s rounds the cap is 2.5 h of continuous
+play away. `pnpm streak-ramp` prices a $5 single tile at a uniform board of
+the previous round's gross through the V2 model, with the hashrate credit
+at the live ticket value ($0.0237 per ticket on iteration 15's pool and
+field, 1.37x uplift, 5%-of-field block):
+
+```
+  streak    raw/$   hashrate credit   EV per $ (single tile, $117 board)
+       1       22          +0.52%           −6.53%
+      50       71          +1.68%           −5.37%
+     100      121          +2.87%           −4.18%
+  ramp: 99 × $1 minimum deploys ≈ 2.5 h, $5.32 of negative EV; at the cap still −4.18%/$
+```
+
+Presence is negative even at the cap: the credit is worth 2.9% of gross
+there against a single-tile toll of ~7% at a $117 board (own weight on a
+$5.60 tile). So the ramp is NOT built as a feature. The skip log now
+carries `emptiestEvBpsAtStreakCap` next to today's figure; when it turns
+positive the ramp pays, and `pnpm streak-ramp` gives the cost and payback.
+What would flip it: a bigger board (own weight falls), a higher token yield
+(the mint rate is rising 1.7%/day), or a richer epoch pool per ticket.
+
+
+### Addendum: hold unclaimed vs claim-and-stake, over horizons (2026-09-21)
+
+`pnpm hold-vs-stake [wallet] [rush-usd] [btc-usd]` reads the wallet's live
+position from `/users/{addr}/profile` and compares leaving winnings as
+unclaimed vault shares (earning the ratio ratchet) against claiming them
+(10% exit fee) and staking the RUSH. The carry's decay is the uncertain
+dimension, so it is bracketed: constant, halving every 90 d, halving every
+30 d.
+
+```
+  operator wallet: RUSH shares $626.56 · BTC shares $1,702.99 · unclaimed USD $0
+  rates/day: token carry 0.240% · sats carry 0.300% · staking 0.224%
+  RUSH leg   30 d and 90 d: hold wins on every decay path
+             180 d / 365 d: claim+stake wins only if the carry halves every 30–90 d
+  break-even (claim+stake ever pays back the fee): carry < 0.197%/day sustained a year;
+             carry to zero tomorrow → 45 d payback on the fee
+  BTC leg    no yield alternative exists for claimed cbBTC; claiming buys liquidity only
+             (hold $1,863 at 30 d vs $1,532.69 claimed today)
+```
+
+Waiting is free: the fee is the same whenever it is paid, so "hold, then
+decide" dominates "claim now" on both legs. Claim USD always (fee-free).
+Re-run when `pnpm vault-carry` prints a token carry below 0.197%/day.
+
+### Addendum: buying RUSH and staking vs mining it (2026-09-21)
+
+`pnpm buy-vs-mine [usd-of-rush] [stake-per-round]` prices the two ways of
+ending up holding RUSH. The buy side is the live Jupiter route (USDC →
+RUSH) at $1k / $10k / $50k, then the staking treasury's reward stream
+diluted by our own stake (the stream is a fixed $/day from volume). The
+mine side is the V2 model on the MEAN board of the last 100 finished
+rounds with the RUSH leg priced at ZERO — the non-token toll — divided by
+the RUSH minted pro rata, so the cost of a mined RUSH is a dollar figure
+independent of its price. Credited on the mine side: the 89% losing-tile
+refund, own stake and the 5% sats leg back as BTC shares on a win, the
+strike jackpot pro rata (steady state: strike fee × 0.70 payout = 1.68% of
+gross; the live pot ÷ 1440 gives 1.37% today), and hashrate → epoch
+tickets at the equal-prize curve × 1.37x uplift. Not credited, each can
+only add: the 1-BTC lottery (≤ 0.48% of gross, engine-dependent), the
+affiliate rebate, and the 0.30%/day carry on the mined BTC shares.
+
+```
+  spot $42.90 · board $111 ± $2 (n = 99) · mint 0.4307 RUSH/$1k · yield 1.85% of gross
+  stake $318,496, stream $663/day → 0.208%/day undiluted (0.180% if $50k joined)
+  BUY   $1k → $42.94 avg (+0.09%)   $10k → $43.23 (+0.76%)   $50k → $46.08 (+7.41%)   Orca Whirlpool, $541k pool
+  MINE  toll per $ gross (without strike)    cost per RUSH   vs spot
+        fresh wallet, 1 tile     6.58% (7.48%)      $153          3.56×
+        1 tile at streak cap     4.23% (5.13%)       $98          2.29×
+        21-tile blanket at cap   1.34% (3.02%)       $31          0.73×
+        fleet ledger `pnpm v2-ledger 1000 21` (volume accounting, strike 0.70 / 0.95): $49 / $35
+  $1,000 committed, 30 d:  buy+stake $1,061  ·  mine+hold $301 / $468 / $1,473
+  yields afterwards: staked 0.208%/day (cbBTC, no lock, no fee)  ·  vault shares 0.240%/day (RUSH, decays)
+```
+
+Two answers, by configuration. Any single-tile deploy — fresh or at the
+cap — mines RUSH at 2.3–3.6× what the market charges: buy. A 21-tile
+blanket at the streak cap mines it at 0.73× spot, i.e. cheaper than
+buying: that row is the same statement as "a small blanket at the cap is
++0.5% per dollar per round on the mean board" (toll 1.34% against a 1.85%
+RUSH yield), which is inside the uncertainty of its inputs — the hashrate
+credit is 2.9% of gross at the cap (uplift 1.37 ± 0.10 → ±0.2 pts), the
+strike payout fraction is stated 0.70 (0.95 would add 0.6 pts), the mint
+rate has a 5% CV. Read it as break-even to +1%, not as an edge, and it
+needs the 99-round ramp to the cap and continuous presence (2-round
+grace) to exist at all. The single wallet's throughput is the other
+limit: $1,000 of RUSH is $54k of gross volume, 10,800 rounds at $5, 11.5
+days; a bigger stake raises own weight and thins the epoch ticket value.
+
+Post-acquisition the two yields are within 0.03%/day of each other, so
+the acquisition cost decides. The crossover is a spot price (the mint is
+volume-proportional): single tile needs RUSH above $98 at the cap; the
+fleet blanket is already under. The +1.74%/day mint drift lowers every
+mined cost by the same fraction per day while it lasts; a mint that
+targeted a dollar yield at a lagging price would move with spot instead.
+
+Staking terms (app Stake page chunk + treasury account read on chain,
+program `SaTsTaKpGdTfUEPSSwyYgLKkfnZu8uL3D1DbLXshdb7`, no IDL published):
+stake / unstake / claim, a 24-hour reward stream, no lock, cooldown or
+fee visible in the copy, the instruction data or the account.
+
+Correction to the first version of this note (same day): the model rows
+had omitted the strike jackpot leg, which the orchestrator credits; with
+it the blanket row moved from $75 to $31 per RUSH and flipped. The ledger
+row always carried it.
+
+## E-v2-strike: the strike payout measured at 14/15, and the fee split moved on 09-17 (2026-09-21)
+
+Prompted by "what does strike at 0.95 mean". `STRIKE_PAYOUT_FRACTION` was
+the owner's STATED 0.70 ("always been 70/30"; V1, 2026-08-15), and the
+ledger bracketed it against 0.95 for "the reserve comes back". The V2
+rounds API exposes the split per strike round, so `pnpm strike-payout`
+(pages the rounds list with `before`) now measures it instead.
+
+```
+  rounds 54621…68620 (14,099 finished): 12 strikes → one per 1,175 rounds (modulus 1440)
+  every strike, every leg (USD, BTC, RUSH): bonus / (bonus + reserve) = 93.33% exactly, sd 0
+  reserve retained 6.67%, then SEEDED into the next pot ($229–$374 per strike)
+  conservation: bonuses paid (all legs) $91,363 vs strike fee collected $94,849 = 96.3%; the rest is the live pot
+```
+
+So the program pays 14/15 of the pot at trigger and recycles the rest: the
+long-run payout of the strike fee is ~100%, and the fraction only times
+it. The fact is now `measured` (n = 12, zero variance, no half-life,
+recheck `pnpm strike-payout`), the config default follows it, the toll
+test pins 0.9333, and the ledger's brackets are the measured value and
+1.0. The earlier unsourced 0.9333 default was, by accident, right for V2.
+
+**The fee split moved at round 64176 (2026-09-17 21:04 UTC)**, found by
+preflight's economics gate tripping on epoch_fee_bps 194 → 104 and
+bisected on the per-round fee fields: strike 208 → 240, epoch 194 → 104,
+buybacks 50 → 108, one_btc 48, protocol 100, layer unchanged at 600
+(every V2 round nets exactly 94% of gross). Consequences: the strike leg
+is worth more per round (2.24% of gross in steady state), the epoch pool
+per iteration will be ~46% smaller at equal volume (iteration 16's pool
+per ticket is so far holding — $0.0377 vs 15's $0.0315 — because the
+field shrank too; re-measure at close), and the buybacks leg that funds
+staking doubled, so `STAKING_YIELD_DAILY` (a lifetime average across both
+regimes) is now a lower bound with a 3-day half-life. The API config omits
+the buybacks leg; the scripts derive it as 600 minus the four published
+legs (it was hardcoded at 50). Preflight is re-baselined.
+
+**Buy vs mine, on the measured payout and the new split** (spot $42.95,
+board $98 mean): fresh single tile $158/RUSH (3.7× spot), single tile at
+the cap $104 (2.4×), 21-tile blanket at the cap $32 (0.74×); ledger 21
+wallets $36 (0.84×). The verdicts stand: buy for any single-tile play; a
+small blanket at the cap mines under spot, now with the strike leg
+measured rather than bracketed. Its remaining uncertainty is the hashrate
+credit (epoch ticket value under the halved epoch fee) and the mint rate.
+
+Addendum (same day): the blanket-at-cap row's hashrate credit was priced
+on iteration 15's pool, funded at the OLD 194 bps epoch fee. `pnpm
+buy-vs-mine` now prints the low case at the live 104 bps (pool × 0.54 at
+equal volume and field): blanket at the cap $32 → $57 per RUSH (1.34×
+spot), single tile at the cap $104 → $135, fresh $159 → $165. So on the
+fee split in force since 09-17, no configuration mines RUSH under spot
+unless iteration 16 closes with a pool per ticket near 15's — its live
+$0.0377 vs 15's $0.0315 says the field is shrinking faster than the fee
+did, which is the one thing that would keep the blanket under spot.
+Re-run at the close of iteration 16.
+
+## E-v2-map: every instruction and every number, audited in one pass — and four defects it found (2026-09-21)
+
+Prompted by "figure out how every single function and every single number
+works, then give a definitive answer". The result is `SAT-RUSH-MODEL.md`
+(the map) and `pnpm ev-map` (the live EV table). Sources walked: the 61
+instructions of the regenerated V2 IDL, the SDK's constants and formulas
+(`hashrateReward`, `nextStreakMultiplier`, `satsToBtc`), every top-level
+on-chain account decoded live, the app's rule text (About / Stake /
+Referrals chunks), the API, and FINDINGS. What the audit changed:
+
+1. **Boost window was 156 rounds, should be 240.** The program stamps
+   `Round.is_hashrate_boosted` for `STRIKE_BOOST_ROUNDS` = 240 rounds after
+   a strike (2× hashrate); the orchestrator converted a 240-MINUTE config to
+   rounds (156 at 92 s), under-crediting a third of every window. Fixed to
+   the SDK constant. This window is the one positive-EV deploy in the game.
+2. **Strike modulus is 1097, not 1440.** On-chain `strike_trigger_modulus`
+   (the SDK doc says "seeded at 1_440"); 12 V2 strikes came one per 1,175
+   rounds. Scripts now read the chain (`scripts/lib/onchain.ts`); the
+   orchestrator always had. Boost rounds are therefore 22% of all rounds.
+3. **The mint rule is known, and it is a dollar cap.** App text: rate =
+   min(tranche rate, $20 per $1k ÷ max(30 d TWAP, 1 d TWAP)); tranche 1 is
+   515,813 RUSH at 1/$500, then 75%/75% per tranche. The TWAP term binds
+   above $10, so the RUSH leg is worth ≤ 2% of gross in dollars at any
+   price (live 1.83%, implied TWAP $46.4). Consequence: a mined RUSH's cost
+   scales with spot, "mining beats buying at price X" is not a thing, and
+   the only test is toll < ~1.85% of gross. Facts added as `stated`.
+4. **The staking yield is a volume yield.** App text: 29% of the 1.08%
+   buybacks leg buys BTC for stakers. Forward = 31.3 bps × daily volume ÷
+   staked = 0.128%/day at $130k/day (lifetime 0.208% ran at higher volume).
+   `STAKING_YIELD_DAILY` is a lower bound with a 3-day half-life.
+
+Also confirmed: hashrate on GROSS dollars (`PublicDeployment.deployed_usd_
+amount` is gross), the 35% deferred hashrate releases only via `claim_sats`
+pro rata, grubstake plays earn no hashrate and their USD returns to the
+grubstake, affiliate points are 10 bps of referred volume 1:1 to grubstake,
+`claim_usd` is fee-free, staking has no lock/cooldown/fee, the epoch
+iteration is 2,318,400 slots (10.73 d; the app's "7 days" is stale), the
+1-BTC vault is at 12.74% with 231,393 tickets, and a 1-BTC ticket is worth
+1.6–3.5× an epoch ticket per unit of hashrate.
+
+The verdict (SAT-RUSH-MODEL.md § 0): the board is negative everywhere except
+a 21-tile blanket at the streak cap inside boost windows (+0.27%…+3.45% per
+$ per round, 22% of rounds); hold every share; stake bought RUSH for the
+volume yield; spend hashrate on 1-BTC tickets; never single tiles.
+
+### Addendum: the four "uncertain" items, measured (2026-09-21)
+
+`pnpm measure-remaining` (pages the V2 rounds once):
+
+```
+  staking split   $6,960 BTC deposited / $22,165 buybacks fee collected (13,299 rounds) = 31.4% ± 3   stated 29% ✓
+  epoch 16        5.1/10.7 d: pool $16,263 vs fee collected $13,802 (118%); pace $2,134/day, 83,817 tickets/day
+                  → close ~$28.2k / ~900k tickets → ticket $0.0236 (iteration 15: $0.0237)   the fee-scaled $0.0127 was a floor
+  1-BTC draw      iterations 1, 2 drew at 883,982 / 1,694,036 tickets; iteration 3: 28,486/day, 12.7% filled at 8.1 d
+                  → 1.8–3.5M at the draw → $0.023–$0.045/ticket (1.0–1.9× an epoch ticket, not 1.6–3.5×)
+  mint TWAP       implied binding average $46.42 (30-day side) vs spot $42.95 and the 1-day ring ~$42 → RUSH leg 1.83% of gross
+```
+
+The blanket-at-cap verdict tightens: +0.10%…+0.58% per $ per round
+unboosted, +2.49%…+3.45% boosted, on iteration 16's own pace. The one
+item that stays open is a live send, which needs the operator's keypair.
+
+### Addendum: does the bot size to the EV optimum? (2026-09-21)
+
+`pnpm ev-size` prices the fleet blanket at the cap on today's board ($53
+gross, $3,348 pot) by stake, with the hashrate valued flat (what the
+selector's marginal saw) and on the dilution curve (what it is worth):
+
+```
+                unboosted                       boosted (2×)
+  optimum        $20 → EV $0.36/round            $50 → EV $1.48/round   (dilution curve, 21 wallets)
+  flat marginal  stays positive to $44           stays positive past $300
+```
+
+So the water-filler was right in shape (adds $1 while the marginal EV is
+positive) but priced the hashrate flat, stopping only at MAX_PER_ROUND or
+the VAULT_MAX_SHARE brake — "too much" by construction, though the 25%
+share cap happened to land near the optimum. And `MIN_EDGE_BPS` = 200 (a
+V1 calibration) skipped the unboosted optimum outright, whose edge is 1.8%
+of gross — "too little". Fixed: `HashrateValuation.dilution` values the
+tickets a stake accumulates over the vault horizon on the fleet dedup
+closed form (`fleetEpochWinningsUsd`) and the 1-BTC proportional curve,
+so the marginal bends down, each vault on its own horizon (epoch: rounds
+left in the iteration; 1-BTC: rounds to the draw at the live inflow —
+315 days at today's $50 board, which is why tickets bought now are worth
+little there). The selector re-run on the same board with a $300 cap now
+stops at $21 unboosted (EV $0.40, 1.9% of gross) and $42 boosted (EV
+$1.49, 3.6%) on its own — the curve's optimum to within a few dollars.
+MIN_EDGE_BPS defaults to 25 under V2; tile mode applies to partial
+blankets too (the water-filler weights toward emptier tiles and may leave
+a crowded one out).

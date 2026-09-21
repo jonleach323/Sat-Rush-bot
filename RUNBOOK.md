@@ -81,11 +81,11 @@ TOLERANCE` and `WALLET_DRIFT_TOLERANCE_USD` stay at their §0/​default values
 1. **Flip endpoints.** `.env`: `RPC_HTTP_URL` + `SECONDARY_RPC_URLS` to the
    mainnet RPCs, `GRPC_URL`/`GRPC_TOKEN` to the mainnet Yellowstone,
    `EXECUTION_MODE=mainnet`, `MAINNET_CONFIRM` **unset for now**.
-2. **Confirm the program ID.** If the owner kept the vanity keypair
-   (`satRushGBRY…`), the existing IDL stands. If mainnet has a new address:
-   obtain the **mainnet IDL** from the owner, replace `satrush.json`, set
-   `PROGRAM_ID`, and re-run the full test suite (`pnpm test`) — the coders,
-   discriminators and PDAs all derive from that file.
+2. **Confirm the program ID.** The program kept its vanity address
+   (`satRushGBRY…`) through the V2 upgrade. `satrush.json` is generated from
+   the pinned SDK (`pnpm idl:gen`) and checked against the chain
+   (`pnpm idl:verify`) — see § 9; if the address ever changes, set
+   `PROGRAM_ID`, regenerate, verify, and re-run `pnpm test`.
 3. **Re-dump the config:**
    `EXECUTION_MODE=devnet pnpm exec tsx scripts/experiments/e6-config-dump.ts`
    pointed at mainnet RPC (e6 only reads; the devnet gate just guards
@@ -154,9 +154,14 @@ was upgraded and OUR IDL IS STALE.
 2. Do NOT guess layouts or patch offsets by hand — every coder,
    discriminator, and PDA in this codebase derives from `satrush.json`
    (CLAUDE.md ground rule).
-3. Request the updated IDL from the owner; replace `satrush.json`;
-   run `pnpm test` (161 tests re-validate coders round-trip);
-   re-run e6 + preflight; only then relaunch.
+3. Bump `@satrush/client` to the release matching the upgrade (nothing
+   publishes an IDL; the SDK's codecs are the source), then
+   `pnpm idl:gen && pnpm idl:verify && pnpm test` — the generator rebuilds
+   `satrush.json` and `src/adapter/generated-types.ts`, the verifier reads
+   the live accounts and diffs the builders against real transactions, and
+   the suite re-validates the coders round-trip. Re-run preflight; only then
+   relaunch. If the SDK has not been published yet, wait: a hand-patched
+   layout is how money gets lost.
 
 ## 5. Known operational facts (measured — see FINDINGS.md)
 
@@ -242,7 +247,8 @@ Operational notes:
 Three views of the same read-only data layer (`src/ops/monitor.ts`). None
 can control the bot — deploy/cap/kill are NOT reachable from any of them.
 
-**Telegram** (from your phone): `/status` `/pnl` `/board` `/rounds`
+**Telegram** (from your phone): `/status` (V2: marked net with both share legs,
+token yield, vault carry) `/wallets` (the fleet) `/pnl` `/board` `/rounds`
 `/competitors` `/health` for viewing; `/pause` `/resume` `/kill` for
 control (control is Telegram-only, gated to TELEGRAM_CHAT_ID). Plus the
 unsolicited alerts (HaltError, missed round, daily-cap, cap-bound, low
@@ -312,3 +318,166 @@ with no manual retune, which is exactly what shrinks win-dilution. Watch the
 **Setup order:** add the staked endpoint → confirm deploys still land (dashboard
 `land` column, near-zero "missed" alerts) → add the Jito URL + tip account →
 confirm again → let the adaptive offset re-tune down on its own.
+
+## 9. V2 operation (program upgrade of 2026-09-11)
+
+The bot runs the V2 economics by default (`GAME_VERSION=v2`). What changed
+operationally — everything else in this runbook still applies:
+
+- **IDL.** `satrush.json` is generated from the SDK (`pnpm idl:gen`), never
+  edited. After any SDK bump: `pnpm idl:gen && pnpm idl:verify && pnpm test`.
+  `idl:verify` reads mainnet through the coders, matches 40 fields to the
+  public API, decodes a settled event, and diffs the deploy/settle builders
+  against live transactions — it must print ALL CHECKS PASSED before a
+  restart into live mode.
+- **Preflight** adds `game_version_matches_chain` (fatal on mainnet: a V1
+  model against the V2 program is wrong) and `token_feed_live` (advisory:
+  without the API the RUSH leg is priced at `RUSH_USD_ESTIMATE ×
+  RUSH_MINT_PER_USD_ESTIMATE`, default 0). `MEASURED_ECONOMICS` is the live
+  V2 config; the 25% drift gate is unchanged.
+- **Token feed.** `SATRUSH_API_URL` `/board` every `TOKEN_FEED_POLL_MS`: RUSH
+  oracle price × RUSH-per-$ measured over the last settled rounds = the
+  token yield the selector credits. Stale past `TOKEN_FEED_MAX_AGE_MS` → the
+  leg falls back to the estimates (default: worth nothing). The skip log
+  line carries `tokenYield`, `blanketEvBps`, `emptiestEvBps` so you can see
+  how far from +EV the board is without a debugger.
+- **Expect skips.** On measured numbers the board is about −4% per dollar
+  at the round level (FINDINGS § E-v2-dryrun); `no_positive_marginal_ev`
+  every round is the model working, not a fault. It fires when the token
+  yield, a strike pool, or the occupancy prediction makes a tile +EV.
+- **Accounting.** A V2 win pays in BTC and RUSH vault shares, not USDC. The
+  daily-loss figure marks the day's won shares (vault rate × live price ×
+  (1 − exit fee); RUSH at 0 unless the feed is live) — the dashboard shows
+  `markedNetTodayUsd` next to the USD-only `todayNetUsd`. The reconcile
+  tripwire checks the exact 89% refund per deployment and halts on any
+  deviation, on BTC shares without a covered winner, or on a missing RUSH
+  leg. Claims: `claim_usd` compounds refunds (on by default); `claim_sats`
+  and `claim_token` pay the 10% exit fee and stay opt-in.
+- **Risk.** `MAX_PER_ROUND_USD` is still on gross. The daily cap counts 11%
+  of each stake (the toll: `1 − refund`) as at risk, both in the bankroll
+  and in the pre-send guard; realized losses are actual.
+- **Epoch rewards** are no longer claimed by the winner: the bot cranks
+  `distribute_epoch_reward(rank)`, which credits the winner's Miner (USD to
+  the claim pool, BTC to sats shares, RUSH to token shares). Nothing reaches
+  the wallet ATA until the claims above run.
+- **Wallet set.** `WALLET_PATHS` (see .env.example). One process, aggregate
+  caps split per round, one signed leg per wallet, per-wallet Miners,
+  settles (the primary cranks and pays), sweeps, vault engines and claims.
+  Fund each extra with USDC and `WALLET_MIN_LAMPORTS`; register the
+  primary's affiliate tag in the app first so extras bind to it at their
+  first deploy (`AFFILIATE_AUTHORITY` overrides). A leg that fails to land
+  is alerted with the per-wallet outcomes; the round counts as played if any
+  leg landed. The kill switch and pause apply to the whole fleet.
+- **RPC load.** Do not point the bot at `rpc.satrush.io`: it rate-limits a
+  poller within minutes (429 → Cloudflare 1015). Helius as before.
+- **Re-measure before any live start.** `pnpm mint-rule`, `pnpm vault-carry`,
+  `pnpm epoch-uplift`, `pnpm epoch-history`, `pnpm v2-timing`,
+  `pnpm staking-yield` refresh every short-lived fact; preflight refuses a
+  stale one. `pnpm hold-vs-stake` answers whether to leave winnings as
+  unclaimed shares or claim and stake (hold, at today's rates);
+  `pnpm buy-vs-mine` prices mining RUSH against buying it on Jupiter and
+  staking (buy for any single-tile play; a small blanket at the streak cap
+  mines it under spot, at break-even-to-+1% per round).
+- **The map.** `SAT-RUSH-MODEL.md` is the complete model; `pnpm ev-map`
+  prints every action's EV from live data. Start there before changing any
+  economic setting.
+- **The flip signal.** The selector prices the wallet's CURRENT streak, so
+  a −EV board at streak 1 keeps the bot skipping even when a blanket at the
+  cap would pay. Every skip log carries `blanketEvBpsAtStreakCap`; when it
+  clears `RAMP_ALERT_MIN_BPS` (default 50) one Telegram alert says the ramp
+  pays and mining RUSH beats buying it. With `AUTO_RAMP` (default on) the
+  bot starts the ~100-round ramp itself: the presence credit is floored at
+  the minimum blanket's toll while the signal holds, so it deploys the
+  minimum every round until the cap; the alert re-arms after the signal
+  drops below zero. `pnpm streak-ramp` prices the ramp. Until then, bought-and-staked RUSH is the
+  confirmed return (`pnpm hold-vs-stake`, `pnpm buy-vs-mine`). The mint rate drifts ~1.7% a day and the field's shape sets
+  the dedup uplift, so a week-old number is wrong, not approximate.
+- **Before the first live V2 round** (still outstanding): a real deploy +
+  settle on a $1 stake with `MAX_PER_ROUND_USD=1`, watching the reconcile
+  line; the first extra wallet's deploy (affiliate binding); and a vault
+  draw trigger if the owner's crank ever lets one through (the rotor
+  remaining accounts on the triggers are by analogy to deploy_public).
+
+## 10. Running the 21-wallet fleet (tile mode + treasury)
+
+The shape `pnpm ev-grid § C` prices best: 21 wallets, wallet i on tile i,
+which is a blanket at the fleet level (identical refund / sats / strike /
+RUSH flows) with every wallet earning the single-tile hashrate rate (121
+raw/$ at the cap vs 101). One orchestrator, aggregate caps, one deposit
+address.
+
+1. **Create it.** Start the bot. With the defaults (`FLEET_SIZE=21`) it
+   creates the primary keypair if `KEYPAIR_PATH` is missing, generates any
+   missing `keypairs/fleet/wallet-NN.json` (0600, never logged; the
+   directory is gitignored), logs the deposit address, and in mainnet mode
+   registers an affiliate tag derived from the primary's key (`sr` + ten
+   characters; `AFFILIATE_TAG` overrides) if the primary has none.
+   `pnpm fleet:init` does the same from the shell and prints the 21 public
+   keys with their tiles. Idempotent; WALLET_PATHS stays empty.
+2. **Fund it.** Send USDC and SOL to the PRIMARY (wallet 1, the first key
+   printed). Nothing else needs funding by hand. An EXISTING wallet (the
+   V1 operator key at `KEYPAIR_PATH`) is the right primary: it keeps its
+   Miner, its vault shares (left unclaimed, earning the carry), its
+   hashrate and deferred hashrate, and it becomes the affiliate the extras
+   bind to; `pnpm setup` prints what it holds. Its streak restarts like
+   everyone's (the V2 ramp is ~100 rounds).
+3. **The treasury does the rest.** Every `FLEET_REBALANCE_INTERVAL_MS` it
+   refreshes balances, claims every wallet's unclaimed USD (the 89% refund
+   coming home, fee-free), then moves USDC and SOL from the primary to the
+   wallets below `FLEET_WALLET_LOW_*`, lowest runway first, up to
+   `FLEET_WALLET_TARGET_*`, out of what the primary holds above its own
+   target plus `FLEET_TREASURY_RESERVE_USD`; wallets above twice the target
+   sweep the excess back. Top-ups are primary-signed, sweeps wallet-signed,
+   all through the race sender with the kill switch respected. When the
+   primary cannot cover the low wallets one Telegram alert says exactly what
+   to deposit; `/fleet` shows balances, tile, runway in rounds, pending and
+   last transfers. Dry mode plans and logs, sends nothing.
+4. **Tile mode** (`FLEET_TILE_MODE`, default on): when the selector picks a
+   full blanket, each wallet sends one single-tile transaction carrying its
+   tile's share of the allocation; the selector prices the blanket's
+   hashrate at one covered tile. A wallet that cannot fund its tile drops
+   out for that round (its tile goes unplayed; the treasury fixes it next
+   cycle); below `FLEET_TILE_MIN_COVER` covered tiles the round is skipped.
+   Non-blanket selections fall back to the slice split. Every wallet binds
+   to the primary's affiliate at its first deploy (10 bps of its volume
+   comes back to the primary as grubstake and is deployed from there).
+5. **Sizing — EV-max, nothing to set.** Every round fires at the model's
+   EV argmax and not a dollar past it: the water-filler stops where the
+   dilution-priced marginal turns non-positive — and it fires only if that
+   EV clears two floors: `MIN_EDGE_BPS` (25, a margin over the model's own
+   noise) and the economic hurdle (`EDGE_HURDLE_ENABLED`: every leg's
+   round-trip tx fees at the live priority fee and SOL price, plus the
+   staking yield the stake would earn over the round — "buying spot and
+   staking is +EV over this round" is that term; "mining RUSH is dearer
+   than buying it" is already the sign of the EV, as the RUSH leg is valued
+   at spot). Nothing else sizes below the argmax — `KELLY_FRACTION=0` (Kelly is
+   log-growth, i.e. safer than EV-max), `VAULT_MAX_SHARE=1` (the curve
+   prices our share), `STREAK_OPTION_DISCOUNT=1`, `MAX_PER_ROUND_USD=0`
+   (cash is the only cap) and `DAILY_LOSS_CAP_USD=0` with
+   `AUTO_DAILY_LOSS_FRACTION=1` (the day's opening bankroll: a round is
+   refused only for running out of money). The guard still enforces those
+   derived figures on every fire. The float per wallet anticipates the
+   selector's uncapped want each cycle, so a spike is funded before it
+   fires rather than after. Set any of these to play safer than the model. The selector adds $1 quanta to the best tile while the
+   marginal EV is positive, so it finds the EV-maximizing stake itself; the
+   hashrate leg is priced on the dilution curve (our tickets lower the value
+   of every ticket we hold), so the marginal bends down and the stop is the
+   true optimum, not a cap — `pnpm ev-size` prints the curve (today ~$20
+   unboosted, ~$50 boosted). Set `MAX_PER_ROUND_USD` ABOVE that optimum
+   (say $100): it is the fleet's per-round gross, each tile gets a 21st,
+   and a "cap-bound" alert means the cap, not the model, stopped the size.
+   `MIN_EDGE_BPS` is 25 under V2 (the optimum runs at 1–3% of gross).
+   The per-wallet USDC float is derived, not set: the treasury holds each
+   wallet to the observed peak leg × 1.5 × 8 rounds (floored at
+   `FLEET_WALLET_TARGET_USD`, capped by MAX_PER_ROUND ÷ tiles), and tops up
+   below 40% of it; `/fleet` prints the live target. What you size by hand
+   is only the deposit on the primary and the two risk limits. Per-wallet target/low marks should cover a few
+   hundred rounds of that share: at $21/round fleet gross (a $1 tile each)
+   the defaults ($20 target, $8 low) are ~20 rounds of pure misses per
+   wallet, plenty since 89% refunds every round. Raise them with the stake.
+6. **What to watch.** `/fleet` runway and the deposit alert; per-wallet
+   streaks (every wallet must hold its own; a wallet that misses 3 rounds
+   restarts its ramp); the skip log's `blanketEvBpsAtStreakCap` and the pot
+   (`pnpm ev-grid § A`); transaction fees per wallet (2 tx/round each —
+   the grace lets presence deploy every third round if fees bite).
+

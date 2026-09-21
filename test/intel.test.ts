@@ -273,6 +273,7 @@ describe("buildIntel", () => {
     expect(c.realizedSharesBps).toBeCloseTo(1488, 3);
     // USD-only says a heavy loss; the full picture is barely negative.
     expect(c.realizedBps).toBeCloseTo(-512, 3);
+    expect(c.realizedTokenBps).toBe(0); // no RUSH shares recorded, and unpriced by default
     db.close();
   });
 
@@ -354,3 +355,23 @@ describe("buildIntel", () => {
     db.close();
   });
 });
+
+describe("intel — V2 RUSH share leg", () => {
+  it("adds the token-share leg at the given share price, and counts it at nothing when unpriced", () => {
+    const db = freshDb();
+    db.recordMyDeploy({ roundId: 5, mask: 1, amount: usdToBase(100), evExpected: 0, firedSlot: 1, sig: "d5", status: "landed" });
+    db.recordSettlement({
+      roundId: 5, winningStake: 0n, wonUsd: usdToBase(89), wonShares: 0n, hashrateEarned: 0n,
+      wonTokenAmount: 1_000_000_000n, wonTokenShares: 2_000_000_000n, sig: "s5",
+    });
+    const unpriced = buildIntel(db, OPTS).calibration;
+    expect(unpriced.realizedTokenBps).toBe(0);
+    expect(unpriced.realizedBps).toBeCloseTo(-1100, 6); // the 11% toll, USD only
+    // 2e9 shares × $5e-10 = $1.00 on a $100 deploy = 100 bps
+    const priced = buildIntel(db, { ...OPTS, tokenShareValueUsd: 5e-10 }).calibration;
+    expect(priced.realizedTokenBps).toBeCloseTo(100, 6);
+    expect(priced.realizedBps).toBeCloseTo(-1000, 6);
+    db.close();
+  });
+});
+

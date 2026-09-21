@@ -56,13 +56,16 @@ export interface FeeModel {
 /** Fee legs read from the on-chain SatrushConfig. */
 export function feeModelFromConfig(config: SatrushConfig): FeeModel {
   return {
+    // V2 added buybacks_fee_bps to the deploy layer (50 bps live); a V1
+    // config decodes it as 0, so the sum is right for both.
     deployFeeBps:
       config.strike_fee_bps +
       config.epoch_fee_bps +
       config.one_btc_fee_bps +
-      config.protocol_fee_bps,
+      config.protocol_fee_bps +
+      (config.buybacks_fee_bps ?? 0),
     satsVaultRoundBps: config.sats_vault_round_fee_bps,
-    satsVaultClaimBps: config.sats_vault_claim_fee_bps,
+    satsVaultClaimBps: config.vault_exit_fee_bps,
   };
 }
 
@@ -330,4 +333,41 @@ export function marginalEv(
   const bumped = [...allocGross];
   bumped[tile] = (bumped[tile] ?? 0n) + incrementGross;
   return evOfAllocation(ctx, bumped) - evOfAllocation(ctx, allocGross);
+}
+
+// ── model swap point ─────────────────────────────────────────────────────────
+
+/**
+ * What the selector actually needs from an EV model. The water-filler and the
+ * k-emptiest fallback only ever ask three questions of the economics — the EV
+ * of an allocation, the marginal EV of one more quantum on a tile, and the
+ * per-outcome return vector Kelly sizes off — plus the predicted stakes they
+ * rank tiles by. Binding them to this interface instead of to the V1
+ * functions above is what lets the V2 economics (`ev-v2.ts`) drop in without
+ * touching the allocation logic, the same way `OccupancyPredictor` was left as
+ * the swap point for the private-deployment era.
+ */
+export interface EvModel {
+  /** Predicted-final per-tile stakes of OTHER players (base units), length 21. */
+  readonly predictedStakes: bigint[];
+  /** Expected profit of `allocGross` (base units, float; negative = losing bet). */
+  ev(allocGross: bigint[]): number;
+  /** EV gain from adding `incrementGross` to `tile` on top of `allocGross`. */
+  marginal(allocGross: bigint[], tile: number, incrementGross: bigint): number;
+  /** Per-outcome return on total stake, length 21 — see `outcomeReturns`. */
+  returns(allocGross: bigint[]): number[];
+}
+
+export function isEvModel(x: EvContext | EvModel): x is EvModel {
+  return typeof (x as Partial<EvModel>).ev === "function";
+}
+
+/** The V1 parimutuel economics above, as an `EvModel`. */
+export function v1Model(ctx: EvContext): EvModel {
+  return {
+    predictedStakes: ctx.predictedStakes,
+    ev: (alloc) => evOfAllocation(ctx, alloc),
+    marginal: (alloc, tile, inc) => marginalEv(ctx, alloc, tile, inc),
+    returns: (alloc) => outcomeReturns(ctx, alloc),
+  };
 }

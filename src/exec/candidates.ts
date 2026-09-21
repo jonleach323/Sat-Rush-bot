@@ -18,7 +18,8 @@ import {
   buildDeployPublic,
   type InstructionContext,
 } from "../adapter/instructions.js";
-import { TILES_COUNT, type EvContext } from "../strategy/ev.js";
+import { popcount, tilesToMask } from "../adapter/mask.js";
+import { TILES_COUNT, type EvContext, type EvModel } from "../strategy/ev.js";
 import {
   selectAllocation,
   type Selection,
@@ -26,28 +27,104 @@ import {
 } from "../strategy/selector.js";
 import { assembleTx } from "./tx.js";
 import type { FeeEstimator } from "./fees.js";
+import type { FundingFloor, WalletSet } from "./wallets.js";
 import { scaledTipLamports } from "./tip.js";
 
 export type DeploySelection = Extract<Selection, { kind: "deploy" }>;
 
+/**
+ * Tile mode split: wallet i takes tile (i mod 21) with that tile's gross from
+ * the allocation (tiles the selection left empty produce no leg). A wallet that
+ * cannot fund its tile (floor, USDC, lamports) is skipped — its tile goes
+ * unplayed this round — rather than shrinking everyone else. Exported for tests.
+ */
+export function tileLegs(
+  set: WalletSet,
+  allocation: readonly bigint[],
+  floor: FundingFloor,
+): { signer: Keypair; amountGross: bigint; mask: number }[] {
+  const out: { signer: Keypair; amountGross: bigint; mask: number }[] = [];
+  set.all().forEach((w, i) => {
+    const tile = i % TILES_COUNT;
+    const amount = allocation[tile] ?? 0n;
+    if (amount < floor.minDeployBase) return;
+    if (w.disabledReason !== null || w.usdcBase < amount || w.lamports < floor.minLamports) return;
+    // A second wallet on the same tile (fleet > 21) doubles up on it; fine, it is still the blanket's tile.
+    out.push({ signer: w.keypair, amountGross: amount, mask: tilesToMask([tile]) });
+  });
+  return out;
+}
+
 export interface BuiltCandidate {
   rank: number;
   selection: DeploySelection;
+  /** The first leg's signature / bytes — the single-wallet view. */
   signature: string;
   /** Pre-signed wire bytes — what fire() writes. */
   serialized: Buffer;
   blockhash: string;
   lastValidBlockHeight: number;
   feeMicroLamports: number;
-  /** Jito tip embedded in this candidate (lamports); 0 when no tip. */
+  /** Jito tip embedded across the legs (lamports); 0 when no tip. */
   tipLamports: number;
+  /**
+   * One signed transaction per fleet wallet, same mask, the round's total
+   * gross split across them (WalletSet.allocate). Exactly one leg for a
+   * single wallet. Σ amountGross == selection.totalGross.
+   */
+  legs: CandidateLeg[];
   roundId: number;
   builtAtMs: number;
 }
 
+/** One signed deploy for one wallet of the fleet (a single-wallet set has one leg). */
+export interface CandidateLeg {
+  /** Signing wallet, base58. */
+  wallet: string;
+  /** This leg's own selection mask (the selection's mask in slice mode; one tile in tile mode). */
+  mask: number;
+  amountGross: bigint;
+  /** Paid from the Miner grubstake rather than the wallet (no hashrate on this leg). */
+  grubstake: boolean;
+  signature: string;
+  serialized: Buffer;
+  lastValidBlockHeight: number;
+  tipLamports: number;
+}
+
 export interface CandidateSetOptions {
   connection: Connection;
+  /** The primary signer (single-wallet mode signs everything with it). */
   payer: Keypair;
+  /**
+   * Fleet mode: the round's gross is split across these wallets and each leg
+   * is signed by its own keypair. Omit for the single-wallet path.
+   */
+  wallets?: WalletSet | undefined;
+  /** Funding floor for `wallets.allocate` (on-chain min deploy + lamports). */
+  fundingFloor?: FundingFloor | undefined;
+  /**
+   * Tile mode: a full-blanket selection is sent as one single-tile leg per
+   * wallet (wallet i → tile i mod 21) carrying that tile's share of the
+   * allocation, so the fleet's money on the board is the blanket while each
+   * wallet earns single-tile hashrate. Wallets that cannot fund their tile
+   * drop out; below `tileMinCover` legs the candidate is dropped. Non-blanket
+   * selections use the slice split.
+   */
+  tileMode?: boolean | undefined;
+  tileMinCover?: number | undefined;
+  /**
+   * Affiliate authority to bind a wallet to at its FIRST deploy (V2). Called
+   * per wallet; return undefined to pass none (the primary must: self-referral
+   * is refused on chain).
+   */
+  affiliateFor?: ((wallet: PublicKey) => PublicKey | undefined) | undefined;
+  /**
+   * Whether a wallet's leg of `amountGross` should be paid from its Miner
+   * grubstake (V2 `is_grubstake_funded`) instead of its USDC ATA. Called per
+   * leg; default: never.
+   */
+  grubstakeFor?: ((wallet: PublicKey, amountGross: bigint) => boolean) | undefined;
   ixCtx: InstructionContext;
   feeEstimator: FeeEstimator;
   computeUnitLimit: number;
@@ -68,21 +145,43 @@ const BLOCKHASH_MAX_AGE_MS = 15_000;
 const EXCLUDE_STAKE = 10n ** 15n; // $1B in base units
 
 /**
+ * What the selector prices against: the V1 context, or a model factory (V2)
+ * that rebuilds the economics for a modified stake vector — the fallback
+ * variants below need to re-run the selector with tiles excluded.
+ */
+export type EvSource =
+  | EvContext
+  | { predictedStakes: bigint[]; model: (predictedStakes: bigint[]) => EvModel };
+
+function isModelSource(
+  src: EvSource,
+): src is { predictedStakes: bigint[]; model: (predictedStakes: bigint[]) => EvModel } {
+  return typeof (src as { model?: unknown }).model === "function";
+}
+
+/**
  * Best allocation + up to 2 next-best mask variants. Fallbacks re-run the
  * selector with the strongest tile(s) of the previous pick made
  * unattractive, yielding genuinely different masks (deduped).
  */
 export function computeCandidateSelections(
-  ctx: EvContext,
+  src: EvSource,
   cfg: SelectorConfig,
+  onSkip?: (reason: string) => void,
 ): DeploySelection[] {
   const out: DeploySelection[] = [];
   const seenMasks = new Set<number>();
-  let stakes = ctx.predictedStakes;
+  let stakes = src.predictedStakes;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const selection = selectAllocation({ ...ctx, predictedStakes: stakes }, cfg);
-    if (selection.kind !== "deploy") break;
+    const selection = selectAllocation(
+      isModelSource(src) ? src.model(stakes) : { ...src, predictedStakes: stakes },
+      cfg,
+    );
+    if (selection.kind !== "deploy") {
+      if (attempt === 0) onSkip?.(selection.reason);
+      break;
+    }
     if (!seenMasks.has(selection.mask)) {
       seenMasks.add(selection.mask);
       out.push(selection);
@@ -110,7 +209,15 @@ export class CandidateSet {
     fetchedAtMs: number;
   } | null = null;
 
+  /** Why the selector produced nothing for the current round (diagnostic). */
+  private skipReason: string | null = null;
+
   constructor(private readonly opts: CandidateSetOptions) {}
+
+  /** The selector's skip reason for `roundId`, or null when it built candidates. */
+  lastSkipReason(roundId: number): string | null {
+    return roundId === this.roundId ? this.skipReason : null;
+  }
 
   /** The current hot set (empty if none built or round rotated). */
   current(roundId?: number): BuiltCandidate[] {
@@ -126,6 +233,7 @@ export class CandidateSet {
   clear(): void {
     this.candidates = [];
     this.roundId = null;
+    this.skipReason = null;
   }
 
   /**
@@ -151,13 +259,16 @@ export class CandidateSet {
    */
   async refresh(
     roundId: number,
-    ctx: EvContext,
+    ctx: EvSource,
     selectorCfg: SelectorConfig,
   ): Promise<BuiltCandidate[]> {
     const now = this.opts.now ?? Date.now;
     if (roundId !== this.roundId) this.clear();
 
-    const selections = computeCandidateSelections(ctx, selectorCfg);
+    this.skipReason = null;
+    const selections = computeCandidateSelections(ctx, selectorCfg, (r) => {
+      this.skipReason = r;
+    });
     if (selections.length === 0) {
       this.candidates = [];
       this.roundId = roundId;
@@ -174,49 +285,19 @@ export class CandidateSet {
 
     const built: BuiltCandidate[] = [];
     for (const [rank, selection] of selections.entries()) {
-      const instructions: TransactionInstruction[] = [
-        buildDeployPublic(this.opts.ixCtx, {
-          authority: this.opts.payer.publicKey,
-          roundId,
-          selectionMask: selection.mask,
-          amountBaseUnits: selection.totalGross,
-        }),
-      ];
-      let tipLamports = 0;
-      if (this.opts.jitoTip && this.opts.jitoTip.accounts.length > 0) {
-        const accts = this.opts.jitoTip.accounts;
-        const rng = this.opts.rng ?? Math.random;
-        const account = accts[Math.min(accts.length - 1, Math.floor(rng() * accts.length))]!;
-        tipLamports = scaledTipLamports(Number(selection.ev), {
-          baseLamports: this.opts.jitoTip.baseLamports,
-          maxLamports: this.opts.jitoTip.maxLamports,
-          evFraction: this.opts.jitoTip.evFraction,
-          solUsd: this.opts.jitoTip.solUsd(),
-        });
-        instructions.push(
-          SystemProgram.transfer({
-            fromPubkey: this.opts.payer.publicKey,
-            toPubkey: account,
-            lamports: tipLamports,
-          }),
-        );
-      }
-      const { tx } = await assembleTx(this.opts.connection, {
-        payer: this.opts.payer,
-        instructions,
-        computeUnitLimit: this.opts.computeUnitLimit,
-        priorityFeeMicroLamports: fee,
-        blockhash: { blockhash, lastValidBlockHeight },
-      });
+      const legs = await this.buildLegs(roundId, selection, fee, blockhash, lastValidBlockHeight);
+      if (legs.length === 0) continue; // fleet cannot fund this selection this round
+      const first = legs[0]!;
       built.push({
         rank,
         selection,
-        signature: bs58.encode(tx.signatures[0]!),
-        serialized: Buffer.from(tx.serialize()),
+        signature: first.signature,
+        serialized: first.serialized,
         blockhash,
         lastValidBlockHeight,
         feeMicroLamports: fee,
-        tipLamports,
+        tipLamports: legs.reduce((a, l) => a + l.tipLamports, 0),
+        legs,
         roundId,
         builtAtMs: now(),
       });
@@ -224,6 +305,102 @@ export class CandidateSet {
     this.candidates = built;
     this.roundId = roundId;
     return built;
+  }
+
+  /**
+   * The wallet split for a selection: `[{payer, amount}]` for one wallet, else
+   * WalletSet.allocate over the fleet. The selection's total is what the
+   * bankroll authorizes; the legs must sum to it or the candidate is dropped —
+   * a fleet that can only fund part of the budget would otherwise send less
+   * than the guards checked, and a partial fleet deploy is not the plan the
+   * selector priced.
+   */
+  private splitAcrossWallets(
+    selection: DeploySelection,
+  ): { signer: Keypair; amountGross: bigint; mask: number }[] {
+    const set = this.opts.wallets;
+    if (!set || set.size <= 1) {
+      return [{ signer: this.opts.payer, amountGross: selection.totalGross, mask: selection.mask }];
+    }
+    const floor = this.opts.fundingFloor ?? { minDeployBase: 1_000_000n, minLamports: 0 };
+    if (this.opts.tileMode) {
+      // Any allocation is sent tile-by-tile: wallet i takes tile i when the
+      // selection put money there (the water-filler weights the blanket
+      // toward emptier tiles and may leave a crowded one out — that is still
+      // the fleet's blanket). Below the cover floor, fall back to slices.
+      const legs = tileLegs(set, selection.allocation, floor);
+      const covered = popcount(selection.mask);
+      const minCover = Math.min(covered, this.opts.tileMinCover ?? TILES_COUNT);
+      if (legs.length >= minCover) return legs;
+    }
+    const allocs = set.allocate(selection.totalGross, floor);
+    const sum = allocs.reduce((a, x) => a + x.grossBase, 0n);
+    if (allocs.length === 0 || sum !== selection.totalGross) return [];
+    return allocs.map((a) => ({ signer: a.wallet.keypair, amountGross: a.grossBase, mask: selection.mask }));
+  }
+
+  private async buildLegs(
+    roundId: number,
+    selection: DeploySelection,
+    fee: number,
+    blockhash: string,
+    lastValidBlockHeight: number,
+  ): Promise<CandidateLeg[]> {
+    const split = this.splitAcrossWallets(selection);
+    const legs: CandidateLeg[] = [];
+    for (const { signer, amountGross, mask } of split) {
+      const affiliateAuthority = this.opts.affiliateFor?.(signer.publicKey);
+      const isGrubstakeFunded = this.opts.grubstakeFor?.(signer.publicKey, amountGross) === true;
+      const instructions: TransactionInstruction[] = [
+        buildDeployPublic(this.opts.ixCtx, {
+          authority: signer.publicKey,
+          roundId,
+          selectionMask: mask,
+          amountBaseUnits: amountGross,
+          isGrubstakeFunded,
+          ...(affiliateAuthority ? { affiliateAuthority } : {}),
+        }),
+      ];
+      let tipLamports = 0;
+      if (this.opts.jitoTip && this.opts.jitoTip.accounts.length > 0) {
+        const accts = this.opts.jitoTip.accounts;
+        const rng = this.opts.rng ?? Math.random;
+        const account = accts[Math.min(accts.length - 1, Math.floor(rng() * accts.length))]!;
+        // EV-scale the tip on this leg's share of the round's EV.
+        const share = Number(amountGross) / Number(selection.totalGross);
+        tipLamports = scaledTipLamports(Number(selection.ev) * share, {
+          baseLamports: this.opts.jitoTip.baseLamports,
+          maxLamports: this.opts.jitoTip.maxLamports,
+          evFraction: this.opts.jitoTip.evFraction,
+          solUsd: this.opts.jitoTip.solUsd(),
+        });
+        instructions.push(
+          SystemProgram.transfer({
+            fromPubkey: signer.publicKey,
+            toPubkey: account,
+            lamports: tipLamports,
+          }),
+        );
+      }
+      const { tx } = await assembleTx(this.opts.connection, {
+        payer: signer,
+        instructions,
+        computeUnitLimit: this.opts.computeUnitLimit,
+        priorityFeeMicroLamports: fee,
+        blockhash: { blockhash, lastValidBlockHeight },
+      });
+      legs.push({
+        wallet: signer.publicKey.toBase58(),
+        mask,
+        amountGross,
+        grubstake: isGrubstakeFunded,
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        tipLamports,
+      });
+    }
+    return legs;
   }
 }
 

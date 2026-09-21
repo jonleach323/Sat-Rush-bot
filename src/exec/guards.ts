@@ -10,6 +10,7 @@
  */
 import { HaltError } from "../ingest/decode.js";
 import { maskToTiles } from "../adapter/mask.js";
+import { stakeAtRisk } from "../strategy/bankroll.js";
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
@@ -22,6 +23,8 @@ export interface DeploySendInvariants {
   maxPerRoundBase: bigint;
   dailyLossCapBase: bigint;
   realizedLossTodayBase: bigint;
+  /** Fraction of the stake counted against the daily cap (Bankroll.lossFractionAtRisk; 1 = all). */
+  lossFractionAtRisk?: number | undefined;
   priorityFeeMicroLamports: number;
   maxPriorityFeeMicroLamports: number;
   tipLamports: number;
@@ -64,10 +67,13 @@ export function assertDeployInvariants(inv: DeploySendInvariants): void {
       maxPerRound: inv.maxPerRoundBase.toString(),
     });
   }
-  // Daily loss cap re-checked here on the ACTUAL amount, at the last line.
-  if (inv.realizedLossTodayBase + a > inv.dailyLossCapBase) {
+  // Daily loss cap re-checked here on the ACTUAL amount, at the last line,
+  // with the same at-risk fraction the bankroll authorized against.
+  const atRisk = stakeAtRisk(a, inv.lossFractionAtRisk ?? 1);
+  if (inv.realizedLossTodayBase + atRisk > inv.dailyLossCapBase) {
     halt("daily loss cap would be exceeded", {
       amount: a.toString(),
+      atRisk: atRisk.toString(),
       lossToday: inv.realizedLossTodayBase.toString(),
       cap: inv.dailyLossCapBase.toString(),
     });
@@ -99,7 +105,7 @@ export function assertDeployInvariants(inv: DeploySendInvariants): void {
 }
 
 export interface FeeBearingSendInvariants {
-  kind: "settle" | "claim";
+  kind: "settle" | "claim" | "transfer";
   priorityFeeMicroLamports: number;
   maxPriorityFeeMicroLamports: number;
   killSwitchEngaged: boolean;

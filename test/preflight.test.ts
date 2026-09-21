@@ -13,7 +13,7 @@ describe("economics tolerance gate", () => {
   });
 
   it("tolerates small drift", () => {
-    const drifted = { ...baseline, protocol_fee_bps: Math.round(142 * 1.1) };
+    const drifted = { ...baseline, protocol_fee_bps: Math.round(baseline.protocol_fee_bps * 1.1) };
     expect(compareEconomics(drifted).ok).toBe(true);
   });
 
@@ -37,7 +37,7 @@ describe("economics tolerance gate", () => {
   });
 
   it("respects a custom tolerance", () => {
-    const drifted = { ...baseline, protocol_fee_bps: Math.round(142 * 1.2) };
+    const drifted = { ...baseline, protocol_fee_bps: Math.round(baseline.protocol_fee_bps * 1.2) };
     expect(compareEconomics(drifted, 0.1).ok).toBe(false);
     expect(compareEconomics(drifted, ECONOMICS_TOLERANCE).ok).toBe(true);
   });

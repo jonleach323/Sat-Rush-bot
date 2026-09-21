@@ -62,6 +62,27 @@ export const EPOCH_PAYOUT_FRACTION =
   EPOCH_REWARD_CURVE_BPS.reduce((a, b) => a + b, 0) / 10_000;
 
 /**
+ * V2 epoch curve: "all 21 Epoch Vault winners now receive an equal-value
+ * prize" (announcement), and the SDK's `EpochWinnerSelected.rank` "does not
+ * affect the pot share (all winners receive the same fixed share)". The
+ * payout fraction stays 90% — the API's `activePoolUsdAmount` is still "the
+ * pool minus the 10% that rolls over" — so the flat curve carries the same
+ * 9_000 bps total as V1's, spread evenly.
+ *
+ * Selection is unchanged (ticket-weighted, without replacement, deduped by
+ * wallet), so for a small share the expected take is the same as under V1 —
+ * `epochWinFraction` reduces to 0.9·p either way. What changes is the SHAPE:
+ * a large holder can no longer take rank 1's 32%; the most one wallet can win
+ * is one flat 1/21 slot. The take saturates far earlier, which is why the
+ * ticket selector must be handed this curve under V2 (see `VaultTicketContext.curve`).
+ */
+export const EPOCH_EQUAL_CURVE_BPS: readonly number[] = Object.freeze(
+  new Array<number>(EPOCH_REWARD_CURVE_BPS.length).fill(
+    EPOCH_REWARD_CURVE_BPS.reduce((a, b) => a + b, 0) / EPOCH_REWARD_CURVE_BPS.length,
+  ),
+);
+
+/**
  * Expected epoch winnings as a fraction of the pool, for ticket share `p`.
  *
  * Winners are deduped BY WALLET (owner-confirmed): when a wallet is drawn, ALL
@@ -83,16 +104,55 @@ export const EPOCH_PAYOUT_FRACTION =
  * Not modeled: if participants_count <= 21 every entrant wins something, which
  * is a materially better regime. Refine once recon shows typical participation.
  */
-export function epochWinFraction(p: number, dedupUplift = 1): number {
+/**
+ * USD a FLEET expects from holding `tickets` epoch tickets split evenly over
+ * `wallets` wallets against `othersTickets`, for the V2 equal-prize draw: 21
+ * draws without replacement, one prize per wallet, each prize 0.9·pool/21.
+ * A closed form of the dedup effect the per-wallet uplift only approximates;
+ * it is what makes a ticket worth LESS as we hold more (pnpm ev-size).
+ * Falls back to the curve model with the uplift for a non-equal curve.
+ */
+export function fleetEpochWinningsUsd(
+  tickets: number,
+  othersTickets: number,
+  poolUsd: number,
+  wallets: number,
+  curve: readonly number[] = EPOCH_EQUAL_CURVE_BPS,
+  dedupUplift = 1,
+): number {
+  if (!(tickets > 0) || !(poolUsd > 0)) return 0;
+  const equal = curve.length === 21 && curve.every((c) => Math.abs(c - (curve[0] ?? 0)) < 1e-9);
+  if (!equal) return expectedWinningsUsd(tickets, othersTickets, poolUsd, "epoch", dedupUplift, curve);
+  const k = Math.max(1, Math.floor(wallets));
+  const prize = (EPOCH_PAYOUT_FRACTION * poolUsd) / 21;
+  const perWallet = tickets / k;
+  const p = 1 - Math.pow(1 - perWallet / (othersTickets + tickets), 21);
+  return Math.min(k, 21) * p * prize;
+}
+
+/** USD a holder of `tickets` 1-BTC tickets expects: winner-take-all, exactly proportional, diluted by its own tickets. */
+export function oneBtcWinningsUsd(tickets: number, othersTickets: number, prizeUsd: number): number {
+  if (!(tickets > 0) || !(prizeUsd > 0)) return 0;
+  return (tickets / (othersTickets + tickets)) * prizeUsd;
+}
+
+export function epochWinFraction(
+  p: number,
+  dedupUplift = 1,
+  curve: readonly number[] = EPOCH_REWARD_CURVE_BPS,
+): number {
   const share = Math.max(0, Math.min(1, p));
   let acc = 0;
-  for (let i = 0; i < EPOCH_REWARD_CURVE_BPS.length; i++) {
-    acc += share * Math.pow(1 - share, i) * ((EPOCH_REWARD_CURVE_BPS[i] ?? 0) / 10_000);
+  let payoutFraction = 0;
+  for (let i = 0; i < curve.length; i++) {
+    const w = (curve[i] ?? 0) / 10_000;
+    payoutFraction += w;
+    acc += share * Math.pow(1 - share, i) * w;
   }
   // Whale blocks leaving the pool lift a small holder's odds on later draws;
   // the sum above deliberately ignores that. Never scale ABOVE the full payout
   // fraction — the uplift redistributes odds, it cannot mint pool.
-  return Math.min(EPOCH_PAYOUT_FRACTION, acc * Math.max(1, dedupUplift));
+  return Math.min(payoutFraction, acc * Math.max(1, dedupUplift));
 }
 
 export interface VaultTicketContext {
@@ -111,6 +171,12 @@ export interface VaultTicketContext {
   maxTickets: number;
   /** Epoch wallet-dedup uplift; 1 = off. Ignored for the 1-BTC vault. */
   dedupUplift?: number | undefined;
+  /**
+   * Epoch reward curve, bps of the pool by winner rank. Defaults to V1's
+   * rank curve; pass `EPOCH_EQUAL_CURVE_BPS` under V2. Ignored for the 1-BTC
+   * vault.
+   */
+  curve?: readonly number[] | undefined;
 }
 
 export interface VaultDecision {
@@ -159,6 +225,8 @@ export interface VaultContextInput {
   hashrateValueUsdPerPoint: number;
   maxTickets: number;
   dedupUplift?: number | undefined;
+  /** Epoch reward curve; see `VaultTicketContext.curve`. */
+  curve?: readonly number[] | undefined;
 }
 
 /**
@@ -185,6 +253,7 @@ export function buildVaultContext(input: VaultContextInput): VaultTicketContext 
     hashrateValueUsd: input.hashrateValueUsdPerPoint * input.ticketPriceHashrate,
     maxTickets: input.maxTickets,
     dedupUplift: input.dedupUplift,
+    curve: input.curve,
   };
 }
 
@@ -201,6 +270,7 @@ export function expectedWinningsUsd(
   poolValueUsd: number,
   kind: VaultKind = "epoch",
   dedupUplift = 1,
+  curve: readonly number[] = EPOCH_REWARD_CURVE_BPS,
 ): number {
   const total = myTickets + othersTickets;
   if (total <= 0) return 0;
@@ -208,7 +278,7 @@ export function expectedWinningsUsd(
   // Only epoch dedups by wallet; the 1-BTC draw is winner-take-all by ticket
   // and so is exactly proportional — no uplift applies to it.
   return kind === "epoch"
-    ? epochWinFraction(p, dedupUplift) * poolValueUsd
+    ? epochWinFraction(p, dedupUplift, curve) * poolValueUsd
     : p * poolValueUsd;
 }
 
@@ -254,7 +324,10 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
   }
 
   const ev = (mine: number): number =>
-    expectedWinningsUsd(mine, ctx.othersTickets, ctx.poolValueUsd, ctx.kind, ctx.dedupUplift);
+    expectedWinningsUsd(
+      mine, ctx.othersTickets, ctx.poolValueUsd, ctx.kind, ctx.dedupUplift,
+      ctx.curve ?? EPOCH_REWARD_CURVE_BPS,
+    );
   const base = ev(ctx.myTickets);
   let buy = 0;
   while (buy < budget) {

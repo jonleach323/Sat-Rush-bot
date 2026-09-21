@@ -14,15 +14,15 @@ const other = Keypair.generate().publicKey;
 describe("epochWinIndex", () => {
   it("finds our first unclaimed win", () => {
     const winners = [
-      { authority: other, claimed: false },
-      { authority: me, claimed: false },
-      { authority: me, claimed: true },
+      { authority: other, distributed: false },
+      { authority: me, distributed: false },
+      { authority: me, distributed: true },
     ];
     expect(epochWinIndex(winners, me)).toBe(1);
   });
   it("ignores already-claimed wins and non-wins", () => {
-    expect(epochWinIndex([{ authority: me, claimed: true }], me)).toBe(-1);
-    expect(epochWinIndex([{ authority: other, claimed: false }], me)).toBe(-1);
+    expect(epochWinIndex([{ authority: me, distributed: true }], me)).toBe(-1);
+    expect(epochWinIndex([{ authority: other, distributed: false }], me)).toBe(-1);
   });
 });
 

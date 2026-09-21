@@ -13,6 +13,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
   type TransactionInstruction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -27,21 +28,25 @@ import type {
   OneBtcVaultIteration,
   PublicAutomation,
   PublicDeployCreated,
+  Affiliate,
   PublicDeploySettled,
+  Round,
   RoundRevealed,
 } from "./adapter/idl.js";
 import { decodeAccount } from "./adapter/idl.js";
 import {
   buildBuyEpochTickets,
   buildBuyOneBtcTickets,
-  buildClaimEpochReward,
+  buildDistributeEpochReward,
   buildClaimOneBtcReward,
   buildClaimSats,
+  buildExchangeAffiliatePoints,
   buildClaimUsd,
   buildSelectEpochWinner,
   buildSettleDeployPublic,
   buildTriggerEpochDraw,
   buildTriggerOneBtcDraw,
+  buildSetMinerTag,
   type InstructionContext,
 } from "./adapter/instructions.js";
 import {
@@ -53,6 +58,8 @@ import {
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
   satsVaultPda,
+  tokenVaultPda,
+  affiliatePda,
 } from "./adapter/pdas.js";
 import { VaultEngine } from "./exec/vault-engine.js";
 import { VaultManager, oneBtcFillBps, type VaultReadState } from "./exec/vault-manager.js";
@@ -65,7 +72,7 @@ import {
   readableCommitments,
   type AutomationCommitment,
 } from "./ingest/automations.js";
-import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
+import { btcBaseToUsd, expectedWinningsUsd, type VaultKind, EPOCH_REWARD_CURVE_BPS } from "./strategy/vault.js";
 import {
   epochAction,
   epochWinIndex,
@@ -75,14 +82,19 @@ import {
   type OneBtcStateName,
 } from "./strategy/vault-claim.js";
 import { loadConfig, type Config } from "./config.js";
-import { CandidateSet } from "./exec/candidates.js";
+import { CandidateSet, type EvSource,
+  computeCandidateSelections,
+} from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { depositInfo, qrDataUrl, qrPng } from "./ops/deposit.js";
+import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
-import { reconcileRoundOutcome, reconcileWalletDrift } from "./strategy/reconcile.js";
+import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
 import { PriceFeed } from "./ingest/prices.js";
@@ -92,16 +104,21 @@ import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
 import { HealthMonitor } from "./ops/health.js";
 import { MonitorApi } from "./ops/api.js";
-import { createMonitorData, type MonitorData, type VaultPoolsJson } from "./ops/monitor.js";
-import { createTelegramOps, type TelegramOps } from "./ops/telegram.js";
+import { createMonitorData, type MonitorData, type VaultPoolsJson, type StatusJson } from "./ops/monitor.js";
+import { createTelegramOps, type TelegramOps, type FleetReport } from "./ops/telegram.js";
 import { StateDb } from "./state/db.js";
 import { DEFAULT_DEPLOY_FEE_BPS, Pnl, utcDate } from "./state/pnl.js";
 import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
-import { feeModelFromConfig, netFactor, TILES_COUNT, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
+import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
+import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
+import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { TokenFeed } from "./ingest/token-feed.js";
+import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
-import { hashrateRawPerUsd, strikeBonusMultiplier } from "./strategy/hashrate.js";
+import { hashrateRawPerUsd, REWARD_MAX_STREAK, strikeBonusMultiplier, type HashrateDilution } from "./strategy/hashrate.js";
 import {
   predictRivalInflow,
   profileCompetitors,
@@ -124,10 +141,39 @@ export type BotState =
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
+/**
+ * The risk limits in auto mode. Per round: the fleet's deployable USDC (cash
+ * is the only cap; the selector and Kelly size below it). Daily: a fraction
+ * of the day's opening USDC, never below $5. A configured positive value is a
+ * hard figure instead. Exported for tests.
+ */
+export function deriveLimits(
+  cfg: { MAX_PER_ROUND_USD: number; DAILY_LOSS_CAP_USD: number; AUTO_DAILY_LOSS_FRACTION: number },
+  fleetUsdcBase: bigint,
+  dayOpenUsdcBase: bigint | null,
+): { maxPerRound: bigint; dailyLossCap: bigint } {
+  const floor = usdToBase(1);
+  const maxPerRound = cfg.MAX_PER_ROUND_USD > 0 ? usdToBase(cfg.MAX_PER_ROUND_USD) : fleetUsdcBase > floor ? fleetUsdcBase : floor;
+  const base = dayOpenUsdcBase ?? fleetUsdcBase;
+  const autoDaily = BigInt(Math.round(Number(base) * cfg.AUTO_DAILY_LOSS_FRACTION));
+  const dailyFloor = usdToBase(5);
+  const dailyLossCap = cfg.DAILY_LOSS_CAP_USD > 0 ? usdToBase(cfg.DAILY_LOSS_CAP_USD) : autoDaily > dailyFloor ? autoDaily : dailyFloor;
+  return { maxPerRound, dailyLossCap };
+}
+
+/** Affiliate tag derived from the primary's public key when none is configured: `sr` + the first 10 alphanumerics, lower-cased. */
+export function autoAffiliateTag(primary: PublicKey): string {
+  return ("sr" + primary.toBase58().toLowerCase().replace(/[^a-z0-9]/g, "")).slice(0, 12);
+}
+
 export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
   private paused = false;
+  /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
+  private rampAlertArmed = true;
+  /** Last blanket-at-streak-cap EV (bps of gross), presence credit excluded; the auto-ramp reads it. */
+  private lastBlanketAtCapBps: number | null = null;
   private fireInFlight = false;
   private skipLogged = new Set<string>();
   private wasStale = false;
@@ -149,11 +195,19 @@ export class Orchestrator {
   /** Per-crank failure backoff, so a bad eligibility check cannot spam sends. */
   private readonly crankBackoff = new Map<string, { failures: number; nextAttemptMs: number }>();
   private walletDriftTimer: NodeJS.Timeout | null = null;
+  private fleetTimer: NodeJS.Timeout | null = null;
+  private dayAnchor: { day: string; usdcBase: bigint } | null = null;
+  private depositBlock: StatusJson["deposit"] | null = null;
+  private fundedAlerted = false;
+  private fleetCycleInFlight = false;
+  private lastFleetPlan: { at: number; plan: FleetPlan; executed: number; dry: boolean } | null = null;
+  private fleetShortfallAlerted = false;
   private vaultManager: VaultManager | null = null;
   // Per-tick caches so the (synchronous) VaultEngine deps can read fresh values
   // that the manager's async readState refreshes immediately before evaluating.
-  private vaultHashrateCache = 0;
-  private vaultEpochEntryCache: { iter: number; tickets: number } = { iter: -1, tickets: 0 };
+  // Keyed by wallet pubkey (base58): each fleet wallet spends its own hashrate.
+  private readonly vaultHashrateCache = new Map<string, number>();
+  private readonly vaultEpochEntryCache = new Map<string, { iter: number; tickets: number }>();
   /** Latest on-chain vault pool state, populated by the vault manager poll.
    * Null when the vault strategy is off or before the first read. */
   private vaultPoolCache: VaultPoolsJson | null = null;
@@ -181,6 +235,10 @@ export class Orchestrator {
     private readonly ixCtx: InstructionContext,
     private readonly fees: FeeModel,
     private readonly prices: PriceFeed,
+    /** RUSH price + mint rate (V2 only; null under GAME_VERSION=v1). */
+    private readonly tokenFeed: TokenFeed | null,
+    /** The signer fleet; `payer` is its primary. One wallet unless WALLET_PATHS is set. */
+    private readonly wallets: WalletSet,
   ) {
     this.health = new HealthMonitor(
       {
@@ -204,7 +262,7 @@ export class Orchestrator {
       },
       {
         solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
-        usdcFloorBaseUnits: usdToBase(cfg.MAX_PER_ROUND_USD),
+        usdcFloorBaseUnits: undefined, // auto mode: the fleet treasury watches balances; no fixed floor
         slotLagThreshold: cfg.SLOT_LAG_ALERT_SLOTS,
       },
     );
@@ -218,9 +276,10 @@ export class Orchestrator {
       ingestSourceName: cfg.GRPC_URL ? "yellowstone-grpc" : "ws-rpc",
       isPaused: () => this.paused,
       killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
-      maxPerRoundBase: usdToBase(cfg.MAX_PER_ROUND_USD),
-      dailyLossCapBase: usdToBase(cfg.DAILY_LOSS_CAP_USD),
+      maxPerRoundBase: () => this.bankroll.maxPerRoundBase,
+      dailyLossCapBase: () => this.bankroll.dailyLossCapBase,
       myAuthority: this.payer.publicKey.toBase58(),
+      deposit: () => this.depositBlock ?? { ...depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size), usdcQr: "", solQr: "" },
       solBalanceLamports: () =>
         this.connection.getBalance(this.payer.publicKey, "processed"),
       usdcBalanceBaseUnits: async () => {
@@ -248,6 +307,12 @@ export class Orchestrator {
       vaultPools: () => this.vaultPoolCache,
       fireOffsetSlots: () => this.currentFireOffset(),
       shareValueUsd: () => this.satsShareValueUsd(),
+      tokenShareValueUsd: () => this.tokenShareValueUsd(),
+      tokenFeedStatus: () => this.tokenFeed?.status() ?? null,
+      wallets: () => this.wallets.snapshot(),
+      gameVersion: cfg.GAME_VERSION,
+      shareCarry: () => this.shareCarry(),
+      carryHorizonDays: cfg.VAULT_CARRY_HORIZON_DAYS,
       hashrateValue: () => {
         const usdPerRawUnit = this.hashrateValueUsdPerRawUnit();
         const source =
@@ -260,7 +325,25 @@ export class Orchestrator {
   static async boot(cfg: Config): Promise<Orchestrator> {
     const programId = new PublicKey(cfg.PROGRAM_ID);
     const connection = new Connection(cfg.RPC_HTTP_URL, "processed");
-    const payer = loadKeypair(cfg.KEYPAIR_PATH);
+    // KEYPAIR_PATH is always the primary (it pays cranks and claims); WALLET_PATHS
+    // adds the extra signers. Duplicates are refused inside WalletSet.load.
+    // The bot creates its own fleet: any wallet-NN.json missing below
+    // FLEET_SIZE is generated here (0600, never logged), so raising
+    // FLEET_SIZE and restarting is all it takes. The treasury funds them.
+    if (WalletSet.ensurePrimary(cfg.KEYPAIR_PATH)) {
+      logger.warn({ path: cfg.KEYPAIR_PATH }, "primary keypair CREATED — fund its address (printed below) with USDC and SOL");
+    }
+    if (cfg.WALLET_PATHS.length === 0 && cfg.FLEET_SIZE > 1) {
+      const created = WalletSet.ensureFleet({ dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE });
+      if (created > 0) logger.info({ created, dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE }, "fleet keypairs created");
+    }
+    const wallets = WalletSet.load(
+      cfg.WALLET_PATHS.length > 0 ? [cfg.KEYPAIR_PATH, ...cfg.WALLET_PATHS] : [],
+      cfg.KEYPAIR_PATH,
+      { dir: cfg.FLEET_DIR, size: cfg.FLEET_SIZE },
+    );
+    const payer = wallets.primary().keypair;
+    logger.info({ deposit: payer.publicKey.toBase58(), fleet: wallets.size }, "deposit address (the primary): send USDC and SOL here");
     const db = new StateDb(cfg.DB_PATH);
 
     const state = await bootstrapGameState(connection, {
@@ -269,33 +352,68 @@ export class Orchestrator {
           { ...r, droppedUsd: Number(r.droppedBase) / 1e6 },
           "fork rollback absorbed — board stake moved down at a newer slot",
         ),
-      minerAuthority: payer.publicKey,
+      minerAuthority: wallets.pubkeys(),
       programId,
     });
     if (!state.satrushConfig) throw new Error("satrush_config missing on chain");
     const fees = feeModelFromConfig(state.satrushConfig);
     // Fee bps read LIVE from chain (they are updatable on-chain), so the daily
     // fee column tracks reality instead of a devnet-era constant.
+    // Share marking for the daily loss figure (V2 only): a win pays in BTC and
+    // RUSH vault shares, not USD, so an unmarked ledger books wins as losses.
+    // Prices are wired after the feeds exist (below); until then the marker
+    // values shares at the config fallbacks (token at 0).
+    const marks = { btcUsd: () => cfg.BTC_USD_ESTIMATE, tokenUsd: () => 0 };
+    const v2Econ =
+      cfg.GAME_VERSION === "v2"
+        ? v2EconomicsFromConfig(state.satrushConfig, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value })
+        : null;
+    const markShares = (satsShares: bigint, tokenShares: bigint): bigint => {
+      const exit = 1 - (state.satrushConfig?.vault_exit_fee_bps ?? 0) / 10_000;
+      let usd = 0;
+      const sv = state.satsVault;
+      if (sv && satsShares > 0n && Number(sv.btc_shares.toString()) > 0) {
+        const btc = (Number(satsShares) * Number(sv.btc_amount.toString())) / Number(sv.btc_shares.toString()) / 1e8;
+        usd += btc * marks.btcUsd() * exit;
+      }
+      const tv = state.tokenVault;
+      if (tv && tokenShares > 0n && Number(tv.token_shares.toString()) > 0) {
+        const rush = (Number(tokenShares) * Number(tv.token_amount.toString())) / Number(tv.token_shares.toString()) / 1e9;
+        usd += rush * marks.tokenUsd() * exit;
+      }
+      return BigInt(Math.floor(Math.max(0, usd) * 1e6));
+    };
     const pnl = new Pnl(db, {
       deployFeeBps: () =>
         state.satrushConfig
           ? feeModelFromConfig(state.satrushConfig).deployFeeBps
           : DEFAULT_DEPLOY_FEE_BPS,
+      ...(v2Econ ? { markShares } : {}),
     });
     const ixCtx: InstructionContext = {
       usdMint: state.satrushConfig.usd_mint,
       btcMint: state.satrushConfig.btc_mint,
+      tokenMint: state.satrushConfig.token_mint,
     };
 
+    await wallets.refreshBalances(connection, state.satrushConfig.usd_mint);
+    const initialLimits = deriveLimits(cfg, wallets.totals().usdcBase, null);
     const bankroll = new Bankroll(
       {
         ladder: cfg.STAKE_LADDER_USD.map(usdToBase),
-        maxPerRound: usdToBase(cfg.MAX_PER_ROUND_USD),
-        dailyLossCap: usdToBase(cfg.DAILY_LOSS_CAP_USD),
+        maxPerRound: initialLimits.maxPerRound,
+        dailyLossCap: initialLimits.dailyLossCap,
         minDeploy: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
         killSwitchFile: cfg.KILL_SWITCH_FILE,
+        // V2: the board can take at most the toll of a stake (1 − refund);
+        // V1: the whole stake. MAX_PER_ROUND stays on gross in both.
+        lossFractionAtRisk: v2Econ ? tollAtRiskFraction(v2Econ) : 1,
       },
       { realizedLossToday: () => pnl.realizedLossToday() },
+    );
+    logger.info(
+      { lossFractionAtRisk: bankroll.lossFractionAtRisk, sharesMarked: v2Econ !== null },
+      "daily loss cap: at-risk fraction per stake",
     );
 
     // Restart recovery: re-arm the one-deploy latch for every round already
@@ -342,6 +460,32 @@ export class Orchestrator {
     await prices.start();
     logger.info(prices.status(), "price feed primed");
 
+    // V2 token leg: RUSH oracle price × measured mint rate, from the public
+    // API. Primed here so the first round is priced on a live yield or on
+    // the (default 0) fallback — never on the announced numbers.
+    let tokenFeed: TokenFeed | null = null;
+    if (cfg.GAME_VERSION === "v2") {
+      tokenFeed = new TokenFeed({
+        apiUrl: cfg.SATRUSH_API_URL,
+        fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
+        pollMs: cfg.TOKEN_FEED_POLL_MS,
+        maxAgeMs: cfg.TOKEN_FEED_MAX_AGE_MS,
+        dexPriceUrl: cfg.DEX_PRICE_URL,
+        tokenMint: state.satrushConfig.token_mint.toBase58(),
+        maxPriceDivergence: cfg.TOKEN_PRICE_MAX_DIVERGENCE,
+        log: (obj, msg) => logger.warn(obj, msg),
+      });
+      await tokenFeed.start();
+      logger.info(tokenFeed.status(), "token feed primed (V2 economics)");
+    } else {
+      logger.warn("GAME_VERSION=v1: pricing the pre-upgrade parimutuel — wrong against the live V2 program");
+    }
+    marks.btcUsd = () => prices.btcUsd();
+    marks.tokenUsd = () => {
+      const st = tokenFeed?.status();
+      return st?.live ? st.tokenUsd : 0; // unpriced RUSH marks at nothing
+    };
+
     const jitoTip =
       tipAccounts.length > 0
         ? {
@@ -352,9 +496,44 @@ export class Orchestrator {
             solUsd: () => prices.solUsd(),
           }
         : undefined;
+    // Fleet: balances must be known before the first allocate(); the drift
+    // tick keeps them fresh afterwards.
+    const primaryKey = payer.publicKey;
+    const affiliateAuthority = cfg.AFFILIATE_AUTHORITY ? new PublicKey(cfg.AFFILIATE_AUTHORITY) : primaryKey;
+    // Grubstake USD (affiliate rebate exchanged into the Miner, or an airdrop)
+    // can only be realised by deploying it, so it funds a leg whenever it
+    // covers the amount and has not expired — at the cost of that leg's
+    // hashrate. Read from the streamed Miner at build time.
+    const grubstakeFor = (w: PublicKey, amountGross: bigint): boolean => {
+      if (!cfg.GRUBSTAKE_DEPLOYS) return false;
+      const m = state.minerAt(minerPda(w, programId));
+      if (!m) return false;
+      const bal = BigInt(m.grubstake_usd_amount.toString());
+      const expires = Number(m.grubstake_expiration_timestamp.toString());
+      return bal >= amountGross && expires > Math.floor(Date.now() / 1000) + 120;
+    };
     const candidates = new CandidateSet({
       connection,
       payer,
+      grubstakeFor,
+      ...(wallets.size > 1
+        ? {
+            wallets,
+            fundingFloor: {
+              minDeployBase: BigInt(state.satrushConfig.min_deploy_usd_amount.toString()),
+              minLamports: cfg.WALLET_MIN_LAMPORTS,
+            },
+            tileMode: cfg.FLEET_TILE_MODE,
+            tileMinCover: cfg.FLEET_TILE_MIN_COVER,
+            // Bind a wallet to the affiliate only while it has no Miner yet
+            // (that is the only time the program reads the slot); never the
+            // affiliate itself (self-referral is refused on chain).
+            affiliateFor: (w: PublicKey) =>
+              w.equals(affiliateAuthority) || state.minerAt(minerPda(w, programId)) !== null
+                ? undefined
+                : affiliateAuthority,
+          }
+        : {}),
       ixCtx,
       feeEstimator,
       computeUnitLimit: cfg.DEPLOY_CU_LIMIT,
@@ -371,7 +550,11 @@ export class Orchestrator {
       mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
     });
 
-    const watch = [satsVaultPda(programId), minerPda(payer.publicKey, programId)];
+    const watch = [
+      satsVaultPda(programId),
+      tokenVaultPda(programId),
+      ...wallets.pubkeys().map((w) => minerPda(w, programId)),
+    ];
     const source: IngestSource = cfg.GRPC_URL
       ? new YellowstoneIngest({
           endpoint: cfg.GRPC_URL,
@@ -402,6 +585,8 @@ export class Orchestrator {
       ixCtx,
       fees,
       prices,
+      tokenFeed,
+      wallets,
     );
   }
 
@@ -444,7 +629,7 @@ export class Orchestrator {
       thresholdBaseUnits: usdToBase(this.cfg.STRIKE_BOOST_THRESHOLD_USD),
       boost: this.cfg.STRIKE_SIZE_BOOST,
     });
-    return (usdToBase(this.cfg.MAX_PER_ROUND_USD) * BigInt(Math.round(boost * 100))) / 100n;
+    return (this.bankroll.maxPerRoundBase * BigInt(Math.round(boost * 100))) / 100n;
   }
 
   private attachTelegram(): void {
@@ -499,6 +684,9 @@ export class Orchestrator {
         getHealth: () => this.monitor.health(),
         getDeploys: (limit) => this.monitor.recentDeploys(limit) as never,
         getVault: () => this.monitor.vault(),
+        getWallets: () => this.wallets.snapshot(),
+        getFleet: () => this.fleetReport(),
+        getDeposit: () => this.depositForTelegram(),
       },
     });
     this.telegram.start();
@@ -529,7 +717,18 @@ export class Orchestrator {
   private statusReport() {
     const round = this.state.currentRound();
     const m = this.monitor.status();
+    const feed = this.tokenFeed?.status();
     return {
+      gameVersion: this.cfg.GAME_VERSION,
+      markedNet: this.pnl.markedNetToday(),
+      unclaimedSharesUsd: m.unclaimed.sharesUsd,
+      unclaimedTokenShares: BigInt(this.state.miner?.unclaimed_token_shares.toString() ?? "0"),
+      unclaimedTokenUsd: m.unclaimed.tokenSharesUsd,
+      tokenYield: m.game.tokenYield,
+      rushUsd: feed?.live ? feed.tokenUsd : null,
+      satsVaultApr: m.game.satsVaultApr,
+      carryCredited: m.game.carry,
+      walletCount: this.wallets.size,
       mode: this.cfg.EXECUTION_MODE,
       roundId: this.state.board?.round_id ?? null,
       roundState: round ? (Object.keys(round.state)[0] ?? null) : null,
@@ -538,9 +737,8 @@ export class Orchestrator {
       todayNet: this.pnl.todayNet(),
       unclaimedUsd: BigInt(this.state.miner?.unclaimed_usd_amount.toString() ?? "0"),
       unclaimedShares: BigInt(this.state.miner?.unclaimed_btc_shares.toString() ?? "0"),
-      perRoundCapLeft: usdToBase(this.cfg.MAX_PER_ROUND_USD),
-      dailyLossCapLeft:
-        usdToBase(this.cfg.DAILY_LOSS_CAP_USD) - this.pnl.realizedLossToday(),
+      perRoundCapLeft: this.bankroll.maxPerRoundBase,
+      dailyLossCapLeft: this.bankroll.dailyLossCapBase - this.pnl.realizedLossToday(),
       killSwitch: this.bankroll.killSwitchEngaged(),
       paused: this.paused,
       boardTotalUsd: m.board.totalUsd,
@@ -586,7 +784,7 @@ export class Orchestrator {
     try {
       const built = await this.candidates.refresh(
         this.roundId,
-        this.evContext(),
+        this.evSource(),
         this.selectorConfig(),
       );
       if (built.length > 0 && (this.botState === "ROUND_OPEN" || this.botState === "ARMED")) {
@@ -761,11 +959,160 @@ export class Orchestrator {
               valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
               multiplier: this.strikeBonusMultiplier(),
               maxRawUnitsPerRound: this.monetisableRawPerRound(),
+              // Tile mode sends a blanket as single-tile legs: each wallet
+              // earns (streak + 21/1) raw per $, so the blanket's hashrate
+              // is priced at one covered tile. Only when the fleet exists.
+              ...(this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? { coveredOverride: 1 } : {}),
+              // Dilution curve: the marginal ticket is worth less as we hold
+              // more; without it the water-filler only stops at the cap.
+              ...(this.hashrateDilution() ? { dilution: this.hashrateDilution()! } : {}),
             },
           }
         : {}),
       strikeExpectedPot: this.strikeExpectedPotBase(),
       presenceCreditBase: this.presenceCreditBase(),
+    };
+  }
+
+  /**
+   * Vault carry credited on the share legs over VAULT_CARRY_HORIZON_DAYS: the
+   * app's live `apr` per vault, capped at VAULT_CARRY_APR_CAP, converted to
+   * the fraction the shares appreciate over the horizon. Null when the
+   * horizon is 0 or the feed is not live — a carry nobody is marking is 0.
+   */
+  private shareCarry(): { sats: number; token: number } | null {
+    const days = this.cfg.VAULT_CARRY_HORIZON_DAYS;
+    const feed = this.tokenFeed?.status();
+    if (!(days > 0) || !feed?.live) return null;
+    const over = (apr: number | null): number => (Math.min(apr ?? 0, this.cfg.VAULT_CARRY_APR_CAP) / 365) * days;
+    return { sats: over(feed.satsVaultApr), token: over(feed.tokenVaultApr) };
+  }
+
+  /**
+   * One-line view of the model at the cap, for skip logs: the EV (bps of
+   * gross) of an even blanket and of the single emptiest tile at
+   * MAX_PER_ROUND. Tells the operator how far from +EV the board sits without
+   * a debugger — under V2 both are typically −100 bps or so.
+   */
+  private evDiagnostics(): Record<string, unknown> {
+    try {
+      const src = this.evSource();
+      const model = "model" in src ? src.model(src.predictedStakes) : v1Model(src);
+      const cap = this.effectiveMaxPerRoundBase();
+      if (cap <= 0n) return {};
+      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / BigInt(TILES_COUNT));
+      const emptiest = model.predictedStakes.reduce((b, s, i, a) => (s < (a[b] ?? 0n) ? i : b), 0);
+      const single = new Array<bigint>(TILES_COUNT).fill(0n);
+      single[emptiest] = cap;
+      const bps = (ev: number, gross: bigint) => Math.round((ev / Number(gross)) * 10_000);
+      // The same single tile with the streak at its cap: the hashrate credit
+      // at 121 raw/$ instead of today's. Positive here and negative above
+      // means the streak ramp (~100 rounds of a minimum deploy) would pay —
+      // `pnpm streak-ramp` prices it; it has not been positive yet.
+      const capped = (() => {
+        const base = this.v2Base();
+        if (!("model" in src) || !base?.hashrate) return null;
+        // Presence credit excluded: the auto-ramp floors it off THIS signal,
+        // so including it would make the signal confirm itself.
+        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0 });
+      })();
+      const atCap = capped ? bps(capped.ev(single), cap) : null;
+      // The blanket at the cap is the "flip" signal: a blanket is parimutuel
+      // (the refund, sats and strike legs come back pro rata whatever wins),
+      // so its EV at the cap is the non-token toll against the RUSH yield —
+      // positive means mining RUSH is cheaper than buying it (pnpm buy-vs-mine).
+      const blanketAtCap = capped ? bps(capped.ev(blanket), cap - (cap % BigInt(TILES_COUNT))) : null;
+      this.rampSignal(blanketAtCap);
+      return {
+        blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
+        blanketEvBpsAtStreakCap: blanketAtCap,
+        emptiestTile: emptiest,
+        emptiestEvBps: bps(model.ev(single), cap),
+        emptiestEvBpsAtStreakCap: atCap,
+        tokenYield: this.tokenFeed?.status().live ? this.tokenFeed.status().yieldPerVolume : null,
+        shareCarry: this.shareCarry(),
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * One alert when a blanket at the streak cap clears RAMP_ALERT_MIN_BPS —
+   * the ramp would pay and mining RUSH beats buying it — then silence until
+   * the signal has dropped below zero and cleared the margin again. The bot
+   * does not start the ramp by itself: that is the operator's call
+   * (`pnpm streak-ramp` prices it).
+   */
+  private rampSignal(blanketAtCapBps: number | null): void {
+    this.lastBlanketAtCapBps = blanketAtCapBps;
+    const min = this.cfg.RAMP_ALERT_MIN_BPS;
+    if (blanketAtCapBps === null || !(min > 0)) return;
+    if (this.rampAlertArmed && blanketAtCapBps >= min) {
+      this.rampAlertArmed = false;
+      this.alert(
+        `ramp pays: an even blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
+        `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
+      );
+    } else if (!this.rampAlertArmed && blanketAtCapBps < 0) {
+      this.rampAlertArmed = true;
+    }
+  }
+
+  /**
+   * What the selector prices against. V2 swaps the parimutuel for the
+   * refund/sats/RUSH economics (`v2Model`) on the same occupancy prediction;
+   * the model factory lets candidates rebuild it for excluded-tile variants.
+   */
+  /** The V2 context minus the stakes (null under V1 or before the config is read). */
+  private v2Base(): Omit<V2EvContext, "predictedStakes"> | null {
+    if (this.cfg.GAME_VERSION !== "v2") return null;
+    const config = this.state.satrushConfig;
+    if (!config) return null;
+    const ctx = this.evContext();
+    const econ = v2EconomicsFromConfig(config, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
+    const feed = this.tokenFeed?.status();
+    const tokenYieldPerVolume =
+      feed && feed.live ? feed.yieldPerVolume : this.cfg.RUSH_USD_ESTIMATE * this.cfg.RUSH_MINT_PER_USD_ESTIMATE;
+    return {
+      econ,
+      mintedTokenValueBase: 0,
+      tokenYieldPerVolume,
+      strikeExpectedPot: this.strikeExpectedPotBase(),
+      ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
+      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
+    };
+  }
+
+  private evSource(): EvSource {
+    const ctx = this.evContext();
+    if (this.cfg.GAME_VERSION !== "v2") return ctx;
+    const config = this.state.satrushConfig;
+    if (!config) return ctx; // unreachable after boot (config is required to start)
+    const econ = v2EconomicsFromConfig(config, {
+      losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value,
+    });
+    // The token yield is priced only while the feed is live: a stale or
+    // never-answered feed falls back to the configured estimate (default 0),
+    // so the selector never chases a RUSH leg nobody is currently marking.
+    const feed = this.tokenFeed?.status();
+    const tokenYieldPerVolume =
+      feed && feed.live
+        ? feed.yieldPerVolume
+        : this.cfg.RUSH_USD_ESTIMATE * this.cfg.RUSH_MINT_PER_USD_ESTIMATE;
+    const base: Omit<V2EvContext, "predictedStakes"> = {
+      econ,
+      mintedTokenValueBase: 0,
+      tokenYieldPerVolume,
+      strikeExpectedPot: this.strikeExpectedPotBase(),
+      ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
+      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
+    };
+    return {
+      predictedStakes: ctx.predictedStakes,
+      model: (predictedStakes) => v2Model({ ...base, predictedStakes }),
     };
   }
 
@@ -781,15 +1128,41 @@ export class Orchestrator {
    */
   private presenceCreditBase(): number {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
+    const miner = this.state.miner;
     const usd = streakOptionValueUsd({
-      streak: this.state.miner?.current_streak_count ?? 1,
-      deployPerRoundUsd: this.cfg.MAX_PER_ROUND_USD,
+      streak: miner?.current_streak_count ?? 1,
+      deployPerRoundUsd: Number(this.bankroll.maxPerRoundBase) / 1e6,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
       liquidFraction:
         1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
       discount: this.cfg.STREAK_OPTION_DISCOUNT,
+      // V2: a skip inside the 2-round grace costs nothing, so the option is
+      // worth nothing until the round that would actually break the streak.
+      ...(this.cfg.GAME_VERSION === "v2" && miner && this.roundId !== null
+        ? {
+            roundId: this.roundId,
+            lastMinedRoundId: miner.last_mined_round_id,
+            graceRounds: STREAK_GRACE_ROUNDS.value,
+          }
+        : {}),
     });
-    return usd > 0 ? usd * 1e6 : 0;
+    let credit = usd > 0 ? usd * 1e6 : 0;
+    // Auto-ramp: below the cap, when a blanket AT the cap pays, floor the
+    // credit at the minimum blanket's toll so the selector keeps deploying
+    // the minimum every round until the cap is reached (fleet: one minimum
+    // per covered tile). The alert path still reports it.
+    if (
+      this.cfg.AUTO_RAMP &&
+      this.cfg.GAME_VERSION === "v2" &&
+      (miner?.current_streak_count ?? 1) < REWARD_MAX_STREAK &&
+      this.lastBlanketAtCapBps !== null &&
+      this.lastBlanketAtCapBps >= this.cfg.RAMP_ALERT_MIN_BPS
+    ) {
+      const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
+      const tiles = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
+      credit = Math.max(credit, (minDeploy * tiles * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000);
+    }
+    return credit;
   }
 
   /** The program's 1-BTC draw trigger, in BTC base units. */
@@ -857,10 +1230,22 @@ export class Orchestrator {
    * So: bound the quantity economically (VAULT_MAX_SHARE of the projected final
    * field) and price that block at its AVERAGE value, not its first ticket's.
    */
+  /**
+   * The epoch prize curve the ticket engine prices against: 21 equal slots
+   * under V2 (one wallet can hold at most one), V1's rank curve otherwise.
+   * Undefined lets the vault module default to V1.
+   */
+  private epochCurve(): readonly number[] | undefined {
+    return this.cfg.GAME_VERSION === "v2" ? EPOCH_EQUAL_CURVE_BPS : undefined;
+  }
+
   private epochTicketEconomics(): {
     capTickets: number;
     avgTicketUsd: number;
     roundsRemaining: number;
+    projectedField: number;
+    projectedPool: number;
+    myTickets: number;
   } | null {
     if (!this.cfg.VAULT_STRATEGY_ENABLED) return null;
     const epoch = this.vaultPoolCache?.epoch;
@@ -900,18 +1285,58 @@ export class Orchestrator {
     const projectedField = Math.max(others, bounds.high);
 
     const share = this.cfg.VAULT_MAX_SHARE;
-    const capTickets =
-      (share / (1 - share)) * projectedField - epoch.myTickets;
+    // share ≥ 1: no brake (the dilution curve prices our own share); the
+    // flat price is then the small-block value, used only where the curve
+    // is not (deferred hashrate, the ticket engine's opportunity cost).
+    const capTickets = share >= 1
+      ? Number.POSITIVE_INFINITY
+      : (share / (1 - share)) * projectedField - epoch.myTickets;
     if (!(capTickets >= 1)) return null;
+    const block = Math.max(1, (Math.min(share, 0.05) / (1 - Math.min(share, 0.05))) * projectedField);
 
     const uplift = this.cfg.EPOCH_DEDUP_UPLIFT;
     const at = (mine: number): number =>
-      expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift);
-    const avgTicketUsd = (at(epoch.myTickets + capTickets) - at(epoch.myTickets)) / capTickets;
+      expectedWinningsUsd(mine, projectedField, projectedPool, "epoch", uplift, this.epochCurve());
+    const avgTicketUsd = (at(epoch.myTickets + block) - at(epoch.myTickets)) / block;
     if (!(avgTicketUsd > 0)) return null;
 
     const roundsRemaining = Math.max(1, slotsToClose / roundDuration);
-    return { capTickets, avgTicketUsd, roundsRemaining };
+    return { capTickets, avgTicketUsd, roundsRemaining, projectedField, projectedPool, myTickets: epoch.myTickets };
+  }
+
+  /**
+   * The dilution curve for this round's hashrate credit: our tickets over the
+   * rest of the epoch iteration against the projected field (fleet dedup
+   * closed form, one prize per wallet) and the 1-BTC pool (proportional).
+   * Null when the vaults are off or not yet legible — the flat price applies.
+   */
+  private hashrateDilution(): HashrateDilution | null {
+    const e = this.epochTicketEconomics();
+    const pools = this.vaultPoolCache;
+    if (!e && !pools?.oneBtc?.open) return null;
+    const oneBtc = pools?.oneBtc?.open && pools.oneBtc.fillBps >= this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS ? pools.oneBtc : null;
+    // 1-BTC horizon: rounds until the vault fills at the current inflow
+    // (one_btc_fee × gross per round), and the field projected to the draw
+    // from the tickets-per-fill pace so far.
+    let oneBtcLeg: HashrateDilution["oneBtc"] = undefined;
+    if (oneBtc) {
+      const fill = Math.min(0.9999, Math.max(0, oneBtc.fillBps / 1e4));
+      const grossPerRound = this.grossPerRoundUsd();
+      const feeBps = this.state.satrushConfig?.one_btc_fee_bps ?? 0;
+      const btcUsd = this.prices.btcUsd();
+      const inflowBtcPerRound = btcUsd > 0 ? (grossPerRound * feeBps) / 1e4 / btcUsd : 0;
+      const remainingBtc = this.cfg.VAULT_ONE_BTC_TARGET_BTC * (1 - fill);
+      const roundsToDraw = inflowBtcPerRound > 0 ? Math.min(200_000, Math.max(1, remainingBtc / inflowBtcPerRound)) : undefined;
+      const projectedOthers = fill > 0.01 ? Math.max(oneBtc.totalTickets, oneBtc.totalTickets / fill) : oneBtc.totalTickets;
+      oneBtcLeg = { othersTickets: Math.max(0, projectedOthers), prizeUsd: oneBtc.prizeUsd, roundsToDraw, ticketsHeld: 0 };
+    }
+    return {
+      roundsHeld: e?.roundsRemaining ?? 1_000,
+      rawPerTicket: this.cfg.VAULT_HASHRATE_PER_TICKET,
+      ticketsHeld: e?.myTickets ?? 0,
+      ...(e ? { epoch: { othersTickets: e.projectedField, poolUsd: e.projectedPool, wallets: Math.max(1, this.wallets.size), curve: this.epochCurve() ?? EPOCH_REWARD_CURVE_BPS, uplift: this.cfg.EPOCH_DEDUP_UPLIFT } } : {}),
+      ...(oneBtcLeg ? { oneBtc: oneBtcLeg } : {}),
+    };
   }
 
   /**
@@ -940,9 +1365,10 @@ export class Orchestrator {
 
 
 
-  private monetisableRawPerRound(): number {
+  private monetisableRawPerRound(): number | undefined {
     const e = this.epochTicketEconomics();
     if (!e) return 0;
+    if (!Number.isFinite(e.capTickets)) return undefined; // no brake
     return (e.capTickets * this.cfg.VAULT_HASHRATE_PER_TICKET) / e.roundsRemaining;
   }
 
@@ -954,17 +1380,32 @@ export class Orchestrator {
    * P&L and the realized-edge metric silently omitted the single largest
    * return leg — enough to make a profitable position read as a heavy loss.
    *
-   * Net of sats_vault_claim_fee_bps because that is what the shares are
+   * Net of vault_exit_fee_bps because that is what the shares are
    * actually worth to us; gross would overstate a position we can only realise
    * by paying the exit fee.
    */
+  /**
+   * USD value of ONE RUSH-vault share, net of the exit fee — 0 unless the
+   * token feed is live, so an unpriced RUSH position never inflates a mark.
+   */
+  private tokenShareValueUsd(): number {
+    const vault = this.state.tokenVault;
+    const feed = this.tokenFeed?.status();
+    if (!vault || !feed?.live) return 0;
+    const shares = Number(vault.token_shares.toString());
+    const tokens = Number(vault.token_amount.toString());
+    if (!(shares > 0) || !(tokens > 0)) return 0;
+    const exitFeeBps = this.state.satrushConfig?.vault_exit_fee_bps ?? 0;
+    return (tokens / shares / 1e9) * feed.tokenUsd * (1 - exitFeeBps / 10_000);
+  }
+
   private satsShareValueUsd(): number {
     const vault = this.state.satsVault;
     if (!vault) return 0;
     const shares = Number(vault.btc_shares.toString());
     const btc = Number(vault.btc_amount.toString());
     if (!(shares > 0) || !(btc > 0)) return 0;
-    const claimFeeBps = this.state.satrushConfig?.sats_vault_claim_fee_bps ?? 0;
+    const claimFeeBps = this.state.satrushConfig?.vault_exit_fee_bps ?? 0;
     const net = 1 - claimFeeBps / 10_000;
     return (btc / shares / 1e8) * this.prices.btcUsd() * net;
   }
@@ -1020,29 +1461,32 @@ export class Orchestrator {
   /**
    * Current post-Sat-Strike hashrate promo multiplier (1 outside the window).
    *
-   * Measured in ROUNDS off the board's persistent strike_last_trigger_round_id
-   * where possible, so the window survives a restart; the observed-event clock
-   * is only the fallback. The configured window is in minutes, converted using
-   * the board's own round_duration (150 slots ≈ 60s on mainnet) rather than an
-   * assumed round length.
+   * The program's rule (SDK `STRIKE_BOOST_ROUNDS` = 240): `rotate_round` stamps
+   * `Round.is_hashrate_boosted` for the 240 rounds after a strike, and settle
+   * applies `STRIKE_BOOST_HASHRATE_MULTIPLIER` (2). Measured in ROUNDS off the
+   * board's persistent strike_last_trigger_round_id, so the window survives a
+   * restart; the observed-event clock (STRIKE_BONUS_WINDOW_MINUTES) is only the
+   * fallback before the board is read. The old minutes-to-rounds conversion
+   * gave 156 rounds at a 92 s round — a third of the window under-credited.
    */
   private strikeBonusMultiplier(): number {
     const board = this.state.board;
     let roundsSinceStrike: number | null = null;
     let windowRounds: number | null = null;
+    let windowMs = this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000;
     if (board) {
       const lastTrigger = board.strike_last_trigger_round_id;
       const duration = board.round_duration;
       if (lastTrigger > 0 && duration > 0) {
         roundsSinceStrike = board.round_id - lastTrigger;
-        const roundSeconds = duration * SLOT_SECONDS;
-        windowRounds = Math.round((this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60) / roundSeconds);
+        windowRounds = STRIKE_BOOST_WINDOW_ROUNDS.value;
+        windowMs = windowRounds * duration * SLOT_SECONDS * 1000;
       }
     }
     return strikeBonusMultiplier({
       lastStrikeAtMs: this.lastStrikeAtMs,
       nowMs: Date.now(),
-      windowMs: this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000,
+      windowMs,
       multiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER,
       roundsSinceStrike,
       windowRounds,
@@ -1063,9 +1507,19 @@ export class Orchestrator {
     // Not the whole pool reaches the winning tile: a reserve is retained at
     // trigger (see STRIKE_PAYOUT_FRACTION). Crediting the full pool overstates
     // the jackpot leg of every round's EV.
-    return (
-      (Number(this.state.strikePoolUsd()) * this.cfg.STRIKE_PAYOUT_FRACTION) / modulus
-    );
+    let poolBase = Number(this.state.strikePoolUsd());
+    if (this.cfg.GAME_VERSION === "v2" && this.state.board) {
+      // V2 strike pool carries USD + BTC + RUSH legs; value the other two at
+      // the live prices (the RUSH leg at 0 while the token feed is not live).
+      const b = this.state.board;
+      const btcUsd = (Number(b.strike_btc_amount.toString()) / 1e8) * this.prices.btcUsd();
+      const feed = this.tokenFeed?.status();
+      const rushUsd = feed?.live
+        ? (Number(b.strike_token_amount.toString()) / 1e9) * feed.tokenUsd
+        : 0;
+      poolBase += (btcUsd + rushUsd) * 1e6;
+    }
+    return (poolBase * this.cfg.STRIKE_PAYOUT_FRACTION) / modulus;
   }
 
   /** Slots before cutoff to fire: the self-calibrated offset if available, else
@@ -1169,9 +1623,29 @@ export class Orchestrator {
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
       minEdgeBps: this.cfg.MIN_EDGE_BPS,
+      minEvBase: this.edgeHurdleBase(maxPerRound),
       kellyFraction: this.cfg.KELLY_FRACTION,
       bankrollBase: this.usdcAvailableBase ?? undefined,
     };
+  }
+
+  /**
+   * The absolute EV floor for a fire, in base units: round-trip tx fees for
+   * every leg (tile mode: one per covered tile; else one per wallet) at the
+   * live priority fee and SOL price, plus the opportunity yield of the stake
+   * over one round. Undefined when the hurdle is off.
+   */
+  private edgeHurdleBase(stakeBase: bigint): bigint | undefined {
+    if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
+    const legs = this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
+    const feeMicro = this.feeEstimator.currentMicroLamportsPerCu();
+    const lamportsPerTx = 5_000 + (feeMicro * this.cfg.DEPLOY_CU_LIMIT) / 1e6;
+    const solUsd = this.prices.solUsd();
+    const feesUsd = solUsd > 0 ? (legs * 2 * lamportsPerTx * solUsd) / 1e9 : 0;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
+    const opportunityUsd = (Number(stakeBase) / 1e6) * (this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay);
+    return BigInt(Math.ceil((feesUsd + opportunityUsd) * 1e6));
   }
 
   /** The single slot-tick check — every transition hangs off ingest events. */
@@ -1265,9 +1739,16 @@ export class Orchestrator {
       this.skipOnce("paused", {});
       return;
     }
+    // Refresh the blanket-at-cap signal every round (it drives the auto-ramp
+    // and the alert), not only when the selector has already skipped.
+    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
     const candidate = this.candidates.best(this.roundId);
     if (!candidate) {
-      this.skipOnce("no_candidate", { note: "selector found no deployable allocation" });
+      this.skipOnce("no_candidate", {
+        note: "selector found no deployable allocation",
+        selector: this.candidates.lastSkipReason(this.roundId) ?? "unknown",
+        ...this.evDiagnostics(),
+      });
       return;
     }
     const auth = this.bankroll.authorize(
@@ -1307,6 +1788,7 @@ export class Orchestrator {
         maxPerRoundBase: this.effectiveMaxPerRoundBase(),
         dailyLossCapBase: this.bankroll.dailyLossCapBase,
         realizedLossTodayBase: this.bankroll.realizedLossToday(),
+        lossFractionAtRisk: this.bankroll.lossFractionAtRisk,
         priorityFeeMicroLamports: candidate.feeMicroLamports,
         maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
         tipLamports: candidate.tipLamports,
@@ -1339,62 +1821,104 @@ export class Orchestrator {
         );
       }
     }
-    this.db.recordMyDeploy({
-      roundId: this.roundId,
-      mask: selection.mask,
-      amount: selection.totalGross,
-      evExpected: selection.ev,
-      firedSlot: this.state.currentSlot,
-      sig: candidate.signature,
-      status: this.cfg.EXECUTION_MODE === "dry" ? "dry" : "fired",
-      streak: this.state.miner?.current_streak_count ?? null,
-    });
+    // One row per leg: the fleet's deploys are separate transactions with
+    // separate outcomes, and per-wallet attribution is what the streak and
+    // P&L reconstruction key on. Σ leg amounts == the authorized total.
+    const legTotal = candidate.legs.reduce((a, l) => a + l.amountGross, 0n);
+    // Tile mode may leave tiles unplayed (a wallet that cannot fund its tile
+    // drops out), so the legs can sum to LESS than authorized — never more.
+    const tileMode = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 && candidate.legs.some((l) => l.mask !== selection.mask);
+    if (tileMode ? legTotal > selection.totalGross : legTotal !== selection.totalGross) {
+      this.haltFromError(
+        new HaltError("candidate legs do not sum to the authorized amount", {
+          legs: legTotal.toString(),
+          authorized: selection.totalGross.toString(),
+        }),
+        "pre-send invariant",
+      );
+      this.transition("LOGGED", { haltedBeforeSend: true });
+      return;
+    }
+    for (const leg of candidate.legs) {
+      const legMiner = this.state.minerAt(minerPda(new PublicKey(leg.wallet), new PublicKey(this.cfg.PROGRAM_ID)));
+      this.db.recordMyDeploy({
+        roundId: this.roundId,
+        mask: leg.mask,
+        amount: leg.amountGross,
+        evExpected: selection.ev * (Number(leg.amountGross) / Number(selection.totalGross)),
+        firedSlot: this.state.currentSlot,
+        sig: leg.signature,
+        status: this.cfg.EXECUTION_MODE === "dry" ? "dry" : "fired",
+        streak: legMiner?.current_streak_count ?? null,
+        wallet: leg.wallet,
+      });
+    }
     this.transition("FIRED", {
       mask: selection.mask,
       tiles: selection.tiles,
       amount: selection.totalGross.toString(),
+      legs: candidate.legs.length,
       ev: selection.ev,
       fee: candidate.feeMicroLamports,
       cutoff: this.state.slotsToCutoff(),
       dry: this.cfg.EXECUTION_MODE === "dry",
     });
 
-    const firePromise = this.sender.fire(
-      {
-        signature: candidate.signature,
-        serialized: candidate.serialized,
-        lastValidBlockHeight: candidate.lastValidBlockHeight,
-        meta: { roundId: this.roundId, mask: selection.mask },
-      },
-      { isPastCutoff: () => (this.state.slotsToCutoff() ?? 1) <= -10 },
+    const isPastCutoff = () => (this.state.slotsToCutoff() ?? 1) <= -10;
+    const firePromise = Promise.all(
+      candidate.legs.map((leg) =>
+        this.sender.fire(
+          {
+            signature: leg.signature,
+            serialized: leg.serialized,
+            lastValidBlockHeight: leg.lastValidBlockHeight,
+            meta: { roundId: this.roundId, mask: leg.mask, wallet: leg.wallet },
+          },
+          { isPastCutoff },
+        ),
+      ),
     );
     this.transition("CONFIRMING");
     const roundAtFire = this.roundId;
-    const result = await firePromise;
+    const results = await firePromise;
+    // Per-leg statuses; the round's outcome is the best leg's (one landed
+    // deploy keeps the streak and the settle path alive), with every
+    // non-landed leg reported.
+    results.forEach((r, i) => {
+      const leg = candidate.legs[i]!;
+      if (r.outcome === "landed") this.db.updateMyDeployStatus(leg.signature, "landed", r.landedSlot);
+      else if (r.outcome === "missed_round") this.db.updateMyDeployStatus(leg.signature, "missed");
+      else if (r.outcome !== "dry") this.db.updateMyDeployStatus(leg.signature, "failed");
+    });
+    const landedLegs = results.filter((r) => r.outcome === "landed");
+    if (candidate.legs.length > 1 && landedLegs.length !== results.length) {
+      this.alert(
+        `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (${results
+          .map((r, i) => `${candidate.legs[i]!.wallet.slice(0, 6)}:${r.outcome}`)
+          .join(" ")})`,
+      );
+    }
+    const result =
+      landedLegs[0] ??
+      results.find((r) => r.outcome === "dry") ??
+      results.find((r) => r.outcome === "missed_round") ??
+      results[0]!;
 
     // If the board rotated while confirming, update the DB but leave the
     // new round's state machine alone.
     if (this.roundId !== roundAtFire) {
-      if (result.outcome === "landed") {
-        this.db.updateMyDeployStatus(candidate.signature, "landed", result.landedSlot);
-      } else if (result.outcome === "missed_round") {
-        this.db.updateMyDeployStatus(candidate.signature, "missed");
-      }
-      this.pnl.refreshDaily();
+      this.pnl.refreshDaily(); // leg statuses were written above
       return;
     }
 
     if (result.outcome === "landed") {
-      this.db.updateMyDeployStatus(candidate.signature, "landed", result.landedSlot);
-      this.transition("SETTLING", { landedSlot: result.landedSlot });
+      this.transition("SETTLING", { landedSlot: result.landedSlot, legs: landedLegs.length });
     } else if (result.outcome === "dry") {
       this.transition("SETTLING", { dry: true });
     } else if (result.outcome === "missed_round") {
-      this.db.updateMyDeployStatus(candidate.signature, "missed");
       this.alert(`missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
       this.transition("LOGGED", { missed: true });
     } else {
-      this.db.updateMyDeployStatus(candidate.signature, "failed");
       this.alert(`deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
       this.transition("LOGGED", { failed: true });
     }
@@ -1406,44 +1930,59 @@ export class Orchestrator {
   private async selfSettle(roundId: number): Promise<void> {
     if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry") return;
     if (this.settleFired.has(roundId)) return;
-    const deployed = this.db.queryOne<{ status: string }>(
-      "SELECT status FROM my_deploys WHERE round_id = ? AND status = 'landed'",
-      roundId,
-    );
-    if (!deployed) return;
+    const landed = this.db.landedWallets(roundId);
+    if (landed.length === 0) return;
     this.settleFired.add(roundId);
-    try {
-      const fee = this.feeEstimator.currentMicroLamportsPerCu();
-      assertFeeBearingInvariants({
-        kind: "settle",
-        priorityFeeMicroLamports: fee,
-        maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
-        killSwitchEngaged: this.bankroll.killSwitchEngaged(),
-      });
-      const ix = buildSettleDeployPublic(this.ixCtx, {
-        authority: this.payer.publicKey,
-        deploymentAuthority: this.payer.publicKey,
-        roundId,
-      });
-      const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-        payer: this.payer,
-        instructions: [ix],
-        computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
-        priorityFeeMicroLamports: fee,
-      });
-      const result = await this.sender.fire(
-        {
-          signature: bs58.encode(tx.signatures[0]!),
-          serialized: Buffer.from(tx.serialize()),
-          lastValidBlockHeight,
-          meta: { kind: "self_settle", roundId },
-        },
-        { timeoutMs: 15_000 },
-      );
-      this.log.info({ roundId, outcome: result.outcome }, "self-settle resolved");
-    } catch (err) {
-      this.log.warn({ roundId, err: String(err) }, "self-settle failed (crank will cover)");
+    // One settle per landed wallet; the primary cranks and pays for all of
+    // them (settle is permissionless), so the extras never need SOL for it.
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    for (const w of landed) {
+      const deployer = w ? new PublicKey(w) : this.payer.publicKey;
+      try {
+        const fee = this.feeEstimator.currentMicroLamportsPerCu();
+        assertFeeBearingInvariants({
+          kind: "settle",
+          priorityFeeMicroLamports: fee,
+          maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+          killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+        });
+        const ix = buildSettleDeployPublic(this.ixCtx, {
+          authority: this.payer.publicKey,
+          deploymentAuthority: deployer,
+          roundId,
+          // V2: the affiliate leg settles to that wallet's Miner.affiliate (default → none).
+          affiliate: this.state.minerAt(minerPda(deployer, programId))?.affiliate,
+        });
+        const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+          payer: this.payer,
+          instructions: [ix],
+          computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
+          priorityFeeMicroLamports: fee,
+        });
+        const result = await this.sender.fire(
+          {
+            signature: bs58.encode(tx.signatures[0]!),
+            serialized: Buffer.from(tx.serialize()),
+            lastValidBlockHeight,
+            meta: { kind: "self_settle", roundId, wallet: deployer.toBase58() },
+          },
+          { timeoutMs: 15_000 },
+        );
+        this.log.info({ roundId, wallet: deployer.toBase58(), outcome: result.outcome }, "self-settle resolved");
+      } catch (err) {
+        this.log.warn({ roundId, wallet: deployer.toBase58(), err: String(err) }, "self-settle failed (crank will cover)");
+      }
     }
+  }
+
+  /** True for any signer of the fleet (the primary included). */
+  private isOurWallet(authority: PublicKey): boolean {
+    return this.wallets.byPubkey(authority.toBase58()) !== undefined;
+  }
+
+  /** Keypair for a fleet wallet by public key (the primary when unknown/null). */
+  private signerFor(wallet: string | null | undefined): Keypair {
+    return (wallet ? this.wallets.byPubkey(wallet)?.keypair : undefined) ?? this.payer;
   }
 
   /**
@@ -1455,6 +1994,10 @@ export class Orchestrator {
   private reconcileSettlement(data: PublicDeploySettled): void {
     const round = this.state.round(data.round_id);
     if (!round) return; // can't reconcile without the round account
+    if (this.cfg.GAME_VERSION === "v2") {
+      this.reconcileSettlementV2(data, round);
+      return;
+    }
     const res = reconcileRoundOutcome({
       ourStakeOnWinnerBase: BigInt(data.winning_stake.toString()),
       totalStakeOnWinnerBase: BigInt(round.deployed_usd_on_winning_tile_amount.toString()),
@@ -1468,6 +2011,48 @@ export class Orchestrator {
       this.engageKillSwitch(
         `reconcile tripwire round ${data.round_id}: ${res.reason} ` +
           `(modeled $${(Number(res.modeledUsdBase) / 1e6).toFixed(2)} vs realized $${(Number(data.won_usd_amount.toString()) / 1e6).toFixed(2)})`,
+      );
+    }
+  }
+
+  /**
+   * V2 tripwire: the refund rule is exact per deployment, so this checks the
+   * USD leg against 89% of our losing-tile gross, BTC shares only on a covered
+   * winner, and a RUSH leg on every minting round. Needs our deploy row for
+   * the gross and mask; without one there is nothing to check against.
+   */
+  private reconcileSettlementV2(data: PublicDeploySettled, round: Round): void {
+    const wallet = data.authority.toBase58();
+    const mine = this.db.queryOne<{ amount: string; mask: number }>(
+      `SELECT amount, mask FROM my_deploys
+       WHERE round_id = ? AND status IN ('fired','landed') AND (wallet = ? OR wallet IS NULL)
+       ORDER BY id DESC LIMIT 1`,
+      data.round_id,
+      wallet,
+    );
+    if (!mine) {
+      this.log.warn({ roundId: data.round_id }, "settled a round with no deploy row — reconcile skipped");
+      return;
+    }
+    const tiles = maskToTiles(mine.mask);
+    const winner = round.winning_tile;
+    const res = reconcileRoundOutcomeV2({
+      ourGrossBase: BigInt(mine.amount),
+      tilesCovered: tiles.length,
+      coveredWinner: winner !== null && tiles.includes(winner),
+      refundBps: V2_LOSING_TILE_REFUND_BPS.value,
+      realizedWonUsdBase: BigInt(data.won_usd_amount.toString()),
+      realizedWonShares: BigInt(data.won_shares_amount.toString()),
+      realizedWonTokenShares: BigInt(data.won_token_shares.toString()),
+      roundMintedToken: BigInt(round.minted_token_amount.toString()) > 0n,
+      strikeTriggered: BigInt(round.strike_bonus_usd.toString()) > 0n,
+      toleranceFrac: this.cfg.RECONCILE_TOLERANCE,
+      floorBase: usdToBase(0.01),
+    });
+    if (!res.ok) {
+      this.engageKillSwitch(
+        `reconcile tripwire (V2) round ${data.round_id}: ${res.reason} ` +
+          `(modeled $${(Number(res.modeledUsdBase) / 1e6).toFixed(4)} vs realized $${(Number(data.won_usd_amount.toString()) / 1e6).toFixed(4)})`,
       );
     }
   }
@@ -1530,34 +2115,45 @@ export class Orchestrator {
     );
     const num = (v: { toString(): string }) => Number(v.toString());
 
-    const engine = new VaultEngine({
-      enabled: true, // gate is the manager itself (only started when enabled)
-      dry: this.cfg.EXECUTION_MODE === "dry",
-      hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
-      epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
-      ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
-      maxTickets: this.cfg.VAULT_MAX_TICKETS,
-      hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
-      hashrateAvailable: () => this.vaultHashrateCache,
-      myTickets: (kind, iter) =>
-        kind === "epoch"
-          ? this.vaultEpochEntryCache.iter === iter
-            ? this.vaultEpochEntryCache.tickets
-            : 0
-          : this.db.vaultTicketsHeld("one_btc", iter),
-      buy: (kind, iter, tickets) => this.buyVaultTickets(kind, iter, tickets),
-      log: (obj) => this.log.info(obj, "vault"),
+    // One engine per wallet: hashrate lives in each wallet's own Miner PDA and
+    // cannot be pooled, so each wallet buys its own tickets with its own
+    // balance (and signs its own buys). VAULT_MAX_TICKETS applies per wallet
+    // — it bounds one Miner's exposure, which is what the cap was sized for.
+    const engines = this.wallets.all().map((w) => {
+      const key = w.keypair.publicKey.toBase58();
+      return new VaultEngine({
+        enabled: true, // gate is the manager itself (only started when enabled)
+        dry: this.cfg.EXECUTION_MODE === "dry",
+        hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
+        epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
+        epochCurve: this.epochCurve(),
+        ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
+        maxTickets: this.cfg.VAULT_MAX_TICKETS,
+        hashrateFraction: this.cfg.VAULT_HASHRATE_FRACTION,
+        hashrateAvailable: () => this.vaultHashrateCache.get(key) ?? 0,
+        myTickets: (kind, iter) => {
+          if (kind === "epoch") {
+            const e = this.vaultEpochEntryCache.get(key);
+            return e && e.iter === iter ? e.tickets : 0;
+          }
+          return this.db.vaultTicketsHeld("one_btc", iter, this.wallets.size > 1 ? key : null);
+        },
+        buy: (kind, iter, tickets) => this.buyVaultTickets(kind, iter, tickets, w),
+        log: (obj) => this.log.info({ ...obj, wallet: key.slice(0, 6) }, "vault"),
+      });
     });
 
     const readState = async (): Promise<VaultReadState> => {
       const slot = await this.connection.getSlot("processed");
-      const minerInfo = await this.connection.getAccountInfo(
-        minerPda(this.payer.publicKey, programId),
-        "processed",
-      );
-      this.vaultHashrateCache = minerInfo
-        ? num(decodeAccount<Miner>("Miner", minerInfo.data).hashrate_amount)
-        : 0;
+      // Hashrate per wallet from the streamed Miner accounts (no RPC round
+      // trip); a wallet with no Miner yet has none to spend.
+      for (const w of this.wallets.all()) {
+        const key = w.keypair.publicKey.toBase58();
+        const miner = this.minerOf(w);
+        this.vaultHashrateCache.set(key, miner ? num(miner.hashrate_amount) : 0);
+        w.hashrate = this.vaultHashrateCache.get(key) ?? 0;
+        w.streak = miner?.current_streak_count ?? w.streak;
+      }
 
       let epoch: VaultReadState["epoch"] = null;
       const evInfo = await this.connection.getAccountInfo(epochVaultPda(programId), "processed");
@@ -1569,16 +2165,18 @@ export class Orchestrator {
         );
         if (itInfo) {
           const it = decodeAccount<EpochVaultIteration>("EpochVaultIteration", itInfo.data);
-          const entryInfo = await this.connection.getAccountInfo(
-            epochVaultEntryPda(ev.iteration_id, this.payer.publicKey, programId),
-            "processed",
-          );
-          this.vaultEpochEntryCache = {
-            iter: ev.iteration_id,
-            tickets: entryInfo
-              ? num(decodeAccount<EpochVaultEntry>("EpochVaultEntry", entryInfo.data).tickets)
-              : 0,
-          };
+          const entryKeys = this.wallets
+            .pubkeys()
+            .map((w) => epochVaultEntryPda(ev.iteration_id, w, programId));
+          const entryInfos = await this.connection.getMultipleAccountsInfo(entryKeys, "processed");
+          this.wallets.all().forEach((w, i) => {
+            const info = entryInfos[i];
+            const tickets = info
+              ? num(decodeAccount<EpochVaultEntry>("EpochVaultEntry", info.data).tickets)
+              : 0;
+            this.vaultEpochEntryCache.set(w.keypair.publicKey.toBase58(), { iter: ev.iteration_id, tickets });
+            w.tickets = tickets;
+          });
           epoch = {
             iterationId: ev.iteration_id,
             open: "Open" in it.state,
@@ -1620,10 +2218,13 @@ export class Orchestrator {
       // Cache the live pool state for monitoring. These accounts are only read
       // here, so without this the dashboard can't show pool size, field size, or
       // what a ticket is currently worth — the numbers that decide entry.
-      const myEpoch =
-        epoch && this.vaultEpochEntryCache.iter === epoch.iterationId
-          ? this.vaultEpochEntryCache.tickets
-          : 0;
+      // Fleet-wide tickets in the current iteration (the dashboard's view).
+      const myEpoch = epoch
+        ? [...this.vaultEpochEntryCache.values()].reduce(
+            (a, e) => a + (e.iter === epoch.iterationId ? e.tickets : 0),
+            0,
+          )
+        : 0;
       const ticketEv = (
         kind: "epoch" | "one_btc",
         pool: number,
@@ -1632,9 +2233,10 @@ export class Orchestrator {
       ): number => {
         const others = Math.max(0, total - mine);
         const up = this.cfg.EPOCH_DEDUP_UPLIFT;
+        const curve = this.epochCurve();
         return (
-          expectedWinningsUsd(mine + 1, others, pool, kind, up) -
-          expectedWinningsUsd(mine, others, pool, kind, up)
+          expectedWinningsUsd(mine + 1, others, pool, kind, up, curve) -
+          expectedWinningsUsd(mine, others, pool, kind, up, curve)
         );
       };
       this.vaultPoolCache = {
@@ -1662,8 +2264,9 @@ export class Orchestrator {
     };
 
     this.vaultManager = new VaultManager({
-      engine,
+      engines,
       readState,
+      epochCurve: this.epochCurve(),
       epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
       epochLateFraction: this.cfg.VAULT_EPOCH_LATE_FRACTION,
       oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,
@@ -1679,9 +2282,10 @@ export class Orchestrator {
   private async sendVaultIx(
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    signer: Keypair = this.payer,
   ): Promise<string> {
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu(),
@@ -1700,10 +2304,10 @@ export class Orchestrator {
   }
 
   /** Our SPL balance for a mint, in base units; 0 when the ATA doesn't exist. */
-  private async ataBalanceBase(mint: PublicKey): Promise<bigint> {
+  private async ataBalanceBase(mint: PublicKey, owner: PublicKey = this.payer.publicKey): Promise<bigint> {
     try {
       const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
-      const ata = getAssociatedTokenAddressSync(mint, this.payer.publicKey);
+      const ata = getAssociatedTokenAddressSync(mint, owner);
       const bal = await this.connection.getTokenAccountBalance(ata, "confirmed");
       return BigInt(bal.value.amount);
     } catch {
@@ -1725,14 +2329,16 @@ export class Orchestrator {
     iterationId: number,
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    /** Wallet the proceeds land on (the 1-BTC ticket's owner); primary by default. */
+    recipient: PublicKey = this.payer.publicKey,
   ): Promise<string> {
-    const usdBefore = await this.ataBalanceBase(this.ixCtx.usdMint);
-    const btcBefore = await this.ataBalanceBase(this.ixCtx.btcMint);
+    const usdBefore = await this.ataBalanceBase(this.ixCtx.usdMint, recipient);
+    const btcBefore = await this.ataBalanceBase(this.ixCtx.btcMint, recipient);
     const outcome = await this.sendVaultIx(ix, meta);
     if (outcome !== "landed") return outcome;
     try {
-      const usdBase = (await this.ataBalanceBase(this.ixCtx.usdMint)) - usdBefore;
-      const btcBase = (await this.ataBalanceBase(this.ixCtx.btcMint)) - btcBefore;
+      const usdBase = (await this.ataBalanceBase(this.ixCtx.usdMint, recipient)) - usdBefore;
+      const btcBase = (await this.ataBalanceBase(this.ixCtx.btcMint, recipient)) - btcBefore;
       this.db.recordVaultClaim({
         kind,
         iterationId,
@@ -1799,7 +2405,8 @@ export class Orchestrator {
       ev !== null &&
       ev.iteration_id === iterationId &&
       slot >= Number(ev.last_trigger_slot.toString()) + durationSlots;
-    const weWon = epochWinIndex(it.winners, this.payer.publicKey) >= 0;
+    const winningWallets = this.wallets.pubkeys().filter((w) => epochWinIndex(it.winners, w) >= 0);
+    const weWon = winningWallets.length > 0;
     const action = epochAction({
       state: stateName,
       windowElapsed,
@@ -1843,16 +2450,30 @@ export class Orchestrator {
         this.noteCrankOutcome(key, outcome === "landed");
       }
     } else if (action === "claim") {
-      const outcome = await this.sendVaultClaim(
-        "epoch",
-        iterationId,
-        buildClaimEpochReward(this.ixCtx, { authority: this.payer.publicKey, iterationId }),
-        { kind: "vault_epoch_claim", iterationId },
-      );
-      if (outcome === "landed") {
-        this.db.markVaultClaimed("epoch", iterationId);
-        this.alert(`🏆 vault WIN — claimed epoch iteration ${iterationId}`);
+      // V2: permissionless distribute_epoch_reward(rank) credits our Miner
+      // (USD → claim_usd pool, BTC → sats-vault shares, RUSH → token vault).
+      // Nothing reaches the wallet ATAs, so this is a plain crank send; the
+      // Miner-side accounting is picked up by the claim path.
+      // Equal prizes cap a wallet at one slot; a fleet can hold several.
+      let allLanded = true;
+      for (const winner of winningWallets) {
+        const rank = epochWinIndex(it.winners, winner);
+        const outcome = await this.sendVaultIx(
+          buildDistributeEpochReward(this.ixCtx, {
+            authority: this.payer.publicKey,
+            iterationId,
+            rank,
+            winnerAuthority: winner,
+          }),
+          { kind: "vault_epoch_distribute", iterationId, rank, wallet: winner.toBase58() },
+        );
+        if (outcome === "landed") {
+          this.alert(`🏆 vault WIN — distributed epoch iteration ${iterationId} (rank ${rank}) to ${winner.toBase58().slice(0, 6)}…`);
+        } else {
+          allLanded = false;
+        }
       }
+      if (allLanded) this.db.markVaultClaimed("epoch", iterationId);
     } else if (action === "done" && live) {
       this.db.markVaultClaimed("epoch", iterationId); // lost or fully resolved
     }
@@ -1887,17 +2508,21 @@ export class Orchestrator {
 
     let weWon = false;
     let winningTicketAcct: PublicKey | null = null;
+    let winningWallet: PublicKey = this.payer.publicKey;
     if (stateName !== "Open") {
       const winningTicket = BigInt(it.winning_ticket.toString());
-      for (const pkStr of this.db.oneBtcTicketPubkeys(iterationId)) {
-        const info = await this.connection.getAccountInfo(new PublicKey(pkStr), "processed");
+      for (const { ticketPubkey, wallet } of this.db.oneBtcTickets(iterationId)) {
+        const info = await this.connection.getAccountInfo(new PublicKey(ticketPubkey), "processed");
         if (!info) continue;
         const e = decodeAccount<OneBtcVaultEntry>("OneBtcVaultEntry", info.data);
         const start = BigInt(e.start_ticket_id.toString());
         const count = BigInt(e.tickets_count.toString());
         if (winningTicket >= start && winningTicket < start + count) {
           weWon = true;
-          winningTicketAcct = new PublicKey(pkStr);
+          winningTicketAcct = new PublicKey(ticketPubkey);
+          // The prize goes to the ticket's owner whoever cranks; the entry
+          // account is the source of truth, the DB's wallet is the hint.
+          winningWallet = wallet ? new PublicKey(wallet) : e.authority;
           break;
         }
       }
@@ -1920,8 +2545,10 @@ export class Orchestrator {
           authority: this.payer.publicKey,
           iterationId,
           ticket: winningTicketAcct,
+          winner: winningWallet,
         }),
-        { kind: "vault_one_btc_claim", iterationId },
+        { kind: "vault_one_btc_claim", iterationId, wallet: winningWallet.toBase58() },
+        winningWallet,
       );
       if (outcome === "landed") {
         this.db.markVaultClaimed("one_btc", iterationId);
@@ -1941,8 +2568,11 @@ export class Orchestrator {
     kind: VaultKind,
     iterationId: number,
     tickets: number,
+    /** The buying wallet — tickets are paid with ITS hashrate and it signs. */
+    buyer: WalletState = this.wallets.primary(),
   ): Promise<string> {
     const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    const signer = buyer.keypair;
     let ticketPubkey: string | null = null;
     let extraSigner: Keypair | null = null;
     let ix;
@@ -1951,7 +2581,7 @@ export class Orchestrator {
       extraSigner = ticket;
       ticketPubkey = ticket.publicKey.toBase58();
       ix = buildBuyOneBtcTickets(this.ixCtx, {
-        authority: this.payer.publicKey,
+        authority: signer.publicKey,
         iterationId,
         ticket: ticket.publicKey,
         ticketsToBuy: BigInt(tickets),
@@ -1967,7 +2597,7 @@ export class Orchestrator {
             .current_page_index
         : 0;
       ix = buildBuyEpochTickets(this.ixCtx, {
-        authority: this.payer.publicKey,
+        authority: signer.publicKey,
         iterationId,
         pageIndex,
         ticketsToBuy: BigInt(tickets),
@@ -1975,24 +2605,25 @@ export class Orchestrator {
     }
 
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: fee,
     });
     if (extraSigner) tx.sign([extraSigner]);
     const signature = bs58.encode(tx.signatures[0]!);
+    const wallet = signer.publicKey.toBase58();
     const result = await this.sender.fire(
       {
         signature,
         serialized: Buffer.from(tx.serialize()),
         lastValidBlockHeight,
-        meta: { kind: `vault_${kind}`, iterationId, tickets },
+        meta: { kind: `vault_${kind}`, iterationId, tickets, wallet },
       },
       { timeoutMs: 15_000 },
     );
     if (result.outcome === "landed" || result.outcome === "dry") {
-      this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, sig: signature });
+      this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, wallet, sig: signature });
     }
     if (result.outcome === "landed") {
       this.alert(`⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
@@ -2000,22 +2631,317 @@ export class Orchestrator {
     return signature;
   }
 
+  /** The deposit block for the dashboard and Telegram: address, Solana Pay URIs and QR data URLs (once). */
+  private async buildDepositBlock(): Promise<void> {
+    const info = depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size);
+    try {
+      const [usdcQr, solQr] = await Promise.all([qrDataUrl(info.usdcUri), qrDataUrl(info.solUri)]);
+      this.depositBlock = { ...info, usdcQr, solQr };
+    } catch {
+      this.depositBlock = { ...info, usdcQr: "", solQr: "" };
+    }
+    this.log.info({ deposit: info.address, minUsdc: info.minUsdc, minSol: info.minSol }, "deposit address ready (dashboard + /deposit show the QR)");
+  }
+
+  /** Telegram /deposit: the address, the URIs and a scannable PNG. */
+  async depositForTelegram(): Promise<{ address: string; usdcUri: string; solUri: string; minUsdc: number; minSol: number; png: Buffer }> {
+    const info = depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size);
+    return { ...info, png: await qrPng(info.usdcUri) };
+  }
+
+  /**
+   * The fleet treasury. Deposits go to the primary; this moves them to the
+   * wallets that need them most. One cycle: refresh balances → claim every
+   * wallet's unclaimed USD (fee-free; it is the 89% refund coming home) →
+   * plan (src/exec/fleet-plan.ts) → execute the transfers, primary-signed for
+   * top-ups and wallet-signed for sweeps, through the race sender. Dry mode
+   * plans and logs only. Never runs with the kill switch engaged. When the
+   * primary cannot cover the low wallets, one alert names the deposit needed.
+   */
+  private async fleetTreasuryCycle(): Promise<void> {
+    if (this.fleetCycleInFlight || this.wallets.size <= 1) return;
+    if (this.bankroll.killSwitchEngaged()) return;
+    this.fleetCycleInFlight = true;
+    try {
+      await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      const p = this.wallets.primary();
+      const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
+      if (funded && !this.fundedAlerted) {
+        this.fundedAlerted = true;
+        this.alert(`💰 deposit received: $${(Number(p.usdcBase) / 1e6).toFixed(2)} USDC · ${(p.lamports / 1e9).toFixed(3)} SOL on the primary — distributing to ${this.wallets.size} wallets`);
+      } else if (!funded && this.fundedAlerted && p.usdcBase < usdToBase(1)) {
+        this.fundedAlerted = false;
+      }
+      if (this.cfg.EXECUTION_MODE !== "dry") {
+        for (const w of this.wallets.all()) await this.claimUsdCompound(w);
+        await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      }
+      const plan = this.planFleetNow();
+      const dry = this.cfg.EXECUTION_MODE === "dry";
+      let executed = 0;
+      if (!dry) {
+        for (const t of plan.transfers) {
+          try {
+            const outcome = await this.fireTransfer(t);
+            if (outcome === "landed") executed++;
+          } catch (err) {
+            this.log.warn({ err: String(err).slice(0, 160), transfer: { ...t, amount: t.amount.toString() } }, "fleet transfer failed");
+          }
+        }
+        if (executed > 0) await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      }
+      this.lastFleetPlan = { at: Date.now(), plan, executed, dry };
+      if (plan.transfers.length > 0) {
+        this.log.info({ transfers: plan.transfers.map((t) => ({ ...t, amount: t.amount.toString() })), executed, dry, minRunwayRounds: plan.minRunwayRounds }, "fleet treasury cycle");
+      }
+      const shortUsd = Number(plan.shortfallUsdcBase) / 1e6, shortSol = plan.shortfallLamports / 1e9;
+      if ((shortUsd > 0 || shortSol > 0) && !this.fleetShortfallAlerted) {
+        this.fleetShortfallAlerted = true;
+        this.alert(`🏦 fleet needs a deposit: send ${shortUsd > 0 ? `$${shortUsd.toFixed(2)} USDC` : ""}${shortUsd > 0 && shortSol > 0 ? " and " : ""}${shortSol > 0 ? `${shortSol.toFixed(3)} SOL` : ""} to the primary ${this.payer.publicKey.toBase58()} (thinnest wallet has ${plan.minRunwayRounds} rounds of runway)`);
+      } else if (shortUsd === 0 && shortSol === 0) {
+        this.fleetShortfallAlerted = false;
+      }
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "fleet treasury cycle failed");
+    } finally {
+      this.fleetCycleInFlight = false;
+    }
+  }
+
+  /**
+   * Register AFFILIATE_TAG on the primary once, so the extras bind to it at
+   * their first deploy. Skipped when the primary already has an Affiliate
+   * account, when no tag is configured, in dry mode, or with the kill switch
+   * engaged. Extras that deploy before this lands bind to nothing (the
+   * program only reads the slot at Miner creation) — the log says so.
+   */
+  private async ensureAffiliateTag(): Promise<void> {
+    const tag = this.cfg.AFFILIATE_TAG ?? autoAffiliateTag(this.payer.publicKey);
+    if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    try {
+      const info = await this.connection.getAccountInfo(affiliatePda(this.payer.publicKey, programId), "confirmed");
+      if (info) return;
+      const outcome = await this.fireClaim(buildSetMinerTag(this.ixCtx, { authority: this.payer.publicKey, tag }), { kind: "set_miner_tag", tag });
+      this.log.info({ tag, outcome }, "affiliate tag registered on the primary");
+      if (outcome === "landed") this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
+      else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — restart to retry`);
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
+    }
+  }
+
+  /**
+   * Auto limits: re-derive the guard's per-round and daily caps from the
+   * fleet's USDC. The daily cap anchors to the UTC day's first reading so a
+   * day's losses cannot shrink their own cap.
+   */
+  private refreshLimits(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    const usdc = this.wallets.totals().usdcBase;
+    if (this.dayAnchor?.day !== today) this.dayAnchor = { day: today, usdcBase: usdc };
+    const limits = deriveLimits(this.cfg, usdc, this.dayAnchor.usdcBase);
+    try {
+      this.bankroll.setLimits(limits);
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 120) }, "auto limits not applied");
+    }
+  }
+
+  /**
+   * Gross USD per round, for horizons that depend on volume (the 1-BTC fill):
+   * the mean of the last 100 recorded rounds (net ÷ (1 − fee layer)), else
+   * the current round's gross, else 0.
+   */
+  private grossPerRoundUsd(): number {
+    try {
+      const rows = this.db.query("SELECT deployed_usd FROM rounds WHERE deployed_usd != '0' ORDER BY id DESC LIMIT 100") as { deployed_usd: string }[];
+      if (rows.length >= 10) {
+        const layer = (this.fees.deployFeeBps ?? 600) / 1e4;
+        const net = rows.reduce((a, r) => a + Number(r.deployed_usd) / 1e6, 0) / rows.length;
+        return net / (1 - layer);
+      }
+    } catch {
+      /* fall through */
+    }
+    const round = this.state.currentRound();
+    const gross = round ? Number((round as unknown as { deployed_gross_usd_amount?: { toString(): string } }).deployed_gross_usd_amount?.toString() ?? 0) / 1e6 : 0;
+    return gross > 0 ? gross : 0;
+  }
+
+  /**
+   * The per-wallet USDC float, derived from the selector's own behaviour:
+   * the largest leg any wallet sent over the recent window (plus the round
+   * in flight), with headroom, held for FLEET_FLOAT_ROUNDS. Floored at the
+   * configured minimum; capped by what a round can ask (MAX_PER_ROUND ÷ tiles).
+   */
+  private fleetFloatTargetBase(): bigint {
+    let observed = 0n;
+    try {
+      const since = Math.max(0, (this.roundId ?? 0) - this.cfg.FLEET_FLOAT_WINDOW_ROUNDS);
+      const row = this.db.query("SELECT MAX(CAST(amount AS INTEGER)) AS peak FROM my_deploys WHERE round_id > ? AND status IN ('fired','landed','dry')", since) as { peak: number | null }[];
+      observed = BigInt(Math.max(0, Math.round(row[0]?.peak ?? 0)));
+    } catch {
+      /* no history yet */
+    }
+    for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
+    // Forward-looking: what the selector would deploy per tile RIGHT NOW with
+    // no cash cap at all, so the float is ready before the spike, not after.
+    try {
+      const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
+      for (const sel of want) for (const a of sel.allocation) if (a > observed) observed = a;
+    } catch {
+      /* model not ready */
+    }
+    const tiles = BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    return dynamicFloatBase({
+      observedPeakLegBase: observed,
+      floorBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
+      perRoundCapBase: this.cfg.MAX_PER_ROUND_USD > 0 ? this.bankroll.maxPerRoundBase / tiles : usdToBase(1_000_000),
+      floatRounds: this.cfg.FLEET_FLOAT_ROUNDS,
+      headroom: this.cfg.FLEET_FLOAT_HEADROOM,
+    });
+  }
+
+  /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
+  private planFleetNow(): FleetPlan {
+    const perRound = this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    const balances = this.wallets.all().map((w) => ({
+      pubkey: w.keypair.publicKey.toBase58(),
+      usdcBase: w.usdcBase,
+      lamports: w.lamports,
+      perRoundBase: perRound,
+    }));
+    const target = this.fleetFloatTargetBase();
+    const lowDyn = BigInt(Math.round(Number(target) * this.cfg.FLEET_LOW_FRACTION));
+    const lowFloor = usdToBase(this.cfg.FLEET_WALLET_LOW_USD);
+    return planFleet(balances, {
+      targetUsdcBase: target,
+      lowUsdcBase: lowDyn > lowFloor ? lowDyn : lowFloor,
+      targetLamports: Math.round(this.cfg.FLEET_WALLET_TARGET_SOL * 1e9),
+      lowLamports: Math.round(this.cfg.FLEET_WALLET_LOW_SOL * 1e9),
+      reserveUsdcBase: usdToBase(this.cfg.FLEET_TREASURY_RESERVE_USD),
+      minTransferUsdcBase: usdToBase(1),
+      minTransferLamports: 2_000_000,
+    });
+  }
+
+  /** One USDC or SOL transfer between fleet wallets, signed by the sender, through the race sender. */
+  private async fireTransfer(t: FleetTransfer): Promise<string> {
+    const signer = this.signerFor(t.from);
+    const to = new PublicKey(t.to);
+    const fee = this.feeEstimator.currentMicroLamportsPerCu();
+    assertFeeBearingInvariants({
+      kind: "transfer",
+      priorityFeeMicroLamports: fee,
+      maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS,
+      killSwitchEngaged: this.bankroll.killSwitchEngaged(),
+    });
+    const instructions: TransactionInstruction[] = [];
+    if (t.asset === "usdc") {
+      const mint = this.ixCtx.usdMint;
+      const fromAta = getAssociatedTokenAddressSync(mint, signer.publicKey);
+      const toAta = getAssociatedTokenAddressSync(mint, to);
+      instructions.push(
+        createAssociatedTokenAccountIdempotentInstruction(signer.publicKey, toAta, to, mint),
+        createTransferCheckedInstruction(fromAta, mint, toAta, signer.publicKey, t.amount, 6),
+      );
+    } else {
+      instructions.push(SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: to, lamports: t.amount }));
+    }
+    const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
+      payer: signer,
+      instructions,
+      computeUnitLimit: 60_000,
+      priorityFeeMicroLamports: fee,
+    });
+    const result = await this.sender.fire(
+      {
+        signature: bs58.encode(tx.signatures[0]!),
+        serialized: Buffer.from(tx.serialize()),
+        lastValidBlockHeight,
+        meta: { kind: "fleet_transfer", asset: t.asset, amount: t.amount.toString(), from: t.from, to: t.to, reason: t.reason },
+      },
+      { timeoutMs: 15_000 },
+    );
+    return result.outcome;
+  }
+
+  /** Fleet view for Telegram /fleet and the status API: balances, runway, the last plan. */
+  fleetReport(): FleetReport {
+    const plan = this.wallets.size > 1 ? this.planFleetNow() : null;
+    const perRound = Number(this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)))) / 1e6;
+    return {
+      size: this.wallets.size,
+      tileMode: this.cfg.FLEET_TILE_MODE && this.wallets.size > 1,
+      treasuryEnabled: this.cfg.FLEET_TREASURY_ENABLED && this.wallets.size > 1,
+      primary: this.payer.publicKey.toBase58(),
+      wallets: this.wallets.snapshot().map((w, i) => ({
+        ...w,
+        tile: this.wallets.size > 1 ? (i % TILES_COUNT) + 1 : null,
+        runwayRounds: perRound > 0 ? Math.floor(w.usdc / perRound) : null,
+      })),
+      pending: plan ? plan.transfers.map((t) => ({ ...t, amount: t.asset === "usdc" ? Number(t.amount) / 1e6 : Number(t.amount) / 1e9 })) : [],
+      targetUsd: this.wallets.size > 1 ? Number(this.fleetFloatTargetBase()) / 1e6 : null,
+      shortfallUsd: plan ? Number(plan.shortfallUsdcBase) / 1e6 : 0,
+      shortfallSol: plan ? plan.shortfallLamports / 1e9 : 0,
+      minRunwayRounds: plan?.minRunwayRounds ?? null,
+      last: this.lastFleetPlan ? { at: this.lastFleetPlan.at, transfers: this.lastFleetPlan.plan.transfers.length, executed: this.lastFleetPlan.executed, dry: this.lastFleetPlan.dry } : null,
+    };
+  }
+
   private async maybeSweep(): Promise<void> {
     if (!this.state.miner || this.sweepInFlight) return;
     if (this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
     this.sweepInFlight = true;
     try {
-      await this.claimUsdCompound(); // fee-free — the compound loop
-      await this.claimSatsSweep(); // fee-bearing (10% claim fee) — opt-in
+      // Claims are authority-signed, so each wallet sweeps its own Miner.
+      for (const w of this.wallets.all()) {
+        await this.claimUsdCompound(w); // fee-free — the compound loop
+        await this.claimSatsSweep(w); // fee-bearing (10% claim fee) — opt-in
+      }
+      await this.exchangeAffiliatePoints(); // the primary's rebate → grubstake USD
     } finally {
       this.sweepInFlight = false;
     }
+  }
+
+  /**
+   * V2: the affiliate rebate the extras earn accrues as points on the
+   * primary's Affiliate account; exchanging converts them into grubstake USD
+   * on the primary's Miner, which `grubstakeFor` then deploys. Read by RPC on
+   * the sweep cadence (the Affiliate PDA is not streamed).
+   */
+  private async exchangeAffiliatePoints(): Promise<void> {
+    if (!this.cfg.AFFILIATE_EXCHANGE_ENABLED) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const authority = this.payer.publicKey;
+    let points = 0n;
+    try {
+      const info = await this.connection.getAccountInfo(affiliatePda(authority, programId), "processed");
+      if (!info) return; // no tag registered — nothing accrues
+      points = BigInt(decodeAccount<Affiliate>("Affiliate", info.data).point_amount.toString());
+    } catch {
+      return;
+    }
+    if (points <= 0n) return;
+    const outcome = await this.fireClaim(
+      buildExchangeAffiliatePoints(this.ixCtx, { authority, pointsAmount: points }),
+      { kind: "exchange_affiliate_points", points: points.toString() },
+    );
+    this.log.info({ points: points.toString(), outcome }, "affiliate points exchanged into grubstake");
+  }
+
+  /** A fleet wallet's Miner from the streamed state (null before its first deploy). */
+  private minerOf(w: WalletState): Miner | null {
+    return this.state.minerAt(minerPda(w.keypair.publicKey, new PublicKey(this.cfg.PROGRAM_ID)));
   }
 
   /** Send a single claim instruction through the race sender (shared plumbing). */
   private async fireClaim(
     ix: TransactionInstruction,
     meta: Record<string, unknown>,
+    signer: Keypair = this.payer,
   ): Promise<string> {
     const fee = this.feeEstimator.currentMicroLamportsPerCu();
     assertFeeBearingInvariants({
@@ -2025,7 +2951,7 @@ export class Orchestrator {
       killSwitchEngaged: this.bankroll.killSwitchEngaged(),
     });
     const { tx, lastValidBlockHeight } = await assembleTx(this.connection, {
-      payer: this.payer,
+      payer: signer,
       instructions: [ix],
       computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT,
       priorityFeeMicroLamports: fee,
@@ -2049,19 +2975,21 @@ export class Orchestrator {
    * so there is no extra claim fee (unlike claim_sats) — making this pure upside.
    * Batched by MAX_UNCLAIMED_USD_VALUE so the tx fee is amortized.
    */
-  private async claimUsdCompound(): Promise<void> {
+  private async claimUsdCompound(w: WalletState): Promise<void> {
     if (!this.cfg.CLAIM_USD_ENABLED) return;
-    const miner = this.state.miner;
+    const miner = this.minerOf(w);
     if (!miner) return;
+    const authority = w.keypair.publicKey;
     const amount = BigInt(miner.unclaimed_usd_amount.toString());
     if (amount <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
     const outcome = await this.fireClaim(
-      buildClaimUsd(this.ixCtx, { authority: this.payer.publicKey, amount }),
-      { kind: "claim_usd", amount: amount.toString() },
+      buildClaimUsd(this.ixCtx, { authority, amount }),
+      { kind: "claim_usd", amount: amount.toString(), wallet: authority.toBase58() },
+      w.keypair,
     );
-    this.log.info({ amount: amount.toString(), outcome }, "usd compound claim resolved");
+    this.log.info({ amount: amount.toString(), wallet: authority.toBase58(), outcome }, "usd compound claim resolved");
     if (outcome === "landed") {
-      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet`);
+      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`);
     }
   }
 
@@ -2070,17 +2998,20 @@ export class Orchestrator {
    * pays the sats_vault_claim fee (~10%), so it's gated OFF by default — enable
    * only when realizing BTC is worth the fee vs holding the shares as exposure.
    */
-  private async claimSatsSweep(): Promise<void> {
-    const miner = this.state.miner;
+  private async claimSatsSweep(w: WalletState): Promise<void> {
+    const miner = this.minerOf(w);
     const vault = this.state.satsVault;
     if (!miner || !vault) return;
+    const authority = w.keypair.publicKey;
     const value = this.pnl.unclaimedValue({
       miner,
       satsVault: vault,
       btcUsdPrice: this.prices.btcUsd(),
       btcDecimals: 8, // cbBTC-style; read from mint before mainnet
+      tokenVault: this.state.tokenVault,
+      tokenUsdPrice: this.tokenShareValueUsd() > 0 ? (this.tokenFeed?.status().tokenUsd ?? 0) : 0,
     });
-    const sharesUsd = value.totalUsd - value.usd; // BTC-share value only
+    const sharesUsd = value.btcUsd; // BTC-share value only — claim_sats redeems these
     if (sharesUsd <= usdToBase(this.cfg.MAX_UNCLAIMED_USD_VALUE)) return;
     if (!this.cfg.SWEEP_ENABLED) {
       this.skipOnce("sweep_disabled", { unclaimedSharesUsd: sharesUsd.toString() });
@@ -2090,10 +3021,11 @@ export class Orchestrator {
       (value.shares * BigInt(Math.round(this.cfg.CLAIM_FRACTION * 10_000))) / 10_000n;
     if (shares <= 0n) return;
     const outcome = await this.fireClaim(
-      buildClaimSats(this.ixCtx, { authority: this.payer.publicKey, shares }),
-      { kind: "claim_sats", shares: shares.toString() },
+      buildClaimSats(this.ixCtx, { authority, shares }),
+      { kind: "claim_sats", shares: shares.toString(), wallet: authority.toBase58() },
+      w.keypair,
     );
-    this.log.info({ shares: shares.toString(), outcome }, "sats sweep resolved");
+    this.log.info({ shares: shares.toString(), wallet: authority.toBase58(), outcome }, "sats sweep resolved");
   }
 
   // ── event wiring ────────────────────────────────────────────────────────────
@@ -2145,7 +3077,7 @@ export class Orchestrator {
         `⚡ Sat Strike round ${reveal.round_id} — paid $${paid.toFixed(2)} of a ` +
           `$${poolBefore.toFixed(2)} pool (${(poolBefore > 0 ? paid / poolBefore : 0).toFixed(3)}× ` +
           `vs ${this.cfg.STRIKE_PAYOUT_FRACTION} configured) · ` +
-          `${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate for ${this.cfg.STRIKE_BONUS_WINDOW_MINUTES}min`,
+          `${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate for ${STRIKE_BOOST_WINDOW_ROUNDS.value} rounds`,
       );
     }
     this.db.recordRound({
@@ -2217,7 +3149,7 @@ export class Orchestrator {
             });
           }
         }
-        if (applied.kind === "Miner" || applied.kind === "SatsVault") {
+        if (applied.kind === "Miner" || applied.kind === "SatsVault" || applied.kind === "TokenVault") {
           void this.maybeSweep();
         }
       } catch (err) {
@@ -2237,8 +3169,8 @@ export class Orchestrator {
         if (event.name === "PublicDeployCreated") {
           const data = event.data as PublicDeployCreated;
           this.noteDeployer(data.round_id, data.authority.toBase58());
-          if (data.authority.equals(this.payer.publicKey)) {
-            this.db.markDeployLandedByRound(data.round_id, event.slot);
+          if (this.isOurWallet(data.authority)) {
+            this.db.markDeployLandedByRound(data.round_id, event.slot, data.authority.toBase58());
           } else {
             this.db.recordCompetitorDeploy({
               roundId: data.round_id,
@@ -2256,7 +3188,7 @@ export class Orchestrator {
           this.onRevealed(event.data as RoundRevealed);
         } else if (event.name === "PublicDeploySettled") {
           const data = event.data as PublicDeploySettled;
-          if (data.authority.equals(this.payer.publicKey)) {
+          if (this.isOurWallet(data.authority)) {
             // Atomic per-round settlement write.
             this.db.transaction(() => {
               this.db.recordSettlement({
@@ -2265,6 +3197,9 @@ export class Orchestrator {
                 wonUsd: BigInt(data.won_usd_amount.toString()),
                 wonShares: BigInt(data.won_shares_amount.toString()),
                 hashrateEarned: BigInt(data.hashrate_earned.toString()),
+                wonTokenAmount: BigInt(data.won_token_amount.toString()),
+                wonTokenShares: BigInt(data.won_token_shares.toString()),
+                wallet: data.authority.toBase58(),
                 sig: event.signature,
               });
               this.pnl.refreshDaily();
@@ -2288,12 +3223,19 @@ export class Orchestrator {
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
+      void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint).then(() => this.refreshLimits());
       void this.checkWalletDrift();
       this.validateHashrateFormula();
       this.refreshFireOffset();
       this.refreshRivalProfiles();
     }, 30_000);
     this.walletDriftTimer.unref?.();
+    void this.buildDepositBlock();
+    if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
+      void this.ensureAffiliateTag();
+      this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
+      this.fleetTimer.unref?.();
+    }
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
     // path is otherwise entirely untouched.
     if (this.cfg.VAULT_STRATEGY_ENABLED) this.startVaultManager();
@@ -2323,8 +3265,10 @@ export class Orchestrator {
     this.candidates.clear();
     this.health.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
+    if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();
     this.prices.stop();
+    this.tokenFeed?.stop();
     await this.source.stop().catch(() => undefined);
     await this.telegram?.alert(`bot shutting down (${reason})`).catch(() => undefined);
     await this.api?.stop().catch(() => undefined);

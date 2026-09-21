@@ -25,6 +25,14 @@ export interface BankrollConfig {
   ladder: bigint[];
   maxPerRound: bigint;
   dailyLossCap: bigint;
+  /**
+   * Fraction of a prospective stake the daily-loss check counts as at risk.
+   * 1 (default, V1): a losing deploy loses everything. V2: the board can take
+   * at most the toll — 1 − refund (11%) — so the check uses that; MAX_PER_ROUND
+   * stays on gross either way. Clamped to (0, 1]; never an economic input to
+   * the EV, only to how many rounds a day the cap permits.
+   */
+  lossFractionAtRisk?: number | undefined;
   /** On-chain SatrushConfig.min_deploy_usd_amount (base units). */
   minDeploy: bigint;
   /** Kill switch file path; existence halts sending. */
@@ -42,7 +50,7 @@ export class Bankroll {
   private tripped: string | null = null;
 
   constructor(
-    private readonly cfg: BankrollConfig,
+    private cfg: BankrollConfig,
     private readonly deps: BankrollDeps,
   ) {
     if (cfg.ladder.length === 0 || cfg.ladder.some((l) => l <= 0n)) {
@@ -50,7 +58,26 @@ export class Bankroll {
     }
     if (cfg.maxPerRound <= 0n) throw new RangeError("maxPerRound must be positive");
     if (cfg.dailyLossCap <= 0n) throw new RangeError("dailyLossCap must be positive");
+    const f = cfg.lossFractionAtRisk ?? 1;
+    if (!Number.isFinite(f) || f <= 0 || f > 1) {
+      throw new RangeError(`lossFractionAtRisk must be in (0, 1], got ${f}`);
+    }
     this.quantum = cfg.ladder.reduce((a, b) => (b < a ? b : a));
+  }
+
+  /**
+   * Replace the limits the guard enforces. The orchestrator derives them from
+   * the bankroll (auto mode: per-round cap = deployable USDC, daily cap = a
+   * fraction of the fleet's USDC at the day's start) and calls this on every
+   * balance refresh; every authorize() after that checks the new figures. The
+   * enforcement path is unchanged — only where the numbers come from.
+   */
+  setLimits(limits: { maxPerRound?: bigint | undefined; dailyLossCap?: bigint | undefined }): void {
+    const maxPerRound = limits.maxPerRound ?? this.cfg.maxPerRound;
+    const dailyLossCap = limits.dailyLossCap ?? this.cfg.dailyLossCap;
+    if (maxPerRound <= 0n) throw new RangeError("maxPerRound must be positive");
+    if (dailyLossCap <= 0n) throw new RangeError("dailyLossCap must be positive");
+    this.cfg = { ...this.cfg, maxPerRound, dailyLossCap };
   }
 
   // Accessors so the pre-send invariant guard can re-verify against the SAME
@@ -60,6 +87,9 @@ export class Bankroll {
   }
   get dailyLossCapBase(): bigint {
     return this.cfg.dailyLossCap;
+  }
+  get lossFractionAtRisk(): number {
+    return this.cfg.lossFractionAtRisk ?? 1;
   }
   get minDeployBase(): bigint {
     return this.cfg.minDeploy;
@@ -133,12 +163,13 @@ export class Bankroll {
       };
     }
     const lossToday = this.deps.realizedLossToday();
-    // Conservative: treat the full stake as potential loss.
-    if (lossToday + amount > this.cfg.dailyLossCap) {
+    // V1: the full stake is the potential loss. V2: the toll (rounded up).
+    const atRisk = stakeAtRisk(amount, this.lossFractionAtRisk);
+    if (lossToday + atRisk > this.cfg.dailyLossCap) {
       return {
         ok: false,
         reason: "daily_loss_cap_reached",
-        detail: `loss=${lossToday} + stake=${amount} > cap=${this.cfg.dailyLossCap}`,
+        detail: `loss=${lossToday} + at_risk=${atRisk} (stake=${amount} × ${this.lossFractionAtRisk}) > cap=${this.cfg.dailyLossCap}`,
       };
     }
     return { ok: true, amountGross: amount };
@@ -177,6 +208,16 @@ export class Bankroll {
  * threshold. boost=1.0 disables (default until trigger mechanics are
  * understood — see CLAUDE.md open questions).
  */
+/** Base units of `amount` counted against the daily cap: ceil(amount × fraction). */
+export function stakeAtRisk(amount: bigint, fraction: number): bigint {
+  if (!Number.isFinite(fraction) || fraction <= 0 || fraction > 1) {
+    throw new RangeError(`fraction must be in (0, 1], got ${fraction}`);
+  }
+  if (fraction === 1) return amount;
+  const bps = BigInt(Math.ceil(fraction * 10_000));
+  return (amount * bps + 9_999n) / 10_000n;
+}
+
 export function strikeSizeMultiplier(
   strikePoolUsd: bigint,
   opts: { thresholdBaseUnits: bigint; boost: number },

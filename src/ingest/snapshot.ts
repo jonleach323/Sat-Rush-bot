@@ -11,6 +11,7 @@ import type {
   Round,
   SatrushConfig,
   SatsVault,
+  TokenVault,
 } from "../adapter/idl.js";
 import { PROGRAM_ID } from "../adapter/idl.js";
 import {
@@ -19,6 +20,7 @@ import {
   roundPda,
   satrushConfigPda,
   satsVaultPda,
+  tokenVaultPda,
 } from "../adapter/pdas.js";
 import {
   HaltError,
@@ -36,6 +38,7 @@ export type AppliedKind =
   | "Board"
   | "Round"
   | "Miner"
+  | "TokenVault"
   | "SatsVault"
   | "SatrushConfig";
 
@@ -48,7 +51,12 @@ export class GameState {
   board: Board | null = null;
   satrushConfig: SatrushConfig | null = null;
   satsVault: SatsVault | null = null;
+  /** V2 RUSH vault (token_amount / token_shares marks unclaimed token shares). */
+  tokenVault: TokenVault | null = null;
+  /** The primary wallet's Miner (first authority given), for single-wallet code paths. */
   miner: Miner | null = null;
+  /** Every watched wallet's Miner, keyed by Miner PDA address (base58). */
+  readonly miners = new Map<string, Miner>();
   currentSlot = 0;
   /** 0 for now — becomes a live estimate in the private-deployment era. */
   hiddenPoolEstimate = 0n;
@@ -56,13 +64,24 @@ export class GameState {
   private readonly rounds = new Map<number, Round>();
   private readonly guard: RoundMonotonicityGuard;
 
+  private readonly minerAddresses: PublicKey[];
+
   constructor(
-    /** Only this wallet's Miner PDA may populate `miner`. */
-    private readonly minerAddress: PublicKey | null = null,
+    /**
+     * Wallet Miner PDAs that may populate `miners`; the first is the primary
+     * and also fills `miner`. A single PublicKey keeps the old one-wallet call.
+     */
+    minerAddress: PublicKey | PublicKey[] | null = null,
     /** Notified when a fork rollback is absorbed (visibility, not an error). */
     onRollback?: (r: RoundRollback) => void,
   ) {
+    this.minerAddresses = minerAddress === null ? [] : Array.isArray(minerAddress) ? minerAddress : [minerAddress];
     this.guard = new RoundMonotonicityGuard(onRollback);
+  }
+
+  /** Miner of the wallet whose Miner PDA is `minerAddress`, if watched and seen. */
+  minerAt(minerAddress: PublicKey): Miner | null {
+    return this.miners.get(minerAddress.toBase58()) ?? null;
   }
 
   /** Fork rollbacks absorbed since start — expected to be small but non-zero. */
@@ -94,13 +113,19 @@ export class GameState {
         return { kind: "Round", roundId: round.id };
       }
       case "Miner": {
-        if (this.minerAddress && !pubkey.equals(this.minerAddress)) return null;
-        this.miner = decodeAccountOrHalt<Miner>("Miner", data);
+        const idx = this.minerAddresses.findIndex((a) => a.equals(pubkey));
+        if (this.minerAddresses.length > 0 && idx < 0) return null;
+        const miner = decodeAccountOrHalt<Miner>("Miner", data);
+        this.miners.set(pubkey.toBase58(), miner);
+        if (idx <= 0) this.miner = miner; // primary, or the only wallet when unfiltered
         return { kind: "Miner" };
       }
       case "SatsVault":
         this.satsVault = decodeAccountOrHalt<SatsVault>("SatsVault", data);
         return { kind: "SatsVault" };
+      case "TokenVault":
+        this.tokenVault = decodeAccountOrHalt<TokenVault>("TokenVault", data);
+        return { kind: "TokenVault" };
       case "SatrushConfig":
         this.satrushConfig = decodeAccountOrHalt<SatrushConfig>("SatrushConfig", data);
         return { kind: "SatrushConfig" };
@@ -187,7 +212,8 @@ export class GameState {
 }
 
 export interface BootstrapOptions {
-  minerAuthority?: PublicKey | undefined;
+  /** The wallet(s) whose Miner PDAs are watched; the first is the primary. */
+  minerAuthority?: PublicKey | PublicKey[] | undefined;
   programId?: PublicKey | undefined;
   /** Notified when a fork rollback is absorbed rather than halted on. */
   onRollback?: ((r: RoundRollback) => void) | undefined;
@@ -203,16 +229,21 @@ export async function bootstrapGameState(
   opts: BootstrapOptions = {},
 ): Promise<GameState> {
   const programId = opts.programId ?? PROGRAM_ID;
-  const minerAddress = opts.minerAuthority
-    ? minerPda(opts.minerAuthority, programId)
-    : null;
-  const state = new GameState(minerAddress, opts.onRollback);
+  const authorities =
+    opts.minerAuthority === undefined
+      ? []
+      : Array.isArray(opts.minerAuthority)
+        ? opts.minerAuthority
+        : [opts.minerAuthority];
+  const minerAddresses = authorities.map((a) => minerPda(a, programId));
+  const state = new GameState(minerAddresses.length > 0 ? minerAddresses : null, opts.onRollback);
 
   const staticKeys = [
     satrushConfigPda(programId),
     boardPda(programId),
     satsVaultPda(programId),
-    ...(minerAddress ? [minerAddress] : []),
+    tokenVaultPda(programId),
+    ...minerAddresses,
   ];
   const infos = await connection.getMultipleAccountsInfo(staticKeys, "processed");
 
@@ -224,8 +255,12 @@ export async function bootstrapGameState(
   state.applyAccount(staticKeys[1] as PublicKey, boardInfo.data);
   const vaultInfo = infos[2];
   if (vaultInfo) state.applyAccount(staticKeys[2] as PublicKey, vaultInfo.data);
-  const minerInfo = infos[3];
-  if (minerAddress && minerInfo) state.applyAccount(minerAddress, minerInfo.data);
+  const tokenVaultInfo = infos[3]; // absent on a V1 chain — fine, stays null
+  if (tokenVaultInfo) state.applyAccount(staticKeys[3] as PublicKey, tokenVaultInfo.data);
+  minerAddresses.forEach((addr, i) => {
+    const info = infos[4 + i];
+    if (info) state.applyAccount(addr, info.data); // a wallet with no Miner yet stays absent
+  });
 
   const bootSlot = await connection.getSlot("processed");
   state.applySlot(bootSlot);

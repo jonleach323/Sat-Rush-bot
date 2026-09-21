@@ -7,6 +7,8 @@
 import type { Miner, Round, SatrushConfig, SatsVault } from "../adapter/idl.js";
 import { TILES_COUNT } from "../ingest/decode.js";
 import type { PriceStatus } from "../ingest/prices.js";
+import type { TokenFeedStatus } from "../ingest/token-feed.js";
+import type { WalletSnapshot } from "../exec/wallets.js";
 import { buildIntel, type IntelJson } from "./intel.js";
 import type { GameState } from "../ingest/snapshot.js";
 import type { StateDb } from "../state/db.js";
@@ -42,7 +44,33 @@ export interface StatusJson {
    * reports only `usd` understates the position by that much — the single
    * easiest way to mistake a profitable bot for a losing one.
    */
-  unclaimed: { usd: number; shares: string; sharesUsd: number };
+  unclaimed: {
+    usd: number;
+    shares: string;
+    sharesUsd: number;
+    /** V2 RUSH vault shares and their marked value (0 when unpriced). */
+    tokenShares: string;
+    tokenSharesUsd: number;
+  };
+  /** Net today with the day's won shares marked — the figure the daily cap runs on. */
+  markedNetTodayUsd: number;
+  tokenFeed: TokenFeedStatus | null;
+  /** Fleet wallets — one entry in single-wallet mode. */
+  wallets: WalletSnapshot[];
+  /** Where to send money: the primary, as an address and as Solana Pay QRs (data URLs). */
+  deposit: { address: string; usdcUri: string; solUri: string; usdcQr: string; solQr: string; minUsdc: number; minSol: number };
+  /** The V2 economics the selector is pricing right now. */
+  game: {
+    version: string;
+    /** USD of RUSH minted per USD of gross volume, when the feed is live. */
+    tokenYield: number | null;
+    /** App-reported vault carry (simple APR fractions), when read. */
+    satsVaultApr: number | null;
+    tokenVaultApr: number | null;
+    /** Carry credited on the share legs over the stated horizon; null = not credited. */
+    carry: { sats: number; token: number } | null;
+    carryHorizonDays: number;
+  };
   caps: { maxPerRoundUsd: number; dailyLossCapUsd: number; dailyLossLeftUsd: number };
   /** Oracle prices actually in force; `live: false` means a fallback is in use. */
   prices: PriceStatus;
@@ -138,9 +166,11 @@ export interface MonitorContext {
   ingestSourceName: string;
   isPaused: () => boolean;
   killSwitchEngaged: () => boolean;
-  maxPerRoundBase: bigint;
-  dailyLossCapBase: bigint;
+  maxPerRoundBase: () => bigint;
+  dailyLossCapBase: () => bigint;
   myAuthority: string;
+  /** Deposit block, computed once at boot (QR data URLs are static). */
+  deposit: () => StatusJson["deposit"];
   solBalanceLamports: () => Promise<number>;
   usdcBalanceBaseUnits: () => Promise<bigint>;
   /** Live BTC/USD (oracle-backed); a getter so it isn't frozen at boot. */
@@ -160,6 +190,16 @@ export interface MonitorContext {
   fireOffsetSlots: () => number;
   /** USD value of ONE sats-vault BTC share, net of the claim fee. 0 if unknown. */
   shareValueUsd: () => number;
+  /** USD value of ONE RUSH-vault share, net of the exit fee. 0 unless the token feed is live. */
+  tokenShareValueUsd: () => number;
+  /** V2 token feed (price, mint rate, yield); null under V1. */
+  tokenFeedStatus: () => TokenFeedStatus | null;
+  /** The signer fleet (public keys and balances only). */
+  wallets: () => WalletSnapshot[];
+  gameVersion: string;
+  /** Carry the selector credits on the share legs right now (null = none). */
+  shareCarry: () => { sats: number; token: number } | null;
+  carryHorizonDays: number;
 }
 
 const big = (v: { toString(): string } | null | undefined): bigint =>
@@ -227,12 +267,29 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
           usd: baseToUsd(big(miner?.unclaimed_usd_amount)),
           shares: big(miner?.unclaimed_btc_shares).toString(),
           sharesUsd: Number(big(miner?.unclaimed_btc_shares)) * ctx.shareValueUsd(),
+          tokenShares: big(miner?.unclaimed_token_shares).toString(),
+          tokenSharesUsd: Number(big(miner?.unclaimed_token_shares)) * ctx.tokenShareValueUsd(),
         },
+        markedNetTodayUsd: baseToUsd(ctx.pnl.markedNetToday()),
+        tokenFeed: ctx.tokenFeedStatus(),
+        wallets: ctx.wallets(),
+        deposit: ctx.deposit(),
+        game: (() => {
+          const feed = ctx.tokenFeedStatus();
+          return {
+            version: ctx.gameVersion,
+            tokenYield: feed?.live ? feed.yieldPerVolume : null,
+            satsVaultApr: feed?.satsVaultApr ?? null,
+            tokenVaultApr: feed?.tokenVaultApr ?? null,
+            carry: ctx.shareCarry(),
+            carryHorizonDays: ctx.carryHorizonDays,
+          };
+        })(),
         caps: {
-          maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase),
-          dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase),
+          maxPerRoundUsd: baseToUsd(ctx.maxPerRoundBase()),
+          dailyLossCapUsd: baseToUsd(ctx.dailyLossCapBase()),
           dailyLossLeftUsd: baseToUsd(
-            ctx.dailyLossCapBase > dailyLoss ? ctx.dailyLossCapBase - dailyLoss : 0n,
+            ctx.dailyLossCapBase() > dailyLoss ? ctx.dailyLossCapBase() - dailyLoss : 0n,
           ),
         },
         prices: ctx.priceStatus(),
@@ -320,6 +377,7 @@ export function createMonitorData(ctx: MonitorContext): MonitorData {
         windowRounds: Math.min(Math.max(1, windowRounds), 5000),
         fireOffsetSlots: ctx.fireOffsetSlots(),
         shareValueUsd: ctx.shareValueUsd(),
+        tokenShareValueUsd: ctx.tokenShareValueUsd(),
       });
     },
 

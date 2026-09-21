@@ -51,10 +51,9 @@ describe("every fact declares where it came from", () => {
     // but they have to be deliberate, because an assumption that arrives
     // quietly is exactly how 0.9333, 0.65 and 1.246 got into the EV path.
     // REWARD_MAX_STREAK left this list once @satrush/client was installed and
-    // exported it. One assumption remains.
-    expect(assumedFacts().map((x) => x.name).sort()).toEqual([
-      "EPOCH_FIELD_BANKED_SHARE",
-    ]);
+    // exported it; EPOCH_FIELD_BANKED_SHARE left it on 2026-09-11 when
+    // `pnpm epoch-history` measured the first-tenth proxy. None remain.
+    expect(assumedFacts().map((x) => x.name).sort()).toEqual([]);
   });
 
   it("the streak cap is SDK-sourced now, not asserted", () => {
@@ -69,6 +68,7 @@ describe("every fact declares where it came from", () => {
       .filter(([, f]) => f.provenance.kind === "sdk").map(([n]) => n).sort();
     expect(sdkBacked).toEqual([
       "REWARD_MAX_STREAK",
+      "STREAK_GRACE_ROUNDS",
       "STRIKE_BOOST_WINDOW_ROUNDS",
       "STRIKE_HASHRATE_MULTIPLIER",
       "TILES",
@@ -155,12 +155,12 @@ describe("describe() surfaces provenance in one line", () => {
     expect(describeFact("REWARD_MAX_STREAK", REWARD_MAX_STREAK))
       .toContain("REWARD_MAX_STREAK from @satrush/client");
   });
-  it("marks remaining assumptions loudly", () => {
-    const [first] = assumedFacts();
-    expect(describeFact(first!.name, first!.fact)).toContain("ASSUMED");
+  it("marks an assumption loudly", () => {
+    const f = { value: 0.5, unit: "fraction", provenance: { kind: "assumed" as const, why: "example", risk: "example" } };
+    expect(describeFact("EXAMPLE", f)).toContain("ASSUMED");
   });
   it("dates measurements", () => {
-    expect(describeFact("EPOCH_DEDUP_UPLIFT", EPOCH_DEDUP_UPLIFT)).toContain("n=127");
+    expect(describeFact("EPOCH_DEDUP_UPLIFT", EPOCH_DEDUP_UPLIFT)).toContain("n=267");
   });
   it("names the pool constant's units", () => {
     expect(describeFact("EPOCH_LAST_CLOSE_POOL_USD", EPOCH_LAST_CLOSE_POOL_USD))

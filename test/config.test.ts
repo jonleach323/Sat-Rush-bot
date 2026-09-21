@@ -10,7 +10,9 @@ describe("config defaults", () => {
     expect(cfg.DB_PATH).toBe("./data/satrush.db");
     expect(cfg.SECONDARY_RPC_URLS).toEqual([]);
     expect(cfg.STAKE_LADDER_USD.length).toBeGreaterThan(0);
-    expect(cfg.MAX_PER_ROUND_USD).toBeLessThanOrEqual(cfg.DAILY_LOSS_CAP_USD);
+    expect(cfg.MAX_PER_ROUND_USD).toBe(0); // auto: the fleet's deployable USDC
+    expect(cfg.DAILY_LOSS_CAP_USD).toBe(0); // auto: AUTO_DAILY_LOSS_FRACTION of the day's opening USDC
+    expect(cfg.FLEET_SIZE).toBe(21);
     // Vault strategy is ON by default — spends idle hashrate on +share raffles
     // (bounded, and EXECUTION_MODE-gated so dry mode still sends nothing).
     expect(cfg.VAULT_STRATEGY_ENABLED).toBe(true);
@@ -29,11 +31,19 @@ describe("config defaults", () => {
     // Payout-dilution corrections are ON by default (they only make the bot
     // more selective): thin tiles converge toward the board mean, and a
     // minimum modeled edge is required to fire.
-    expect(cfg.ENDGAME_CONVERGENCE).toBeGreaterThan(0);
+    expect(cfg.ENDGAME_CONVERGENCE).toBe(0); // V2: the board is final at the fire offset (pnpm v2-timing)
+    expect(cfg.AUTO_RAMP).toBe(true);
+    expect(cfg.RAMP_PRESENCE_TOLL_BPS).toBe(300);
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
-    expect(cfg.MIN_EDGE_BPS).toBeGreaterThan(0);
+    expect(cfg.MIN_EDGE_BPS).toBe(25); // margin over the model's own noise
+    expect(cfg.EDGE_HURDLE_ENABLED).toBe(true);
+    expect(cfg.OPPORTUNITY_YIELD_DAILY).toBeGreaterThan(0);
     // Full Kelly by default (growth-maximizing); clamped at 1.0.
-    expect(cfg.KELLY_FRACTION).toBe(1);
+    expect(cfg.KELLY_FRACTION).toBe(0); // EV-max: Kelly (log-growth) would size below the argmax
+    expect(cfg.AUTO_DAILY_LOSS_FRACTION).toBe(1);
+    expect(cfg.VAULT_MAX_SHARE).toBe(1);
+    expect(cfg.STREAK_OPTION_DISCOUNT).toBe(1);
+    expect(cfg.RAMP_ALERT_MIN_BPS).toBe(5);
     // Strike jackpot expectation is folded into EV by default.
     expect(cfg.STRIKE_EV_ENABLED).toBe(true);
     // Adaptive fire timing on by default, within sane bounds.
@@ -123,5 +133,26 @@ describe("redacted summary", () => {
     expect(text).not.toContain("grpc-secret-token");
     expect(text).not.toContain("tg-secret-token");
     expect(text).toContain("https://rpc.example.com");
+  });
+});
+
+describe("V2 game version + token feed knobs", () => {
+  it("defaults to the live V2 economics with an unpriced token leg", () => {
+    const cfg = loadConfig({});
+    expect(cfg.GAME_VERSION).toBe("v2");
+    expect(cfg.SATRUSH_API_URL).toBe("https://api.satrush.io/api/v1");
+    expect(cfg.RUSH_USD_ESTIMATE).toBe(0);
+    expect(cfg.RUSH_MINT_PER_USD_ESTIMATE).toBe(0);
+    expect(cfg.TOKEN_FEED_MAX_AGE_MS).toBeGreaterThan(cfg.TOKEN_FEED_POLL_MS);
+    expect(cfg.VAULT_CARRY_HORIZON_DAYS).toBe(0); // the carry is not credited unless the operator means to hold
+    expect(cfg.VAULT_CARRY_APR_CAP).toBeCloseTo(1.2, 6);
+    expect(loadConfig({ VAULT_CARRY_HORIZON_DAYS: "90" }).VAULT_CARRY_HORIZON_DAYS).toBe(90);
+    expect(() => loadConfig({ VAULT_CARRY_HORIZON_DAYS: "400" })).toThrow();
+  });
+
+  it("accepts v1 for replay and rejects anything else", () => {
+    expect(loadConfig({ GAME_VERSION: "v1" }).GAME_VERSION).toBe("v1");
+    expect(() => loadConfig({ GAME_VERSION: "v3" })).toThrow();
+    expect(() => loadConfig({ RUSH_MINT_PER_USD_ESTIMATE: "2" })).toThrow();
   });
 });

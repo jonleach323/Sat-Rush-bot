@@ -33,6 +33,8 @@ export interface MyDeployRecord {
    * streak's effect on the claim reward can be measured (its value is not yet
    * quantifiable: it scales the hashrate/BTC-shares reward, price TBD). */
   streak?: number | null;
+  /** Signing wallet (base58); null = the primary / single-wallet era. */
+  wallet?: string | null;
 }
 
 export interface SettlementRecord {
@@ -41,6 +43,11 @@ export interface SettlementRecord {
   wonUsd: bigint;
   wonShares: bigint;
   hashrateEarned: bigint;
+  /** V2 RUSH leg: tokens credited (base units, 9 dec) and the vault shares they became. */
+  wonTokenAmount?: bigint | undefined;
+  wonTokenShares?: bigint | undefined;
+  /** Deployer wallet (base58) the settlement belongs to; null = primary. */
+  wallet?: string | null;
   sig: string;
 }
 
@@ -99,6 +106,9 @@ CREATE TABLE IF NOT EXISTS settlements (
   won_usd TEXT NOT NULL,
   won_shares TEXT NOT NULL,
   hashrate_earned TEXT NOT NULL,
+  won_token_amount TEXT NOT NULL DEFAULT '0',
+  won_token_shares TEXT NOT NULL DEFAULT '0',
+  wallet TEXT,
   sig TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -144,6 +154,7 @@ CREATE TABLE IF NOT EXISTS vault_tickets (
   iteration_id INTEGER NOT NULL,
   tickets INTEGER NOT NULL,
   ticket_pubkey TEXT,          -- 1-BTC entry account (needed to claim); null for epoch
+  wallet TEXT,                 -- buying wallet (base58); null = primary
   sig TEXT NOT NULL UNIQUE,
   claimed INTEGER NOT NULL DEFAULT 0,  -- 1 once the iteration is resolved for us
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -191,6 +202,25 @@ export class StateDb {
       // Per-wallet attribution. Without it a fleet's rows are indistinguishable,
       // so per-wallet streak reconstruction and P&L both silently merge.
       this.db.exec(`ALTER TABLE my_deploys ADD COLUMN wallet TEXT`);
+    }
+    // V2 settlements carry a RUSH leg; V1-era rows read 0.
+    const scols = this.db
+      .prepare(`SELECT name FROM pragma_table_info('settlements')`)
+      .all() as { name: string }[];
+    for (const col of ["won_token_amount", "won_token_shares"]) {
+      if (!scols.some((c) => c.name === col)) {
+        this.db.exec(`ALTER TABLE settlements ADD COLUMN ${col} TEXT NOT NULL DEFAULT '0'`);
+      }
+    }
+    // Wallet-set attribution on settlements and vault tickets.
+    if (!scols.some((c) => c.name === "wallet")) {
+      this.db.exec(`ALTER TABLE settlements ADD COLUMN wallet TEXT`);
+    }
+    const vcols = this.db
+      .prepare(`SELECT name FROM pragma_table_info('vault_tickets')`)
+      .all() as { name: string }[];
+    if (!vcols.some((c) => c.name === "wallet")) {
+      this.db.exec(`ALTER TABLE vault_tickets ADD COLUMN wallet TEXT`);
     }
   }
 
@@ -275,8 +305,8 @@ export class StateDb {
     this.write(() =>
       this.db
         .prepare(
-          `INSERT INTO my_deploys (round_id, mask, amount, ev_expected, fired_slot, sig, status, streak)
-           VALUES (@roundId, @mask, @amount, @evExpected, @firedSlot, @sig, @status, @streak)
+          `INSERT INTO my_deploys (round_id, mask, amount, ev_expected, fired_slot, sig, status, streak, wallet)
+           VALUES (@roundId, @mask, @amount, @evExpected, @firedSlot, @sig, @status, @streak, @wallet)
            ON CONFLICT(sig) DO UPDATE SET status = excluded.status`,
         )
         .run({
@@ -288,6 +318,7 @@ export class StateDb {
           sig: d.sig,
           status: d.status,
           streak: d.streak ?? null,
+          wallet: d.wallet ?? null,
         }),
     );
   }
@@ -308,15 +339,24 @@ export class StateDb {
   }
 
   /** Mark landed by (round, authority-implied) when the sig isn't known (event path). */
-  markDeployLandedByRound(roundId: number, landedSlot: number): void {
+  /** Mark the round's fired row(s) landed — only `wallet`'s when given (fleet). */
+  markDeployLandedByRound(roundId: number, landedSlot: number, wallet?: string | null): void {
     this.write(() =>
       this.db
         .prepare(
           `UPDATE my_deploys SET status = 'landed', landed_slot = COALESCE(landed_slot, ?)
-           WHERE round_id = ? AND status IN ('fired')`,
+           WHERE round_id = ? AND status IN ('fired') AND (? IS NULL OR wallet IS NULL OR wallet = ?)`,
         )
-        .run(landedSlot, roundId),
+        .run(landedSlot, roundId, wallet ?? null, wallet ?? null),
     );
+  }
+
+  /** Wallets whose deploy landed in `roundId` (null entries = the primary). */
+  landedWallets(roundId: number): (string | null)[] {
+    return this.query<{ wallet: string | null }>(
+      `SELECT DISTINCT wallet FROM my_deploys WHERE round_id = ? AND status = 'landed'`,
+      roundId,
+    ).map((r) => r.wallet);
   }
 
   recordSettlement(s: SettlementRecord): void {
@@ -324,8 +364,9 @@ export class StateDb {
       this.db
         .prepare(
           `INSERT OR IGNORE INTO settlements
-             (round_id, winning_stake, won_usd, won_shares, hashrate_earned, sig)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+             (round_id, winning_stake, won_usd, won_shares, hashrate_earned,
+              won_token_amount, won_token_shares, wallet, sig)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           s.roundId,
@@ -333,6 +374,9 @@ export class StateDb {
           s.wonUsd.toString(),
           s.wonShares.toString(),
           s.hashrateEarned.toString(),
+          (s.wonTokenAmount ?? 0n).toString(),
+          (s.wonTokenShares ?? 0n).toString(),
+          s.wallet ?? null,
           s.sig,
         ),
     );
@@ -345,26 +389,41 @@ export class StateDb {
     tickets: number;
     ticketPubkey: string | null;
     sig: string;
+    /** Buying wallet (base58); omit for the primary. */
+    wallet?: string | null;
   }): void {
     this.write(() =>
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO vault_tickets (kind, iteration_id, tickets, ticket_pubkey, sig)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO vault_tickets (kind, iteration_id, tickets, ticket_pubkey, wallet, sig)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(v.kind, v.iterationId, v.tickets, v.ticketPubkey, v.sig),
+        .run(v.kind, v.iterationId, v.tickets, v.ticketPubkey, v.wallet ?? null, v.sig),
     );
   }
 
   /** Total tickets we hold in a given vault iteration (0 if none). */
-  vaultTicketsHeld(kind: "epoch" | "one_btc", iterationId: number): number {
+  /** Tickets held in (kind, iteration) — by `wallet` when given, else fleet-wide. */
+  vaultTicketsHeld(kind: "epoch" | "one_btc", iterationId: number, wallet?: string | null): number {
     const row = this.queryOne<{ total: number | null }>(
       `SELECT COALESCE(SUM(tickets), 0) AS total FROM vault_tickets
-       WHERE kind = ? AND iteration_id = ?`,
+       WHERE kind = ? AND iteration_id = ? AND (? IS NULL OR wallet IS ? OR wallet = ?)`,
       kind,
       iterationId,
+      wallet ?? null,
+      wallet ?? null,
+      wallet ?? null,
     );
     return row?.total ?? 0;
+  }
+
+  /** 1-BTC ticket accounts we hold for an iteration, with the buying wallet. */
+  oneBtcTickets(iterationId: number): { ticketPubkey: string; wallet: string | null }[] {
+    return this.query<{ ticket_pubkey: string; wallet: string | null }>(
+      `SELECT ticket_pubkey, wallet FROM vault_tickets
+       WHERE kind = 'one_btc' AND iteration_id = ? AND ticket_pubkey IS NOT NULL`,
+      iterationId,
+    ).map((r) => ({ ticketPubkey: r.ticket_pubkey, wallet: r.wallet }));
   }
 
   /** Distinct (kind, iteration_id) we hold unresolved tickets in (for claim/crank). */

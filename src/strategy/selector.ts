@@ -14,10 +14,10 @@
 import { tilesToMask } from "../adapter/mask.js";
 import {
   TILES_COUNT,
-  evOfAllocation,
-  marginalEv,
-  outcomeReturns,
+  isEvModel,
+  v1Model,
   type EvContext,
+  type EvModel,
 } from "./ev.js";
 import { kellyFraction } from "./kelly.js";
 
@@ -41,6 +41,14 @@ export interface SelectorConfig {
    * 0 = off (fire on any positive EV, the old behavior).
    */
   minEdgeBps?: number | undefined;
+  /**
+   * Absolute EV floor (base units) the round must clear on top of the bps
+   * floor: the real costs and the alternative use of the money — round-trip
+   * transaction fees for every leg the fire needs, and what the stake would
+   * have earned elsewhere over the round. A round whose modelled EV does not
+   * cover them is not worth firing even though it is "positive".
+   */
+  minEvBase?: bigint | undefined;
   /**
    * Fractional-Kelly multiplier ∈ (0,1]. When set (with `bankrollBase`), the
    * total round stake is capped at this fraction of the growth-optimal Kelly
@@ -83,10 +91,11 @@ const EV_EPSILON = 1e-6;
 const BPS = 10_000;
 
 /** True when `ev` clears the configured minimum-edge floor for `gross`. */
-function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined): boolean {
+function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint | undefined): boolean {
   const bps = minEdgeBps ?? 0;
-  if (bps <= 0) return true;
-  return ev >= (Number(gross) * bps) / BPS;
+  const relative = bps > 0 ? (Number(gross) * bps) / BPS : 0;
+  const absolute = minEvBase !== undefined && minEvBase > 0n ? Number(minEvBase) : 0;
+  return ev >= Math.max(relative, absolute);
 }
 
 function validate(cfg: SelectorConfig): void {
@@ -151,29 +160,37 @@ function pickBiased(candidates: number[], rng: () => number): number {
   return pickRandom(tied, rng);
 }
 
-export function selectAllocation(ctx: EvContext, cfg: SelectorConfig): Selection {
+/**
+ * Pick this round's allocation. Takes either a V1 `EvContext` (the parimutuel
+ * economics, bound here to `v1Model`) or any `EvModel` — the V2 economics in
+ * `ev-v2.ts` are passed that way. The allocation logic below never touches
+ * the economics directly, so a model swap cannot change how quanta are placed,
+ * only how they are valued.
+ */
+export function selectAllocation(ctx: EvContext | EvModel, cfg: SelectorConfig): Selection {
   validate(cfg);
+  const model = isEvModel(ctx) ? ctx : v1Model(ctx);
   return cfg.strategy === "k_emptiest"
-    ? selectKEmptiest(ctx, cfg)
-    : selectWaterFilling(ctx, cfg);
+    ? selectKEmptiest(model, cfg)
+    : selectWaterFilling(model, cfg);
 }
 
-function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
+function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
   // Fractional-Kelly overlay: find the EV-optimal allocation first, then cap the
   // total stake at the growth-optimal Kelly bet if that is smaller. Two-pass so
   // the shape is re-optimized for the reduced budget; the recursive call has
   // Kelly disabled to avoid looping.
   if (cfg.kellyFraction && cfg.kellyFraction > 0 && cfg.bankrollBase != null) {
     const evMax = { ...cfg, kellyFraction: undefined, bankrollBase: undefined };
-    const base = selectWaterFilling(ctx, evMax);
+    const base = selectWaterFilling(model, evMax);
     if (base.kind !== "deploy") return base;
-    const f = kellyFraction(outcomeReturns(ctx, base.allocation)) * cfg.kellyFraction;
+    const f = kellyFraction(model.returns(base.allocation)) * cfg.kellyFraction;
     const kellyBudget = BigInt(Math.floor(f * Number(cfg.bankrollBase)));
     if (kellyBudget >= base.totalGross) return base; // Kelly does not reduce
     if (kellyBudget < cfg.minDeploy) {
       return { kind: "skip", reason: "kelly_below_min_deploy", strategy: "water_filling" };
     }
-    return selectWaterFilling(ctx, { ...evMax, maxPerRound: kellyBudget });
+    return selectWaterFilling(model, { ...evMax, maxPerRound: kellyBudget });
   }
 
   const rng = cfg.rng ?? Math.random;
@@ -190,7 +207,7 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
     let bestEv = Number.NEGATIVE_INFINITY;
     const candidates: number[] = [];
     for (let tile = 0; tile < TILES_COUNT; tile++) {
-      const gain = marginalEv(ctx, allocation, tile, quantum);
+      const gain = model.marginal(allocation, tile, quantum);
       if (gain > bestEv + EV_EPSILON) {
         bestEv = gain;
         candidates.length = 0;
@@ -227,11 +244,11 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
   if (total < cfg.minDeploy) {
     return { kind: "skip", reason: "cannot_reach_min_deploy", strategy: "water_filling" };
   }
-  const ev = evOfAllocation(ctx, allocation);
+  const ev = model.ev(allocation);
   if (ev <= 0) {
     return { kind: "skip", reason: "min_deploy_padding_made_ev_negative", strategy: "water_filling" };
   }
-  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps)) {
+  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps, cfg.minEvBase)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "water_filling" };
   }
 
@@ -259,7 +276,7 @@ function selectWaterFilling(ctx: EvContext, cfg: SelectorConfig): Selection {
   };
 }
 
-function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
+function selectKEmptiest(model: EvModel, cfg: SelectorConfig): Selection {
   const rng = cfg.rng ?? Math.random;
 
   // Full amount: the largest ladder entry that fits under the cap.
@@ -275,8 +292,8 @@ function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
   }
 
   const byStake = [...Array(TILES_COUNT).keys()].sort((a, b) => {
-    const sa = ctx.predictedStakes[a] ?? 0n;
-    const sb = ctx.predictedStakes[b] ?? 0n;
+    const sa = model.predictedStakes[a] ?? 0n;
+    const sb = model.predictedStakes[b] ?? 0n;
     if (sa !== sb) return sa < sb ? -1 : 1;
     return a - b;
   });
@@ -288,8 +305,8 @@ function selectKEmptiest(ctx: EvContext, cfg: SelectorConfig): Selection {
 
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
   allocation[tile] = amount;
-  const ev = evOfAllocation(ctx, allocation);
-  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps)) {
+  const ev = model.ev(allocation);
+  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps, cfg.minEvBase)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "k_emptiest" };
   }
   return {

@@ -20,9 +20,12 @@ import { instructionCoder, PROGRAM_ID, SATRUSH_IDL } from "../src/adapter/idl.js
 import {
   buildBuyEpochTickets,
   buildBuyOneBtcTickets,
-  buildClaimEpochReward,
+  buildDistributeEpochReward,
   buildClaimOneBtcReward,
   buildClaimSats,
+  buildClaimToken,
+  buildExchangeAffiliatePoints,
+  buildSetMinerTag,
   buildClaimUsd,
   buildDeployPublic,
   buildSelectEpochWinner,
@@ -33,6 +36,7 @@ import {
   type InstructionContext,
 } from "../src/adapter/instructions.js";
 import { InvalidSelectionMaskError } from "../src/adapter/mask.js";
+import { RNG_PROGRAM_ID, rngConfigPda, rotorPda, type RotorTag } from "../src/adapter/rng.js";
 import {
   boardBtcAta,
   boardPda,
@@ -50,14 +54,27 @@ import {
   satrushConfigPda,
   satsVaultBtcAta,
   satsVaultPda,
+  tokenVaultPda,
+  affiliatePda,
+  treasuryPda,
+  affiliateTagPda,
 } from "../src/adapter/pdas.js";
 
 const authority = Keypair.generate().publicKey;
 const deployer = Keypair.generate().publicKey;
 const usdMint = Keypair.generate().publicKey;
 const btcMint = Keypair.generate().publicKey;
-const ctx: InstructionContext = { usdMint, btcMint };
+const tokenMint = Keypair.generate().publicKey;
+const ctx: InstructionContext = { usdMint, btcMint, tokenMint };
 const ROUND_ID = 1797;
+const affiliateAuthority = Keypair.generate().publicKey;
+/** The four rotor accounts every arming instruction appends (SDK getRngRemainingAccountsFor). */
+const rotorRemaining = (tag: RotorTag) => [
+  { pubkey: rotorPda(tag), writable: true },
+  { pubkey: rngConfigPda(), writable: false },
+  { pubkey: RNG_PROGRAM_ID, writable: false },
+  { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, writable: false },
+];
 
 interface IdlIxAccount {
   name: string;
@@ -84,10 +101,17 @@ function expectMatchesIdl(
   ixName: string,
   ix: TransactionInstruction,
   expected: Record<string, PublicKey>,
+  remaining: { pubkey: PublicKey; writable: boolean }[] = [],
 ): void {
   const accounts = idlAccounts(ixName);
   expect(ix.programId.equals(PROGRAM_ID)).toBe(true);
-  expect(ix.keys, `${ixName} account count`).toHaveLength(accounts.length);
+  expect(ix.keys, `${ixName} account count`).toHaveLength(accounts.length + remaining.length);
+  remaining.forEach((want, i) => {
+    const key = ix.keys[accounts.length + i]!;
+    expect(key.pubkey.toBase58(), `${ixName} remaining[${i}]`).toBe(want.pubkey.toBase58());
+    expect(key.isWritable, `${ixName} remaining[${i}] writable`).toBe(want.writable);
+    expect(key.isSigner, `${ixName} remaining[${i}] signer`).toBe(false);
+  });
   const unmatched = new Set(Object.keys(expected));
   accounts.forEach((account, i) => {
     const key = ix.keys[i]!;
@@ -124,28 +148,64 @@ describe("deploy_public", () => {
     amountBaseUnits: 1_500_000n,
   });
 
-  it("decodes back to the same args", () => {
+  it("decodes back to the same args (is_grubstake_funded defaults false)", () => {
     const decoded = instructionCoder.decode(ix.data);
     expect(decoded?.name).toBe("deploy_public");
-    const data = decoded!.data as { selection_mask: number; amount: BN };
+    const data = decoded!.data as { selection_mask: number; amount: BN; is_grubstake_funded: boolean };
     expect(data.selection_mask).toBe(mask);
     expect(data.amount.toString()).toBe("1500000");
+    expect(data.is_grubstake_funded).toBe(false);
   });
 
-  it("matches the IDL account list", () => {
-    expectMatchesIdl("deploy_public", ix, {
+  it("matches the IDL account list + the round-rotor remaining accounts", () => {
+    expectMatchesIdl(
+      "deploy_public",
+      ix,
+      {
+        authority,
+        satrush_config: satrushConfigPda(),
+        board: boardPda(),
+        round: roundPda(ROUND_ID),
+        usd_mint: usdMint,
+        authority_usd_ata: getAssociatedTokenAddressSync(usdMint, authority),
+        board_usd_ata: boardUsdAta(usdMint),
+        public_deployment: publicDeploymentPda(authority, ROUND_ID),
+        miner: minerPda(authority),
+        affiliate: PROGRAM_ID, // optional, absent → program id
+        event_authority: eventAuthorityPda(),
+        program: PROGRAM_ID,
+      },
+      rotorRemaining("round"),
+    );
+  });
+
+  it("binds an affiliate when given (its PDA, read-only)", () => {
+    const withAff = buildDeployPublic(ctx, {
       authority,
-      satrush_config: satrushConfigPda(),
-      board: boardPda(),
-      round: roundPda(ROUND_ID),
-      usd_mint: usdMint,
-      authority_usd_ata: getAssociatedTokenAddressSync(usdMint, authority),
-      board_usd_ata: boardUsdAta(usdMint),
-      public_deployment: publicDeploymentPda(authority, ROUND_ID),
-      miner: minerPda(authority),
-      event_authority: eventAuthorityPda(),
-      program: PROGRAM_ID,
+      roundId: ROUND_ID,
+      selectionMask: mask,
+      amountBaseUnits: 1_500_000n,
+      affiliateAuthority,
     });
+    const pos = idlAccounts("deploy_public").findIndex((a) => a.name === "affiliate");
+    expect(withAff.keys[pos]!.pubkey.equals(affiliatePda(affiliateAuthority))).toBe(true);
+    expect(withAff.keys[pos]!.isWritable).toBe(false);
+  });
+
+  it("grubstake funding pays from the miner's USD ATA and flags the arg", () => {
+    const gs = buildDeployPublic(ctx, {
+      authority,
+      roundId: ROUND_ID,
+      selectionMask: mask,
+      amountBaseUnits: 1_500_000n,
+      isGrubstakeFunded: true,
+    });
+    const pos = idlAccounts("deploy_public").findIndex((a) => a.name === "authority_usd_ata");
+    expect(
+      gs.keys[pos]!.pubkey.equals(getAssociatedTokenAddressSync(usdMint, minerPda(authority), true)),
+    ).toBe(true);
+    const data = instructionCoder.decode(gs.data)!.data as { is_grubstake_funded: boolean };
+    expect(data.is_grubstake_funded).toBe(true);
   });
 
   it("rejects invalid masks and amounts before the wire", () => {
@@ -168,10 +228,12 @@ describe("deploy_public", () => {
 });
 
 describe("settle_deploy_public", () => {
+  const affiliate = affiliatePda(affiliateAuthority);
   const ix = buildSettleDeployPublic(ctx, {
     authority,
     deploymentAuthority: deployer,
     roundId: ROUND_ID,
+    affiliate,
   });
 
   it("decodes back with no args", () => {
@@ -180,27 +242,53 @@ describe("settle_deploy_public", () => {
     expect(decoded!.data).toEqual({});
   });
 
-  it("matches the IDL account list (PDAs seeded by the deployment authority)", () => {
+  it("matches the IDL account list (PDAs seeded by the deployment authority) + token-leg remaining accounts", () => {
     const automation = publicAutomationPda(deployer);
-    expectMatchesIdl("settle_deploy_public", ix, {
-      authority,
-      satrush_config: satrushConfigPda(),
-      round: roundPda(ROUND_ID),
-      board: boardPda(),
-      rent_recipient: authority, // defaulted to our wallet
-      public_deployment: publicDeploymentPda(deployer, ROUND_ID),
-      miner: minerPda(deployer),
-      public_automation: automation,
-      automation_usd_ata: getAssociatedTokenAddressSync(usdMint, automation, true),
-      sats_vault: satsVaultPda(),
-      btc_mint: btcMint,
-      usd_mint: usdMint,
-      board_usd_ata: boardUsdAta(usdMint),
-      board_btc_ata: boardBtcAta(btcMint),
-      sats_vault_btc_ata: satsVaultBtcAta(btcMint),
-      event_authority: eventAuthorityPda(),
-      program: PROGRAM_ID,
-    });
+    expectMatchesIdl(
+      "settle_deploy_public",
+      ix,
+      {
+        authority,
+        satrush_config: satrushConfigPda(),
+        round: roundPda(ROUND_ID),
+        board: boardPda(),
+        rent_recipient: authority, // defaulted to our wallet
+        public_deployment: publicDeploymentPda(deployer, ROUND_ID),
+        miner: minerPda(deployer),
+        public_automation: automation,
+        automation_usd_ata: getAssociatedTokenAddressSync(usdMint, automation, true),
+        miner_usd_ata: getAssociatedTokenAddressSync(usdMint, minerPda(deployer), true),
+        affiliate,
+        sats_vault: satsVaultPda(),
+        btc_mint: btcMint,
+        usd_mint: usdMint,
+        board_usd_ata: boardUsdAta(usdMint),
+        board_btc_ata: boardBtcAta(btcMint),
+        sats_vault_btc_ata: satsVaultBtcAta(btcMint),
+        token_vault: tokenVaultPda(),
+        event_authority: eventAuthorityPda(),
+        program: PROGRAM_ID,
+      },
+      [
+        { pubkey: tokenMint, writable: false },
+        { pubkey: getAssociatedTokenAddressSync(tokenMint, boardPda(), true), writable: true },
+        { pubkey: getAssociatedTokenAddressSync(tokenMint, tokenVaultPda(), true), writable: true },
+      ],
+    );
+  });
+
+  it("puts the program id in the optional affiliate slot when the miner has none", () => {
+    const pos = idlAccounts("settle_deploy_public").findIndex((a) => a.name === "affiliate");
+    for (const affiliate of [undefined, PublicKey.default]) {
+      const none = buildSettleDeployPublic(ctx, {
+        authority,
+        deploymentAuthority: deployer,
+        roundId: ROUND_ID,
+        affiliate,
+      });
+      expect(none.keys[pos]!.pubkey.equals(PROGRAM_ID)).toBe(true);
+      expect(none.keys[pos]!.isWritable).toBe(false);
+    }
   });
 
   it("honors an explicit rent recipient", () => {
@@ -227,18 +315,73 @@ describe("claim_sats", () => {
     expect((decoded!.data as { shares: BN }).shares.toString()).toBe("987654321");
   });
 
-  it("matches the IDL account list", () => {
+  it("matches the IDL account list (V2: coupled token-vault leg)", () => {
     expectMatchesIdl("claim_sats", ix, {
       authority,
       satrush_config: satrushConfigPda(),
       sats_vault: satsVaultPda(),
+      token_vault: tokenVaultPda(),
       miner: minerPda(authority),
       btc_mint: btcMint,
+      token_mint: tokenMint,
       sats_vault_btc_ata: satsVaultBtcAta(btcMint),
+      token_vault_token_ata: getAssociatedTokenAddressSync(tokenMint, tokenVaultPda(), true),
+      authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
+      authority_token_ata: getAssociatedTokenAddressSync(tokenMint, authority),
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
+    });
+  });
+});
+
+describe("claim_token", () => {
+  const ix = buildClaimToken(ctx, { authority, tokenShares: 12_345n });
+
+  it("decodes back to the same args", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("claim_token");
+    expect((decoded!.data as { token_shares: BN }).token_shares.toString()).toBe("12345");
+  });
+
+  it("matches the IDL account list (mirror of claim_sats, vaults swapped)", () => {
+    expectMatchesIdl("claim_token", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      token_vault: tokenVaultPda(),
+      sats_vault: satsVaultPda(),
+      miner: minerPda(authority),
+      token_mint: tokenMint,
+      btc_mint: btcMint,
+      token_vault_token_ata: getAssociatedTokenAddressSync(tokenMint, tokenVaultPda(), true),
+      sats_vault_btc_ata: satsVaultBtcAta(btcMint),
+      authority_token_ata: getAssociatedTokenAddressSync(tokenMint, authority),
       authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
       event_authority: eventAuthorityPda(),
       program: PROGRAM_ID,
     });
+  });
+});
+
+describe("set_miner_tag", () => {
+  const ix = buildSetMinerTag(ctx, { authority, tag: "sat-rush_01" });
+
+  it("decodes back to the same tag", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("set_miner_tag");
+    expect((decoded!.data as { tag: string }).tag).toBe("sat-rush_01");
+  });
+
+  it("matches the IDL account list", () => {
+    expectMatchesIdl("set_miner_tag", ix, {
+      authority,
+      affiliate: affiliatePda(authority),
+      affiliate_tag: affiliateTagPda("sat-rush_01"),
+    });
+  });
+
+  it("refuses a tag the program would reject", () => {
+    expect(() => buildSetMinerTag(ctx, { authority, tag: "ab" })).toThrow(/invalid affiliate tag/);
+    expect(() => buildSetMinerTag(ctx, { authority, tag: "Has Caps" })).toThrow(/invalid affiliate tag/);
   });
 });
 
@@ -266,7 +409,7 @@ describe("claim_usd", () => {
   });
 
   it("token program ids in the IDL match the spl-token constants we use", () => {
-    for (const name of ["deploy_public", "claim_sats", "claim_usd"]) {
+    for (const name of ["deploy_public", "settle_deploy_public", "claim_sats", "claim_token", "claim_usd"]) {
       for (const account of idlAccounts(name)) {
         if (account.name === "token_program") {
           expect(account.address).toBe(TOKEN_PROGRAM_ID.toBase58());
@@ -356,34 +499,41 @@ describe("trigger_one_btc_draw", () => {
     expect(instructionCoder.decode(ix.data)?.name).toBe("trigger_one_btc_draw");
   });
 
-  it("matches the IDL account list, next iteration = current + 1", () => {
-    expectMatchesIdl("trigger_one_btc_draw", ix, {
-      authority,
-      satrush_config: satrushConfigPda(),
-      one_btc_vault: oneBtcVaultPda(),
-      one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
-      next_one_btc_vault_iteration: oneBtcVaultIterationPda(ITER + 1),
-      slot_hashes: SYSVAR_SLOT_HASHES_PUBKEY,
-      event_authority: eventAuthorityPda(),
-      program: PROGRAM_ID,
-    });
+  it("matches the IDL account list + btc-rotor remaining accounts, next iteration = current + 1", () => {
+    expectMatchesIdl(
+      "trigger_one_btc_draw",
+      ix,
+      {
+        authority,
+        satrush_config: satrushConfigPda(),
+        one_btc_vault: oneBtcVaultPda(),
+        one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
+        next_one_btc_vault_iteration: oneBtcVaultIterationPda(ITER + 1),
+      },
+      rotorRemaining("btc"),
+    );
+    expect(idlAccounts("trigger_one_btc_draw").map((a) => a.name)).not.toContain("slot_hashes");
   });
 });
 
 describe("trigger_epoch_draw", () => {
   const ix = buildTriggerEpochDraw(ctx, { authority, iterationId: ITER });
 
-  it("matches the IDL account list, next iteration = current + 1", () => {
-    expectMatchesIdl("trigger_epoch_draw", ix, {
-      authority,
-      satrush_config: satrushConfigPda(),
-      epoch_vault: epochVaultPda(),
-      epoch_vault_iteration: epochVaultIterationPda(ITER),
-      next_epoch_vault_iteration: epochVaultIterationPda(ITER + 1),
-      slot_hashes: SYSVAR_SLOT_HASHES_PUBKEY,
-      event_authority: eventAuthorityPda(),
-      program: PROGRAM_ID,
-    });
+  it("matches the IDL account list + epoch-rotor remaining accounts, next iteration = current + 1", () => {
+    expectMatchesIdl(
+      "trigger_epoch_draw",
+      ix,
+      {
+        authority,
+        satrush_config: satrushConfigPda(),
+        epoch_vault: epochVaultPda(),
+        epoch_vault_iteration: epochVaultIterationPda(ITER),
+        next_epoch_vault_iteration: epochVaultIterationPda(ITER + 1),
+        event_authority: eventAuthorityPda(),
+        program: PROGRAM_ID,
+      },
+      rotorRemaining("epoch"),
+    );
   });
 });
 
@@ -414,39 +564,94 @@ describe("select_epoch_winner", () => {
 describe("claim_one_btc_reward", () => {
   const ix = buildClaimOneBtcReward(ctx, { authority, iterationId: ITER, ticket });
 
-  it("matches the IDL account list and emits no event", () => {
+  it("matches the IDL account list (winner defaults to the signer) and emits no event", () => {
     expectMatchesIdl("claim_one_btc_reward", ix, {
       authority,
+      satrush_config: satrushConfigPda(),
       one_btc_vault: oneBtcVaultPda(),
       one_btc_vault_iteration: oneBtcVaultIterationPda(ITER),
       ticket,
+      winner: authority,
       btc_mint: btcMint,
       one_btc_vault_btc_ata: getAssociatedTokenAddressSync(btcMint, oneBtcVaultPda(), true),
-      authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
+      winner_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
     });
     expect(idlAccounts("claim_one_btc_reward").map((a) => a.name)).not.toContain(
       "event_authority",
     );
   });
+
+  it("pays the ticket owner when cranked by someone else", () => {
+    const winner = Keypair.generate().publicKey;
+    const cranked = buildClaimOneBtcReward(ctx, { authority, iterationId: ITER, ticket, winner });
+    const accounts = idlAccounts("claim_one_btc_reward");
+    const wPos = accounts.findIndex((a) => a.name === "winner");
+    const aPos = accounts.findIndex((a) => a.name === "winner_btc_ata");
+    expect(cranked.keys[wPos]!.pubkey.equals(winner)).toBe(true);
+    expect(cranked.keys[aPos]!.pubkey.equals(getAssociatedTokenAddressSync(btcMint, winner))).toBe(true);
+  });
 });
 
-describe("claim_epoch_reward", () => {
-  const ix = buildClaimEpochReward(ctx, { authority, iterationId: ITER });
+describe("distribute_epoch_reward (V2 replaces claim_epoch_reward)", () => {
+  const winner = Keypair.generate().publicKey;
+  const ix = buildDistributeEpochReward(ctx, {
+    authority,
+    iterationId: ITER,
+    rank: 3,
+    winnerAuthority: winner,
+  });
 
-  it("matches the IDL account list (USD + BTC payouts) and emits no event", () => {
-    expectMatchesIdl("claim_epoch_reward", ix, {
+  it("matches the IDL account list (winner's miner, board pool, sats + token vaults) and emits an event", () => {
+    expectMatchesIdl("distribute_epoch_reward", ix, {
       authority,
+      satrush_config: satrushConfigPda(),
       epoch_vault: epochVaultPda(),
       epoch_vault_iteration: epochVaultIterationPda(ITER),
+      miner: minerPda(winner),
+      board: boardPda(),
+      sats_vault: satsVaultPda(),
       usd_mint: usdMint,
       btc_mint: btcMint,
       epoch_vault_usd_ata: getAssociatedTokenAddressSync(usdMint, epochVaultPda(), true),
       epoch_vault_btc_ata: getAssociatedTokenAddressSync(btcMint, epochVaultPda(), true),
-      authority_usd_ata: getAssociatedTokenAddressSync(usdMint, authority),
-      authority_btc_ata: getAssociatedTokenAddressSync(btcMint, authority),
+      board_usd_ata: getAssociatedTokenAddressSync(usdMint, boardPda(), true),
+      sats_vault_btc_ata: getAssociatedTokenAddressSync(btcMint, satsVaultPda(), true),
+      token_vault: tokenVaultPda(),
+      event_authority: eventAuthorityPda(),
+      program: PROGRAM_ID,
     });
-    expect(idlAccounts("claim_epoch_reward").map((a) => a.name)).not.toContain(
-      "event_authority",
-    );
+  });
+
+  it("encodes rank as the u8 arg", () => {
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("distribute_epoch_reward");
+    expect((decoded?.data as { rank: number }).rank).toBe(3);
+  });
+
+  it("rejects an out-of-range rank", () => {
+    expect(() =>
+      buildDistributeEpochReward(ctx, { authority, iterationId: ITER, rank: 256, winnerAuthority: winner }),
+    ).toThrow(RangeError);
   });
 });
+
+describe("exchange_affiliate_points (V2)", () => {
+  const ix = buildExchangeAffiliatePoints(ctx, { authority, pointsAmount: 1_500_000n });
+
+  it("matches the IDL account list (affiliate's own miner credited from the treasury)", () => {
+    expectMatchesIdl("exchange_affiliate_points", ix, {
+      authority,
+      satrush_config: satrushConfigPda(),
+      affiliate: affiliatePda(authority),
+      miner: minerPda(authority),
+      treasury: treasuryPda(),
+      usd_mint: usdMint,
+      treasury_usd_ata: getAssociatedTokenAddressSync(usdMint, treasuryPda(), true),
+      miner_usd_ata: getAssociatedTokenAddressSync(usdMint, minerPda(authority), true),
+    });
+    const decoded = instructionCoder.decode(ix.data);
+    expect(decoded?.name).toBe("exchange_affiliate_points");
+    expect((decoded?.data as { points_amount: BN }).points_amount.toString()).toBe("1500000");
+  });
+});
+

@@ -99,23 +99,28 @@ export function oneBtcEntryReady(o: OneBtcReadState, minFillBps: number): boolea
  * average one, and any error is identical across vaults so it cannot flip the
  * comparison.
  */
-export function marginalTicketUsd(v: {
-  kind: VaultSnapshot["kind"];
-  state: EpochReadState | OneBtcReadState;
-}): number {
+export function marginalTicketUsd(
+  v: { kind: VaultSnapshot["kind"]; state: EpochReadState | OneBtcReadState },
+  epochCurve?: readonly number[] | undefined,
+): number {
   const { poolValueUsd, totalTickets } = v.state;
   if (!(poolValueUsd > 0) || !(totalTickets > 0)) return 0;
-  return expectedWinningsUsd(1, totalTickets, poolValueUsd, v.kind);
+  return expectedWinningsUsd(1, totalTickets, poolValueUsd, v.kind, 1, epochCurve);
 }
 
 export interface VaultManagerOpts {
-  engine: VaultEngine;
+  /** Single-wallet engine (kept for the one-wallet path and tests). */
+  engine?: VaultEngine | undefined;
+  /** Fleet: one engine per wallet, each spending its own hashrate. */
+  engines?: VaultEngine[] | undefined;
   readState: () => Promise<VaultReadState>;
   /** Absolute floor for the epoch entry window (see epochLateWindowSlots). */
   epochLateSlots: number;
   /** Fraction of the iteration to treat as "late" — the real driver on mainnet. */
   epochLateFraction: number;
   oneBtcMinFillBps: number;
+  /** Epoch reward curve for ranking vaults by marginal ticket value (V2: equal prizes). */
+  epochCurve?: readonly number[] | undefined;
   pollMs: number;
   killSwitchEngaged: () => boolean;
   /** Claim/crank pass, run after entry evaluation each tick (optional). */
@@ -126,7 +131,12 @@ export interface VaultManagerOpts {
 export class VaultManager {
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly opts: VaultManagerOpts) {}
+  private readonly engines: VaultEngine[];
+
+  constructor(private readonly opts: VaultManagerOpts) {
+    this.engines = [...(opts.engines ?? []), ...(opts.engine ? [opts.engine] : [])];
+    if (this.engines.length === 0) throw new Error("VaultManager needs at least one engine");
+  }
 
   start(): void {
     if (this.timer) return;
@@ -174,7 +184,7 @@ export class VaultManager {
     if (state.oneBtc && oneBtcEntryReady(state.oneBtc, this.opts.oneBtcMinFillBps)) {
       eligible.push({ kind: "one_btc", state: state.oneBtc });
     }
-    eligible.sort((a, b) => marginalTicketUsd(b) - marginalTicketUsd(a));
+    eligible.sort((a, b) => marginalTicketUsd(b, this.opts.epochCurve) - marginalTicketUsd(a, this.opts.epochCurve));
     for (const v of eligible) await this.evaluate(v.kind, v.state);
 
     // Claim/crank pass — collect resolved winnings (and crank draws if enabled).
@@ -191,16 +201,21 @@ export class VaultManager {
     kind: VaultSnapshot["kind"],
     s: EpochReadState | OneBtcReadState,
   ): Promise<void> {
-    try {
-      await this.opts.engine.evaluate({
-        kind,
-        iterationId: s.iterationId,
-        open: s.open,
-        totalTickets: s.totalTickets,
-        poolValueUsd: s.poolValueUsd,
-      });
-    } catch (err) {
-      this.opts.log({ vault: kind, err: String(err).slice(0, 120), msg: "vault evaluate failed" });
+    // Each wallet's engine spends that wallet's own hashrate; they evaluate
+    // in turn against the same snapshot (a fleet buy moves the pool by a few
+    // tickets, which is below the engine's own noise).
+    for (const engine of this.engines) {
+      try {
+        await engine.evaluate({
+          kind,
+          iterationId: s.iterationId,
+          open: s.open,
+          totalTickets: s.totalTickets,
+          poolValueUsd: s.poolValueUsd,
+        });
+      } catch (err) {
+        this.opts.log({ vault: kind, err: String(err).slice(0, 120), msg: "vault evaluate failed" });
+      }
     }
   }
 }

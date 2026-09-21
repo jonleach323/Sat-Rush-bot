@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   Bankroll,
+  stakeAtRisk,
   strikeSizeMultiplier,
   type BankrollConfig,
 } from "../src/strategy/bankroll.js";
@@ -149,3 +150,30 @@ describe("strike conditioning hook", () => {
     expect(() => strikeSizeMultiplier(0n, { ...opts, boost: 0 })).toThrow(RangeError);
   });
 });
+
+describe("daily loss cap — V2 at-risk fraction", () => {
+  it("stakeAtRisk rounds up and is the identity at 1", () => {
+    expect(stakeAtRisk(usdToBase(10), 1)).toBe(usdToBase(10));
+    expect(stakeAtRisk(usdToBase(10), 0.11)).toBe(usdToBase(1.1));
+    expect(stakeAtRisk(1n, 0.11)).toBe(1n); // never rounds a positive stake to 0
+    expect(() => stakeAtRisk(1n, 0)).toThrow(RangeError);
+    expect(() => stakeAtRisk(1n, 1.5)).toThrow(RangeError);
+  });
+
+  it("counts only the toll against the cap under V2, the whole stake under V1", () => {
+    // $19 lost today, $20 cap, $5 stake: V1 blocks (19+5 > 20); V2 at 11% passes (19+0.55).
+    expect(bankroll({}, usdToBase(19)).authorize(1, usdToBase(5)).ok).toBe(false);
+    const v2 = bankroll({ lossFractionAtRisk: 0.11 }, usdToBase(19));
+    expect(v2.lossFractionAtRisk).toBe(0.11);
+    expect(v2.authorize(1, usdToBase(5)).ok).toBe(true);
+    const blocked = bankroll({ lossFractionAtRisk: 0.11 }, usdToBase(19.5)).authorize(1, usdToBase(5));
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.detail).toMatch(/at_risk=550000/);
+  });
+
+  it("rejects a fraction outside (0, 1]", () => {
+    expect(() => bankroll({ lossFractionAtRisk: 0 })).toThrow(RangeError);
+    expect(() => bankroll({ lossFractionAtRisk: 1.2 })).toThrow(RangeError);
+  });
+});
+

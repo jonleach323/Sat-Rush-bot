@@ -106,3 +106,15 @@ describe("assertFeeBearingInvariants — settle/claim", () => {
     ).toThrow(HaltError);
   });
 });
+
+describe("assertDeployInvariants — V2 at-risk fraction", () => {
+  it("re-checks the daily cap on the toll, not the gross, when the fraction is set", () => {
+    const inv = { ...valid(), dailyLossCapBase: usdToBase(20), realizedLossTodayBase: usdToBase(19) };
+    expect(() => assertDeployInvariants(inv)).toThrow(HaltError); // 19 + 5 > 20
+    expect(() => assertDeployInvariants({ ...inv, lossFractionAtRisk: 0.11 })).not.toThrow(); // 19 + 0.55
+    expect(() =>
+      assertDeployInvariants({ ...inv, lossFractionAtRisk: 0.11, realizedLossTodayBase: usdToBase(19.5) }),
+    ).toThrow(/daily loss cap/);
+  });
+});
+

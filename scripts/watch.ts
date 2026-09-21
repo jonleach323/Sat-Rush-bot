@@ -11,7 +11,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { BN } from "../src/adapter/idl.js";
 import { loadConfig } from "../src/config.js";
 import { logger } from "../src/logger.js";
-import { minerPda, satsVaultPda } from "../src/adapter/pdas.js";
+import { minerPda, satsVaultPda, tokenVaultPda } from "../src/adapter/pdas.js";
 import { HaltError } from "../src/ingest/decode.js";
 import { parseTransactionEvents } from "../src/ingest/events.js";
 import { YellowstoneIngest } from "../src/ingest/grpc.js";
@@ -48,16 +48,21 @@ logger.info(
           epochFeeBps: state.satrushConfig.epoch_fee_bps,
           oneBtcFeeBps: state.satrushConfig.one_btc_fee_bps,
           satsVaultRoundFeeBps: state.satrushConfig.sats_vault_round_fee_bps,
-          satsVaultClaimFeeBps: state.satrushConfig.sats_vault_claim_fee_bps,
+          vaultExitFeeBps: state.satrushConfig.vault_exit_fee_bps,
+          buybacksFeeBps: state.satrushConfig.buybacks_fee_bps,
           protocolFeeBps: state.satrushConfig.protocol_fee_bps,
           unclaimedHashrateBps: state.satrushConfig.unclaimed_hashrate_bps,
+          tokenMint: state.satrushConfig.token_mint.toBase58(),
         }
+      : null,
+    tokenVault: state.tokenVault
+      ? { tokens: state.tokenVault.token_amount.toString(), shares: state.tokenVault.token_shares.toString() }
       : null,
   },
   "bootstrapped from HTTP RPC",
 );
 
-const watchAccounts = [satsVaultPda(programId)];
+const watchAccounts = [satsVaultPda(programId), tokenVaultPda(programId)];
 if (minerAuthority) watchAccounts.push(minerPda(minerAuthority, programId));
 
 const source: IngestSource = cfg.GRPC_URL

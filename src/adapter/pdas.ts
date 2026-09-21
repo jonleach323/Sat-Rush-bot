@@ -20,6 +20,10 @@ const SEED_EPOCH_VAULT = pdaConstSeed("epoch_vault");
 const SEED_EPOCH_VAULT_ITERATION = pdaConstSeed("epoch_vault_iteration");
 const SEED_EPOCH_VAULT_PAGE = pdaConstSeed("epoch_vault_page");
 const SEED_EPOCH_VAULT_ENTRY = pdaConstSeed("epoch_vault_entry");
+const SEED_TOKEN_VAULT = pdaConstSeed("token_vault");
+const SEED_AFFILIATE = pdaConstSeed("affiliate");
+const SEED_AFFILIATE_TAG = pdaConstSeed("affiliate_tag");
+const SEED_TREASURY = pdaConstSeed("treasury");
 
 function u32Le(value: number): Buffer {
   if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
@@ -79,6 +83,29 @@ export function publicAutomationPda(
 
 export function satsVaultPda(programId: PublicKey = PROGRAM_ID): PublicKey {
   return derive([SEED_SATS_VAULT], programId);
+}
+
+/** V2 affiliate account of a referrer wallet (seeded by its authority). */
+export function affiliatePda(
+  affiliateAuthority: PublicKey,
+  programId: PublicKey = PROGRAM_ID,
+): PublicKey {
+  return derive([SEED_AFFILIATE, affiliateAuthority.toBuffer()], programId);
+}
+
+/** V2 affiliate tag registry entry (`set_miner_tag`), seeded by the tag string. */
+export function affiliateTagPda(tag: string, programId: PublicKey = PROGRAM_ID): PublicKey {
+  return derive([SEED_AFFILIATE_TAG, Buffer.from(tag, "utf8")], programId);
+}
+
+/** V2 protocol treasury (fees, grubstake pool, buybacks). */
+export function treasuryPda(programId: PublicKey = PROGRAM_ID): PublicKey {
+  return derive([SEED_TREASURY], programId);
+}
+
+/** V2 RUSH token vault (winners' token legs are held here as shares). */
+export function tokenVaultPda(programId: PublicKey = PROGRAM_ID): PublicKey {
+  return derive([SEED_TOKEN_VAULT], programId);
 }
 
 // ── hashrate-funded raffle vaults (1-BTC winner-take-all; epoch 21-winner) ──

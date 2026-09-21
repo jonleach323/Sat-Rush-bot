@@ -21,7 +21,7 @@ const connection = {
 } as unknown as Connection;
 
 const someIx = buildClaimUsd(
-  { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey },
+  { usdMint: Keypair.generate().publicKey, btcMint: Keypair.generate().publicKey, tokenMint: Keypair.generate().publicKey },
   { authority: payer.publicKey, amount: 1n },
 );
 

@@ -5,18 +5,18 @@
  *
  * Lifecycles:
  *   epoch:  Open → trigger_epoch_draw → Settling → select_epoch_winner ×N →
- *           Settled → claim_epoch_reward → Complete
+ *           Settled → distribute_epoch_reward(rank) → Complete
  *   1-BTC:  Open → (fills) → trigger_one_btc_draw → Settled →
  *           claim_one_btc_reward → Complete
  */
 import type { PublicKey } from "@solana/web3.js";
 
-/** Index of our first unclaimed win in the epoch winners array, or -1. */
+/** Index of our first undistributed win in the epoch winners array, or -1. */
 export function epochWinIndex(
-  winners: { authority: PublicKey; claimed: boolean }[],
+  winners: { authority: PublicKey; distributed: boolean }[],
   me: PublicKey,
 ): number {
-  return winners.findIndex((w) => !w.claimed && w.authority.equals(me));
+  return winners.findIndex((w) => !w.distributed && w.authority.equals(me));
 }
 
 /** True if any of our ticket ranges contains the drawn winning ticket. */

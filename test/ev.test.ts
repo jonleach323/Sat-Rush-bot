@@ -43,9 +43,16 @@ describe("fee model", () => {
       one_btc_fee_bps: 132,
       protocol_fee_bps: 142,
       sats_vault_round_fee_bps: 1200,
-      sats_vault_claim_fee_bps: 1000,
+      vault_exit_fee_bps: 1000,
     } as never);
     expect(fees.deployFeeBps).toBe(800);
+    // V2's buybacks leg joins the deploy layer (208+194+48+100+50 = 600 live)
+    expect(
+      feeModelFromConfig({
+        strike_fee_bps: 208, epoch_fee_bps: 194, one_btc_fee_bps: 48, protocol_fee_bps: 100,
+        buybacks_fee_bps: 50, sats_vault_round_fee_bps: 1200, vault_exit_fee_bps: 1000,
+      } as never).deployFeeBps,
+    ).toBe(600);
     expect(fees.satsVaultRoundBps).toBe(1200);
     expect(fees.satsVaultClaimBps).toBe(1000);
     expect(netFactor(fees)).toBeCloseTo(0.92);

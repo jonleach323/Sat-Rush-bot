@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import type { SatrushConfig } from "../adapter/idl.js";
+import { TokenFeed } from "../ingest/token-feed.js";
 import { decodeAccount, PROGRAM_ADDRESS } from "../adapter/idl.js";
 import { satrushConfigPda } from "../adapter/pdas.js";
 import type { Config } from "../config.js";
@@ -32,14 +33,24 @@ export interface PreflightReport {
   gates: GateResult[];
 }
 
-/** Devnet-measured economics baseline (FINDINGS.md E6, 2026-08-02). */
+/**
+ * Mainnet V2 economics baseline, read from the live SatrushConfig and verified
+ * against settled rounds to the cent (FINDINGS.md E-v2-live, 2026-09-11).
+ * `sats_vault_round_fee_bps` is still 1200 on chain although the V2 swap
+ * budget is 5% of gross — the model reads the swap leg from measurement, not
+ * from this field; the gate only detects the owner changing the config.
+ */
 export const MEASURED_ECONOMICS = {
-  strike_fee_bps: 264,
-  epoch_fee_bps: 262,
-  one_btc_fee_bps: 132,
+  // Re-baselined 2026-09-21: the owner moved the split at round 64176
+  // (2026-09-17 21:04 UTC) — strike 208→240, epoch 194→104, buybacks 50→108,
+  // layer unchanged at 600 (pnpm strike-payout; FINDINGS § E-v2-strike).
+  strike_fee_bps: 240,
+  epoch_fee_bps: 104,
+  buybacks_fee_bps: 108,
+  one_btc_fee_bps: 48,
   sats_vault_round_fee_bps: 1200,
-  sats_vault_claim_fee_bps: 1000,
-  protocol_fee_bps: 142,
+  vault_exit_fee_bps: 1000,
+  protocol_fee_bps: 100,
   unclaimed_hashrate_bps: 3500,
 } as const;
 
@@ -140,9 +151,39 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
       "economics_within_tolerance",
       econ.ok,
       econ.ok
-        ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of devnet-measured baseline`
+        ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of the mainnet V2 baseline`
         : `ECONOMICS CHANGED — EV model is stale: ${econ.deviations.join("; ")}`,
     );
+    // 5b. the model version must match the program on chain. A V2 config
+    // carries a real token_mint; V1's layout decodes that slot as zeros.
+    const chainIsV2 = !satrushConfig.token_mint.equals(PublicKey.default);
+    gate(
+      "game_version_matches_chain",
+      (cfg.GAME_VERSION === "v2") === chainIsV2,
+      `GAME_VERSION=${cfg.GAME_VERSION}, on-chain config is ${chainIsV2 ? "V2 (token_mint set)" : "V1 (no token_mint)"}`,
+    );
+    // 5c. the RUSH leg is priced from the public API; without it the token
+    // yield is the configured fallback (default 0 — conservative, so not fatal).
+    if (cfg.GAME_VERSION === "v2") {
+      const feed = new TokenFeed({
+        apiUrl: cfg.SATRUSH_API_URL,
+        fallback: { tokenUsd: cfg.RUSH_USD_ESTIMATE, mintRushPerUsd: cfg.RUSH_MINT_PER_USD_ESTIMATE },
+        pollMs: 0,
+        dexPriceUrl: cfg.DEX_PRICE_URL,
+        tokenMint: satrushConfig.token_mint.toBase58(),
+        maxPriceDivergence: cfg.TOKEN_PRICE_MAX_DIVERGENCE,
+      });
+      await feed.refresh();
+      const st = feed.status();
+      gate(
+        "token_feed_live",
+        st.live,
+        st.live
+          ? `RUSH $${st.tokenUsd.toFixed(2)}${st.dexUsd !== null ? ` (DEX $${st.dexUsd.toFixed(2)}, ${((st.priceDivergence ?? 0) * 100).toFixed(1)}% apart)` : " (unchecked)"} × ${(st.mintRushPerUsd * 1000).toFixed(3)} RUSH/$1k over ${st.mintSampleRounds} rounds → yield ${(st.yieldPerVolume * 100).toFixed(2)}% of volume`
+          : `API ${cfg.SATRUSH_API_URL} not answering — token leg priced at the fallback (${(st.yieldPerVolume * 100).toFixed(2)}%)`,
+        false,
+      );
+    }
     const minDeploy = BigInt(satrushConfig.min_deploy_usd_amount.toString());
     gate(
       "min_deploy_vs_caps",

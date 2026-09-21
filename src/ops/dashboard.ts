@@ -159,9 +159,17 @@ export const DASHBOARD_HTML = `<!doctype html>
   <h2>Current board · <span id="boardsub" class="mono" style="color:var(--ink-2)"></span></h2>
   <div class="board" id="board"></div>
 
+  <h2>Deposit · <span class="mono" style="color:var(--ink-2)">send USDC + SOL to the primary; the fleet funds itself</span></h2>
+  <div class="stat" id="deposit" style="display:flex;gap:18px;align-items:center;flex-wrap:wrap"></div>
+
   <h2>Vitals</h2>
   <div class="stat" id="vitals"></div>
   <div class="stat" id="prices" style="margin-top:12px"></div>
+  <div class="stat" id="game" style="margin-top:12px"></div>
+  <div id="fleetwrap" style="display:none;margin-top:12px">
+    <h2>Fleet · <span id="fleetsub" class="mono" style="color:var(--ink-2)"></span></h2>
+    <table id="fleet"><thead><tr><th>wallet</th><th class="r">USDC</th><th class="r">SOL</th><th class="r">streak</th><th class="r">hashrate</th><th class="r">tickets</th><th>state</th></tr></thead><tbody></tbody></table>
+  </div>
 
   <h2>Edge &amp; calibration · <span class="note" id="calsub"></span></h2>
   <div class="stat" id="calibration"></div>
@@ -262,11 +270,17 @@ function render(s, rounds, deploys, comp, health, vault, pnl, intel) {
 
   renderVerdict(s, intel);
 
-  const net = s.pnl.todayNetUsd;
+  // V2: a win pays in BTC and RUSH vault shares, not USDC. The marked net
+  // (shares valued at the vault rate × live price, net of the exit fee) is
+  // the figure the daily cap runs on; the USD-only view is shown under it.
+  const usdOnly = s.pnl.todayNetUsd;
+  const net = (s.markedNetTodayUsd!=null) ? s.markedNetTodayUsd : usdOnly;
+  const unclaimedTotal = s.unclaimed.usd + (s.unclaimed.sharesUsd||0) + (s.unclaimed.tokenSharesUsd||0);
   el("hero").innerHTML = [
-    ["Today net", usd(net), net>=0?"pos":"neg", "deployed "+usd(s.pnl.deployedTodayUsd)+" · returned "+usd(s.pnl.returnedTodayUsd)],
-    ["Unclaimed", usd(s.unclaimed.usd + (s.unclaimed.sharesUsd||0)), "accent",
-      usd(s.unclaimed.usd)+" USDC + "+usd(s.unclaimed.sharesUsd||0)+" in BTC shares (net of claim fee)"],
+    ["Today net (marked)", usd(net), net>=0?"pos":"neg",
+      "USD-only "+usd(usdOnly)+" · deployed "+usd(s.pnl.deployedTodayUsd)+" · returned "+usd(s.pnl.returnedTodayUsd)],
+    ["Unclaimed", usd(unclaimedTotal), "accent",
+      usd(s.unclaimed.usd)+" USDC + "+usd(s.unclaimed.sharesUsd||0)+" BTC shares + "+usd(s.unclaimed.tokenSharesUsd||0)+" RUSH shares (net of exit fee; RUSH at 0 when unpriced)"],
     ["Board total", usd(s.board.totalUsd), "", (s.round.state||"")+" · "+(s.me.tiles.length?("on "+s.me.tiles.length+" tiles"):"not in round")],
     ["Strike pool", usd(s.board.strikePoolUsd), "accent", "jackpot overlay"],
   ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
@@ -285,10 +299,48 @@ function render(s, rounds, deploys, comp, health, vault, pnl, intel) {
   // Oracle prices. "fallback" is a warning, not a footnote: every
   // BTC-denominated figure below and the tip sizing are scaled by these.
   const px = s.prices || {btc:{usd:0,live:false},sol:{usd:0,live:false}};
+  const tf = s.tokenFeed || null;
   el("prices").innerHTML = [
     ["BTC / USD", usd(px.btc.usd), px.btc.live?"":"neg", px.btc.live?"pyth live":"FALLBACK — oracle rejected"],
     ["SOL / USD", usd(px.sol.usd), px.sol.live?"":"neg", px.sol.live?"pyth live":"FALLBACK — oracle rejected"],
+    ["RUSH / USD", tf ? usd(tf.tokenUsd) : "—", tf&&tf.live?"":"neg",
+      tf ? (tf.live ? "api live · "+Math.round((tf.ageMs||0)/1000)+"s ago" : "FEED DOWN — token leg priced at the fallback") : "V1: no token"],
   ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
+
+  // The V2 economics the selector is pricing: the token yield decides the sign
+  // of every round; the vault carry is only credited over a stated horizon.
+  const g = s.game || {};
+  const carry = g.carry;
+  el("game").innerHTML = [
+    ["Game", (g.version||"?").toUpperCase(), "", g.version==="v2" ? "89% refund · 5% sats leg · RUSH mint" : "pre-upgrade parimutuel"],
+    ["Token yield", g.tokenYield!=null ? pct(g.tokenYield) : "0 (feed down)", g.tokenYield!=null?"":"neg",
+      tf ? ((tf.mintRushPerUsd*1000).toFixed(3)+" RUSH per $1k gross over "+tf.mintSampleRounds+" round(s)") : "USD of RUSH per USD of volume"],
+    ["Sats vault APR", g.satsVaultApr!=null ? pct(g.satsVaultApr) : "—", "accent",
+      "app figure · 10% exit fees of claimers accrue to holders"],
+    ["Token vault APR", g.tokenVaultApr!=null ? pct(g.tokenVaultApr) : "—", "accent", "app figure · launch churn inflates it"],
+    ["Carry credited", carry ? (pct(carry.sats)+" / "+pct(carry.token)) : "none", carry?"pos":"dim",
+      carry ? ("BTC / RUSH share legs over "+g.carryHorizonDays+" d (capped)") : "VAULT_CARRY_HORIZON_DAYS=0 — hold intent not stated"],
+  ].map(([k,v,c,sub]) => card(k,v,c,sub)).join("");
+
+  if (s.deposit) {
+    const d = s.deposit;
+    el("deposit").innerHTML =
+      (d.usdcQr ? '<div style="text-align:center"><img src="'+d.usdcQr+'" width="132" height="132" alt="USDC QR"><div class="mono" style="font-size:11px">USDC</div></div>' : "") +
+      (d.solQr ? '<div style="text-align:center"><img src="'+d.solQr+'" width="132" height="132" alt="SOL QR"><div class="mono" style="font-size:11px">SOL</div></div>' : "") +
+      '<div><div class="mono" style="font-size:13px;word-break:break-all">'+d.address+'</div>' +
+      '<div style="color:var(--ink-2);margin-top:6px">minimum first deposit '+d.minUsdc+' USDC + '+d.minSol+' SOL · scan with Phantom / Solflare / Backpack</div>' +
+      '<button data-addr="'+d.address+'" onclick="navigator.clipboard.writeText(this.dataset.addr)" style="margin-top:8px">copy address</button></div>';
+  }
+  const fleet = s.wallets || [];
+  el("fleetwrap").style.display = fleet.length > 1 ? "" : "none";
+  if (fleet.length > 1) {
+    const totUsdc = fleet.reduce((a,w)=>a+w.usdc,0);
+    el("fleetsub").textContent = fleet.length+" wallets · "+usd(totUsdc)+" USDC · caps are aggregate";
+    el("fleet").querySelector("tbody").innerHTML = fleet.map((w,i) =>
+      '<tr><td class="mono">'+(i===0?"★ ":"")+short(w.pubkey)+'</td><td class="r mono">'+usd(w.usdc)+'</td><td class="r mono">'+w.sol.toFixed(3)+
+      '</td><td class="r mono">'+w.streak+'</td><td class="r mono">'+w.hashrate.toLocaleString()+'</td><td class="r mono">'+w.tickets+
+      '</td><td class="'+(w.disabled?"loss":"win")+'">'+(w.disabled||"ready")+'</td></tr>').join("");
+  }
 
   renderIntel(intel, vault);
 
@@ -380,7 +432,7 @@ function renderIntel(intel, vault) {
   el("calibration").innerHTML = [
     ["Realized edge", bps(c.realizedBps),
       c.realizedBps==null ? "dim" : c.realizedBps>c.benchmarkBps ? "pos" : "neg",
-      "USD "+bps(c.realizedUsdBps)+" + BTC shares "+bps(c.realizedSharesBps)
+      "USD "+bps(c.realizedUsdBps)+" + BTC shares "+bps(c.realizedSharesBps)+" + RUSH shares "+bps(c.realizedTokenBps)
       +" · vs "+bps(c.benchmarkBps)+" passive benchmark"],
     ["Modeled edge", bps(c.modeledBps), c.modeledBps==null?"dim":"", "what the EV model predicted"],
     ["Model drift", (c.modeledBps!=null&&c.realizedBps!=null) ? bps(c.modeledBps-c.realizedBps) : "—",

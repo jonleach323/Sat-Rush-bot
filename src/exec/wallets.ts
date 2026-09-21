@@ -15,7 +15,10 @@
  *
  * Never logs or serialises secret keys; only public keys leave this module.
  */
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { loadKeypair } from "./tx.js";
 
 export interface WalletState {
@@ -31,6 +34,16 @@ export interface WalletState {
   lamports: number;
   /** Set when the wallet cannot act this round (unfunded, failed, disabled). */
   disabledReason: string | null;
+}
+
+export interface WalletSnapshot {
+  pubkey: string;
+  streak: number;
+  hashrate: number;
+  tickets: number;
+  usdc: number;
+  sol: number;
+  disabled: string | null;
 }
 
 export interface WalletAllocation {
@@ -67,8 +80,8 @@ export class WalletSet {
    * silently deduping would make the fleet quietly smaller than configured
    * while the risk maths still divided by N.
    */
-  static load(paths: readonly string[], fallbackPath: string): WalletSet {
-    const list = paths.length > 0 ? paths : [fallbackPath];
+  static load(paths: readonly string[], fallbackPath: string, fleet?: { dir: string; size: number }): WalletSet {
+    const list = paths.length > 0 ? paths : [fallbackPath, ...WalletSet.fleetPaths(fleet)];
     const seen = new Set<string>();
     const keypairs: Keypair[] = [];
     for (const p of list) {
@@ -81,6 +94,46 @@ export class WalletSet {
       keypairs.push(kp);
     }
     return new WalletSet(keypairs);
+  }
+
+  /** Create the primary keypair file if it does not exist (0600). Returns true when created. */
+  static ensurePrimary(path: string): boolean {
+    if (existsSync(path)) return false;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify(Array.from(Keypair.generate().secretKey)), { mode: 0o600 });
+    return true;
+  }
+
+  /**
+   * Create the fleet's missing keypairs so that `dir` holds wallet-02 …
+   * wallet-<size>. Existing files are never touched; new ones are written 0600
+   * and nothing secret is returned or logged. Returns the number created.
+   */
+  static ensureFleet(fleet: { dir: string; size: number }): number {
+    if (fleet.size <= 1) return 0;
+    mkdirSync(fleet.dir, { recursive: true, mode: 0o700 });
+    let created = 0;
+    for (let i = 2; i <= fleet.size; i++) {
+      const file = join(fleet.dir, `wallet-${String(i).padStart(2, "0")}.json`);
+      if (existsSync(file)) continue;
+      writeFileSync(file, JSON.stringify(Array.from(Keypair.generate().secretKey)), { mode: 0o600 });
+      created++;
+    }
+    return created;
+  }
+
+  /**
+   * The fleet directory's keypairs (`wallet-02.json` … in name order), at most
+   * `size - 1` of them: the primary (KEYPAIR_PATH) is wallet 1. `pnpm fleet:init`
+   * creates them; a missing directory or size ≤ 1 is the single-wallet case.
+   */
+  static fleetPaths(fleet?: { dir: string; size: number }): string[] {
+    if (!fleet || fleet.size <= 1 || !existsSync(fleet.dir)) return [];
+    return readdirSync(fleet.dir)
+      .filter((f) => /^wallet-\d{2,}\.json$/.test(f))
+      .sort()
+      .slice(0, fleet.size - 1)
+      .map((f) => join(fleet.dir, f));
   }
 
   get size(): number {
@@ -100,6 +153,11 @@ export class WalletSet {
 
   pubkeys(): PublicKey[] {
     return this.wallets.map((w) => w.keypair.publicKey);
+  }
+
+  /** Index of a wallet in the set (0 = primary), or -1. */
+  indexOf(key: string): number {
+    return this.wallets.findIndex((w) => w.keypair.publicKey.toBase58() === key);
   }
 
   byPubkey(key: string): WalletState | undefined {
@@ -159,6 +217,32 @@ export class WalletSet {
     return out;
   }
 
+  /**
+   * Refresh every wallet's USDC + SOL from chain. A wallet whose read fails
+   * keeps its last balances (a flaky RPC must not disable the fleet); a
+   * missing USDC ATA reads as 0, which `eligible()` then excludes.
+   */
+  async refreshBalances(connection: Connection, usdMint: PublicKey): Promise<void> {
+    await Promise.all(
+      this.wallets.map(async (w) => {
+        try {
+          const ata = getAssociatedTokenAddressSync(usdMint, w.keypair.publicKey);
+          const [lamports, usdc] = await Promise.all([
+            connection.getBalance(w.keypair.publicKey, "processed"),
+            connection.getTokenAccountBalance(ata, "processed").then(
+              (b) => BigInt(b.value.amount),
+              () => 0n, // no ATA yet
+            ),
+          ]);
+          w.lamports = lamports;
+          w.usdcBase = usdc;
+        } catch {
+          /* hold last values */
+        }
+      }),
+    );
+  }
+
   /** Aggregate balances, for risk reporting. */
   totals(): { usdcBase: bigint; lamports: number; tickets: number; hashrate: number } {
     return this.wallets.reduce(
@@ -173,15 +257,7 @@ export class WalletSet {
   }
 
   /** Public snapshot for the dashboard — never includes secret material. */
-  snapshot(): {
-    pubkey: string;
-    streak: number;
-    hashrate: number;
-    tickets: number;
-    usdc: number;
-    sol: number;
-    disabled: string | null;
-  }[] {
+  snapshot(): WalletSnapshot[] {
     return this.wallets.map((w) => ({
       pubkey: w.keypair.publicKey.toBase58(),
       streak: w.streak,

@@ -22,17 +22,17 @@ describe("blanket economics", () => {
     expect(noStrike).toBeCloseTo(0.909, 3);
   });
 
-  it("the toll is 7.046% once the strike leg pays back", () => {
-    // Long quoted as "7.04%"; the exact figure is 7.046% — 910 bps of leakage
-    // less 294 x 0.70 = 205.8 bps recovered.
-    expect(blanketToll(MAINNET, STRIKE_BPS)).toBeCloseTo(0.07046, 5);
+  it("the toll is 6.356% once the strike leg pays back", () => {
+    // 910 bps of leakage less 294 x 0.9333 = 274.4 bps recovered. (Under the
+    // owner's stated 0.70 this read 7.046%; the V2 tape measures 14/15.)
+    expect(blanketToll(MAINNET, STRIKE_BPS)).toBeCloseTo(0.06356, 4);
   });
 
-  it("pins the operator-stated 70/30 strike split", () => {
-    // An earlier invented 0.9333 understated the toll as 6.36%. Both the value
-    // and the resulting toll are asserted so a silent edit fails loudly.
-    expect(STRIKE_PAYOUT_FRACTION).toBe(0.70);
-    expect(blanketToll(MAINNET, STRIKE_BPS)).toBeGreaterThan(0.065);
+  it("pins the measured 14/15 strike split", () => {
+    // 12 V2 strikes, every leg, zero variance (pnpm strike-payout). Both the
+    // value and the resulting toll are asserted so a silent edit fails loudly.
+    expect(STRIKE_PAYOUT_FRACTION).toBe(0.9333);
+    expect(blanketToll(MAINNET, STRIKE_BPS)).toBeGreaterThan(0.06);
   });
 
   it("presence never pays for itself", () => {

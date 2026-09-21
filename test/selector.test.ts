@@ -291,3 +291,21 @@ describe("k_emptiest fallback", () => {
     expect([...chosen].sort()).toEqual([0, 1]);
   });
 });
+
+describe("absolute EV floor (fees + opportunity)", () => {
+  it("skips a round whose EV is positive but below the dollar hurdle, and fires when it clears it", async () => {
+    const { selectAllocation } = await import("../src/strategy/selector.js");
+    const { TILES_COUNT } = await import("../src/strategy/ev.js");
+    const flat = (evPerBase: number) => ({
+      predictedStakes: new Array<bigint>(TILES_COUNT).fill(0n),
+      ev: (alloc: bigint[]) => Number(alloc.reduce((a, b) => a + b, 0n)) * evPerBase,
+      marginal: (_a: bigint[], _t: number, inc: bigint) => Number(inc) * evPerBase,
+      returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(evPerBase * Number(alloc.reduce((a, b) => a + b, 0n))),
+    });
+    const base = { ladder: [1_000_000n], maxPerRound: 5_000_000n, minDeploy: 1_000_000n, kEmptiest: 3, strategy: "water_filling" as const };
+    // +1% per $ on $5 = $0.05 of EV
+    expect(selectAllocation(flat(0.01), { ...base, minEvBase: 60_000n }).kind).toBe("skip");
+    expect(selectAllocation(flat(0.01), { ...base, minEvBase: 40_000n }).kind).toBe("deploy");
+  });
+});
+
