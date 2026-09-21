@@ -31,6 +31,8 @@ describe("config defaults", () => {
     // minimum modeled edge is required to fire.
     expect(cfg.ENDGAME_CONVERGENCE).toBe(0); // V2: the board is final at the fire offset (pnpm v2-timing)
     expect(cfg.RAMP_ALERT_MIN_BPS).toBe(50); // the flip signal's margin (≈ the inputs' standard errors)
+    expect(cfg.AUTO_RAMP).toBe(true);
+    expect(cfg.RAMP_PRESENCE_TOLL_BPS).toBe(300);
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
     expect(cfg.MIN_EDGE_BPS).toBe(25); // V2: the optimal fleet blanket runs at 1–3% of gross (pnpm ev-size)
     // Full Kelly by default (growth-maximizing); clamped at 1.0.

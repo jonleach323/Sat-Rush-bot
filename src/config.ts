@@ -756,6 +756,17 @@ const schema = z
      * at spot (`pnpm buy-vs-mine`); the margin absorbs the inputs' standard
      * errors (uplift ±0.10 ≈ 20 bps, mint CV 5% ≈ 9 bps). 0 disables.
      */
+    /**
+     * Start the ramp by itself. The streak option only prices the loss of a
+     * streak already held (nothing to lose at streak 1), so a wallet below
+     * the cap would never begin the ~100-round climb on its own even when a
+     * blanket AT the cap pays. With this on, once the flip signal clears
+     * RAMP_ALERT_MIN_BPS the presence credit is floored at the toll of the
+     * minimum blanket (RAMP_PRESENCE_TOLL_BPS of it), so the selector deploys
+     * the minimum every round until the cap is reached. The alert still fires.
+     */
+    AUTO_RAMP: boolFromEnv(true),
+    RAMP_PRESENCE_TOLL_BPS: z.preprocess(emptyToUndef, z.coerce.number().int().min(0).max(10_000).default(300)),
     RAMP_ALERT_MIN_BPS: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).default(50),

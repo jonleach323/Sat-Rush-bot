@@ -385,9 +385,11 @@ operationally — everything else in this runbook still applies:
   a −EV board at streak 1 keeps the bot skipping even when a blanket at the
   cap would pay. Every skip log carries `blanketEvBpsAtStreakCap`; when it
   clears `RAMP_ALERT_MIN_BPS` (default 50) one Telegram alert says the ramp
-  pays and mining RUSH beats buying it. Starting the ~100-round ramp is the
-  operator's call (`pnpm streak-ramp` prices it); the alert re-arms after
-  the signal drops below zero. Until then, bought-and-staked RUSH is the
+  pays and mining RUSH beats buying it. With `AUTO_RAMP` (default on) the
+  bot starts the ~100-round ramp itself: the presence credit is floored at
+  the minimum blanket's toll while the signal holds, so it deploys the
+  minimum every round until the cap; the alert re-arms after the signal
+  drops below zero. `pnpm streak-ramp` prices the ramp. Until then, bought-and-staked RUSH is the
   confirmed return (`pnpm hold-vs-stake`, `pnpm buy-vs-mine`). The mint rate drifts ~1.7% a day and the field's shape sets
   the dedup uplift, so a week-old number is wrong, not approximate.
 - **Before the first live V2 round** (still outstanding): a real deploy +

@@ -144,6 +144,8 @@ export class Orchestrator {
   private paused = false;
   /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
   private rampAlertArmed = true;
+  /** Last blanket-at-streak-cap EV (bps of gross), presence credit excluded; the auto-ramp reads it. */
+  private lastBlanketAtCapBps: number | null = null;
   private fireInFlight = false;
   private skipLogged = new Set<string>();
   private wasStale = false;
@@ -973,7 +975,9 @@ export class Orchestrator {
       const capped = (() => {
         const base = this.v2Base();
         if (!("model" in src) || !base?.hashrate) return null;
-        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK } });
+        // Presence credit excluded: the auto-ramp floors it off THIS signal,
+        // so including it would make the signal confirm itself.
+        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0 });
       })();
       const atCap = capped ? bps(capped.ev(single), cap) : null;
       // The blanket at the cap is the "flip" signal: a blanket is parimutuel
@@ -1004,6 +1008,7 @@ export class Orchestrator {
    * (`pnpm streak-ramp` prices it).
    */
   private rampSignal(blanketAtCapBps: number | null): void {
+    this.lastBlanketAtCapBps = blanketAtCapBps;
     const min = this.cfg.RAMP_ALERT_MIN_BPS;
     if (blanketAtCapBps === null || !(min > 0)) return;
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
@@ -1104,7 +1109,23 @@ export class Orchestrator {
           }
         : {}),
     });
-    return usd > 0 ? usd * 1e6 : 0;
+    let credit = usd > 0 ? usd * 1e6 : 0;
+    // Auto-ramp: below the cap, when a blanket AT the cap pays, floor the
+    // credit at the minimum blanket's toll so the selector keeps deploying
+    // the minimum every round until the cap is reached (fleet: one minimum
+    // per covered tile). The alert path still reports it.
+    if (
+      this.cfg.AUTO_RAMP &&
+      this.cfg.GAME_VERSION === "v2" &&
+      (miner?.current_streak_count ?? 1) < REWARD_MAX_STREAK &&
+      this.lastBlanketAtCapBps !== null &&
+      this.lastBlanketAtCapBps >= this.cfg.RAMP_ALERT_MIN_BPS
+    ) {
+      const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
+      const tiles = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
+      credit = Math.max(credit, (minDeploy * tiles * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000);
+    }
+    return credit;
   }
 
   /** The program's 1-BTC draw trigger, in BTC base units. */
@@ -1655,6 +1676,9 @@ export class Orchestrator {
       this.skipOnce("paused", {});
       return;
     }
+    // Refresh the blanket-at-cap signal every round (it drives the auto-ramp
+    // and the alert), not only when the selector has already skipped.
+    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
     const candidate = this.candidates.best(this.roundId);
     if (!candidate) {
       this.skipOnce("no_candidate", {
