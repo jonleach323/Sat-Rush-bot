@@ -125,7 +125,7 @@ export interface QuoteGate {
 export function acceptQuote(
   q: PythPrice | null,
   gate: QuoteGate,
-): { ok: true; price: number } | { ok: false; reason: string } {
+): { ok: true; price: number } | { ok: false; reason: string; price?: number } {
   if (!q) return { ok: false, reason: "undecodable" };
   if (gate.owner !== undefined && gate.owner !== PYTH_RECEIVER_PROGRAM_ID) {
     return { ok: false, reason: "wrong_owner" };
@@ -136,10 +136,17 @@ export function acceptQuote(
   if (q.price < gate.bounds.min || q.price > gate.bounds.max) {
     return { ok: false, reason: "out_of_bounds" };
   }
-  const age = gate.headSlot - q.postedSlot;
-  if (age > gate.maxStaleSlots) return { ok: false, reason: `stale_${age}_slots` };
   if (q.confidence / q.price > gate.maxConfidenceRatio) {
     return { ok: false, reason: "confidence_too_wide" };
+  }
+  const age = gate.headSlot - q.postedSlot;
+  if (age > gate.maxStaleSlots) {
+    // Verified in every other respect, only old: hand the price back so the
+    // caller can hold THIS quote rather than a cold fallback constant. The
+    // sponsored feeds heartbeat every ~60 s, so a quote can be a few minutes
+    // old with the market barely moved; the marks and the fee hurdle are far
+    // better off on it than on a seed from .env.
+    return { ok: false, reason: `stale_${age}_slots`, price: q.price };
   }
   return { ok: true, price: q.price };
 }
@@ -217,7 +224,7 @@ export class PriceFeed {
       const info = infos[i];
       const res = acceptQuote(info ? decodePriceUpdateV2(info.data) : null, {
         headSlot,
-        maxStaleSlots: this.opts.maxStaleSlots ?? 150,
+        maxStaleSlots: this.opts.maxStaleSlots ?? 400,
         maxConfidenceRatio: this.opts.maxConfidenceRatio ?? 0.02,
         bounds: BOUNDS[sym],
         expectedFeedId: PYTH_FEED_IDS[sym],
@@ -229,8 +236,10 @@ export class PriceFeed {
         return;
       }
       // Rejected: hold the last accepted price rather than snapping to the
-      // fallback, but stop claiming it is live.
+      // fallback, but stop claiming it is live. A quote that failed only on
+      // age is still the best number we have (it replaces a cold fallback).
       this.live[sym] = false;
+      if (res.price !== undefined) this.px[sym] = res.price;
       this.warn(
         { symbol: sym, reason: res.reason, holding: this.px[sym] },
         "price quote rejected — holding last price",

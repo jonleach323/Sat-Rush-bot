@@ -486,10 +486,14 @@ const schema = z
       pubkeyString.optional().default("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"),
     ),
     /** Max slots between an update's posted slot and chain head before it is
-     * rejected as stale (~150 slots ≈ 60s). */
+     * rejected as stale. The mainnet sponsored feeds heartbeat every ~60 s
+     * (~150 slots), so a 150-slot gate rejected the feed at every heartbeat
+     * edge (observed stale_173_slots at boot); 400 slots ≈ 160 s leaves two
+     * missed heartbeats. The price feeds marks and the fee hurdle, not a
+     * trade price. A stale-but-verified quote is still held over the seed. */
     PRICE_MAX_STALE_SLOTS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(150),
+      z.coerce.number().int().positive().default(400),
     ),
     /** Reject a quote whose confidence/price exceeds this. */
     PRICE_MAX_CONFIDENCE_RATIO: z.preprocess(

@@ -123,9 +123,10 @@ describe("acceptQuote", () => {
     });
   });
 
-  it("rejects a stale posted slot", () => {
+  it("rejects a stale posted slot but hands the verified price back for holding", () => {
     const res = gate(priceUpdate(BTC), { headSlot: 1000 + 151 });
-    expect(res).toEqual({ ok: false, reason: "stale_151_slots" });
+    expect(res).toMatchObject({ ok: false, reason: "stale_151_slots" });
+    expect((res as { price?: number }).price).toBeCloseTo(63_769.958, 3);
   });
 
   it("rejects a quote whose confidence band is too wide", () => {
@@ -233,6 +234,24 @@ describe("PriceFeed", () => {
     stale = true; // same account, now far behind head
     await f.refresh();
     expect(f.btcUsd()).toBe(good); // held, not snapped back to 65_000
+    expect(f.status().btc.live).toBe(false);
+  });
+
+  it("cold start on a stale-but-verified quote holds THAT quote, not the .env seed", async () => {
+    // 2026-09-21 boot: the sponsored feed was 173 slots old at the first poll
+    // and the bot priced BTC at the $65,000 seed for as long as it stayed so.
+    const connection = {
+      getSlot: async () => 1000 + 173,
+      getMultipleAccountsInfo: async () => [accountInfo(priceUpdate(BTC))],
+    } as unknown as Connection;
+    const f = new PriceFeed({
+      connection,
+      accounts: { btc: Keypair.generate().publicKey },
+      fallback: { btc: 65_000, sol: 75 },
+      maxStaleSlots: 150,
+    });
+    await f.refresh();
+    expect(f.btcUsd()).toBeCloseTo(63_769.958, 3); // the quote, flagged not live
     expect(f.status().btc.live).toBe(false);
   });
 
