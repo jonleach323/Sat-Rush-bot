@@ -1780,3 +1780,33 @@ volume yield; spend hashrate on 1-BTC tickets; never single tiles.
 The blanket-at-cap verdict tightens: +0.10%…+0.58% per $ per round
 unboosted, +2.49%…+3.45% boosted, on iteration 16's own pace. The one
 item that stays open is a live send, which needs the operator's keypair.
+
+### Addendum: does the bot size to the EV optimum? (2026-09-21)
+
+`pnpm ev-size` prices the fleet blanket at the cap on today's board ($53
+gross, $3,348 pot) by stake, with the hashrate valued flat (what the
+selector's marginal saw) and on the dilution curve (what it is worth):
+
+```
+                unboosted                       boosted (2×)
+  optimum        $20 → EV $0.36/round            $50 → EV $1.48/round   (dilution curve, 21 wallets)
+  flat marginal  stays positive to $44           stays positive past $300
+```
+
+So the water-filler was right in shape (adds $1 while the marginal EV is
+positive) but priced the hashrate flat, stopping only at MAX_PER_ROUND or
+the VAULT_MAX_SHARE brake — "too much" by construction, though the 25%
+share cap happened to land near the optimum. And `MIN_EDGE_BPS` = 200 (a
+V1 calibration) skipped the unboosted optimum outright, whose edge is 1.8%
+of gross — "too little". Fixed: `HashrateValuation.dilution` values the
+tickets a stake accumulates over the vault horizon on the fleet dedup
+closed form (`fleetEpochWinningsUsd`) and the 1-BTC proportional curve,
+so the marginal bends down, each vault on its own horizon (epoch: rounds
+left in the iteration; 1-BTC: rounds to the draw at the live inflow —
+315 days at today's $50 board, which is why tickets bought now are worth
+little there). The selector re-run on the same board with a $300 cap now
+stops at $21 unboosted (EV $0.40, 1.9% of gross) and $42 boosted (EV
+$1.49, 3.6%) on its own — the curve's optimum to within a few dollars.
+MIN_EDGE_BPS defaults to 25 under V2; tile mode applies to partial
+blankets too (the water-filler weights toward emptier tiles and may leave
+a crowded one out).

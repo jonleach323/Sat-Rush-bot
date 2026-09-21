@@ -61,7 +61,8 @@
     "ev-map": "tsx scripts/ev-map.ts",
     "measure-remaining": "tsx scripts/measure-remaining.ts",
     "ev-grid": "tsx scripts/ev-grid.ts",
-    "fleet:init": "tsx scripts/fleet-init.ts"
+    "fleet:init": "tsx scripts/fleet-init.ts",
+    "ev-size": "tsx scripts/ev-size.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

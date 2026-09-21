@@ -72,7 +72,7 @@ import {
   readableCommitments,
   type AutomationCommitment,
 } from "./ingest/automations.js";
-import { btcBaseToUsd, expectedWinningsUsd, type VaultKind } from "./strategy/vault.js";
+import { btcBaseToUsd, expectedWinningsUsd, type VaultKind, EPOCH_REWARD_CURVE_BPS } from "./strategy/vault.js";
 import {
   epochAction,
   epochWinIndex,
@@ -115,7 +115,7 @@ import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
-import { hashrateRawPerUsd, REWARD_MAX_STREAK, strikeBonusMultiplier } from "./strategy/hashrate.js";
+import { hashrateRawPerUsd, REWARD_MAX_STREAK, strikeBonusMultiplier, type HashrateDilution } from "./strategy/hashrate.js";
 import {
   predictRivalInflow,
   profileCompetitors,
@@ -924,6 +924,9 @@ export class Orchestrator {
               // earns (streak + 21/1) raw per $, so the blanket's hashrate
               // is priced at one covered tile. Only when the fleet exists.
               ...(this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? { coveredOverride: 1 } : {}),
+              // Dilution curve: the marginal ticket is worth less as we hold
+              // more; without it the water-filler only stops at the cap.
+              ...(this.hashrateDilution() ? { dilution: this.hashrateDilution()! } : {}),
             },
           }
         : {}),
@@ -1182,6 +1185,9 @@ export class Orchestrator {
     capTickets: number;
     avgTicketUsd: number;
     roundsRemaining: number;
+    projectedField: number;
+    projectedPool: number;
+    myTickets: number;
   } | null {
     if (!this.cfg.VAULT_STRATEGY_ENABLED) return null;
     const epoch = this.vaultPoolCache?.epoch;
@@ -1232,7 +1238,42 @@ export class Orchestrator {
     if (!(avgTicketUsd > 0)) return null;
 
     const roundsRemaining = Math.max(1, slotsToClose / roundDuration);
-    return { capTickets, avgTicketUsd, roundsRemaining };
+    return { capTickets, avgTicketUsd, roundsRemaining, projectedField, projectedPool, myTickets: epoch.myTickets };
+  }
+
+  /**
+   * The dilution curve for this round's hashrate credit: our tickets over the
+   * rest of the epoch iteration against the projected field (fleet dedup
+   * closed form, one prize per wallet) and the 1-BTC pool (proportional).
+   * Null when the vaults are off or not yet legible — the flat price applies.
+   */
+  private hashrateDilution(): HashrateDilution | null {
+    const e = this.epochTicketEconomics();
+    const pools = this.vaultPoolCache;
+    if (!e && !pools?.oneBtc?.open) return null;
+    const oneBtc = pools?.oneBtc?.open && pools.oneBtc.fillBps >= this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS ? pools.oneBtc : null;
+    // 1-BTC horizon: rounds until the vault fills at the current inflow
+    // (one_btc_fee × gross per round), and the field projected to the draw
+    // from the tickets-per-fill pace so far.
+    let oneBtcLeg: HashrateDilution["oneBtc"] = undefined;
+    if (oneBtc) {
+      const fill = Math.min(0.9999, Math.max(0, oneBtc.fillBps / 1e4));
+      const grossPerRound = this.grossPerRoundUsd();
+      const feeBps = this.state.satrushConfig?.one_btc_fee_bps ?? 0;
+      const btcUsd = this.prices.btcUsd();
+      const inflowBtcPerRound = btcUsd > 0 ? (grossPerRound * feeBps) / 1e4 / btcUsd : 0;
+      const remainingBtc = this.cfg.VAULT_ONE_BTC_TARGET_BTC * (1 - fill);
+      const roundsToDraw = inflowBtcPerRound > 0 ? Math.min(200_000, Math.max(1, remainingBtc / inflowBtcPerRound)) : undefined;
+      const projectedOthers = fill > 0.01 ? Math.max(oneBtc.totalTickets, oneBtc.totalTickets / fill) : oneBtc.totalTickets;
+      oneBtcLeg = { othersTickets: Math.max(0, projectedOthers), prizeUsd: oneBtc.prizeUsd, roundsToDraw, ticketsHeld: 0 };
+    }
+    return {
+      roundsHeld: e?.roundsRemaining ?? 1_000,
+      rawPerTicket: this.cfg.VAULT_HASHRATE_PER_TICKET,
+      ticketsHeld: e?.myTickets ?? 0,
+      ...(e ? { epoch: { othersTickets: e.projectedField, poolUsd: e.projectedPool, wallets: Math.max(1, this.wallets.size), curve: this.epochCurve() ?? EPOCH_REWARD_CURVE_BPS, uplift: this.cfg.EPOCH_DEDUP_UPLIFT } } : {}),
+      ...(oneBtcLeg ? { oneBtc: oneBtcLeg } : {}),
+    };
   }
 
   /**
@@ -2575,6 +2616,27 @@ export class Orchestrator {
     } catch (err) {
       this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
     }
+  }
+
+  /**
+   * Gross USD per round, for horizons that depend on volume (the 1-BTC fill):
+   * the mean of the last 100 recorded rounds (net ÷ (1 − fee layer)), else
+   * the current round's gross, else 0.
+   */
+  private grossPerRoundUsd(): number {
+    try {
+      const rows = this.db.query("SELECT deployed_usd FROM rounds WHERE deployed_usd != '0' ORDER BY id DESC LIMIT 100") as { deployed_usd: string }[];
+      if (rows.length >= 10) {
+        const layer = (this.fees.deployFeeBps ?? 600) / 1e4;
+        const net = rows.reduce((a, r) => a + Number(r.deployed_usd) / 1e6, 0) / rows.length;
+        return net / (1 - layer);
+      }
+    } catch {
+      /* fall through */
+    }
+    const round = this.state.currentRound();
+    const gross = round ? Number((round as unknown as { deployed_gross_usd_amount?: { toString(): string } }).deployed_gross_usd_amount?.toString() ?? 0) / 1e6 : 0;
+    return gross > 0 ? gross : 0;
   }
 
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */

@@ -104,6 +104,38 @@ export const EPOCH_EQUAL_CURVE_BPS: readonly number[] = Object.freeze(
  * Not modeled: if participants_count <= 21 every entrant wins something, which
  * is a materially better regime. Refine once recon shows typical participation.
  */
+/**
+ * USD a FLEET expects from holding `tickets` epoch tickets split evenly over
+ * `wallets` wallets against `othersTickets`, for the V2 equal-prize draw: 21
+ * draws without replacement, one prize per wallet, each prize 0.9·pool/21.
+ * A closed form of the dedup effect the per-wallet uplift only approximates;
+ * it is what makes a ticket worth LESS as we hold more (pnpm ev-size).
+ * Falls back to the curve model with the uplift for a non-equal curve.
+ */
+export function fleetEpochWinningsUsd(
+  tickets: number,
+  othersTickets: number,
+  poolUsd: number,
+  wallets: number,
+  curve: readonly number[] = EPOCH_EQUAL_CURVE_BPS,
+  dedupUplift = 1,
+): number {
+  if (!(tickets > 0) || !(poolUsd > 0)) return 0;
+  const equal = curve.length === 21 && curve.every((c) => Math.abs(c - (curve[0] ?? 0)) < 1e-9);
+  if (!equal) return expectedWinningsUsd(tickets, othersTickets, poolUsd, "epoch", dedupUplift, curve);
+  const k = Math.max(1, Math.floor(wallets));
+  const prize = (EPOCH_PAYOUT_FRACTION * poolUsd) / 21;
+  const perWallet = tickets / k;
+  const p = 1 - Math.pow(1 - perWallet / (othersTickets + tickets), 21);
+  return Math.min(k, 21) * p * prize;
+}
+
+/** USD a holder of `tickets` 1-BTC tickets expects: winner-take-all, exactly proportional, diluted by its own tickets. */
+export function oneBtcWinningsUsd(tickets: number, othersTickets: number, prizeUsd: number): number {
+  if (!(tickets > 0) || !(prizeUsd > 0)) return 0;
+  return (tickets / (othersTickets + tickets)) * prizeUsd;
+}
+
 export function epochWinFraction(
   p: number,
   dedupUplift = 1,

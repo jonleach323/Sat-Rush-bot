@@ -18,7 +18,7 @@ import {
   buildDeployPublic,
   type InstructionContext,
 } from "../adapter/instructions.js";
-import { FULL_MASK, tilesToMask } from "../adapter/mask.js";
+import { popcount, tilesToMask } from "../adapter/mask.js";
 import { TILES_COUNT, type EvContext, type EvModel } from "../strategy/ev.js";
 import {
   selectAllocation,
@@ -33,10 +33,10 @@ import { scaledTipLamports } from "./tip.js";
 export type DeploySelection = Extract<Selection, { kind: "deploy" }>;
 
 /**
- * Tile mode split: wallet i takes tile (i mod 21) with that tile's gross from a
- * full-blanket allocation. A wallet that cannot fund its tile (floor, USDC,
- * lamports) is skipped — its tile goes unplayed this round — rather than
- * shrinking everyone else. Exported for tests.
+ * Tile mode split: wallet i takes tile (i mod 21) with that tile's gross from
+ * the allocation (tiles the selection left empty produce no leg). A wallet that
+ * cannot fund its tile (floor, USDC, lamports) is skipped — its tile goes
+ * unplayed this round — rather than shrinking everyone else. Exported for tests.
  */
 export function tileLegs(
   set: WalletSet,
@@ -323,10 +323,15 @@ export class CandidateSet {
       return [{ signer: this.opts.payer, amountGross: selection.totalGross, mask: selection.mask }];
     }
     const floor = this.opts.fundingFloor ?? { minDeployBase: 1_000_000n, minLamports: 0 };
-    if (this.opts.tileMode && selection.mask === FULL_MASK) {
+    if (this.opts.tileMode) {
+      // Any allocation is sent tile-by-tile: wallet i takes tile i when the
+      // selection put money there (the water-filler weights the blanket
+      // toward emptier tiles and may leave a crowded one out — that is still
+      // the fleet's blanket). Below the cover floor, fall back to slices.
       const legs = tileLegs(set, selection.allocation, floor);
-      const minCover = Math.min(TILES_COUNT, this.opts.tileMinCover ?? TILES_COUNT);
-      return legs.length >= minCover ? legs : [];
+      const covered = popcount(selection.mask);
+      const minCover = Math.min(covered, this.opts.tileMinCover ?? TILES_COUNT);
+      if (legs.length >= minCover) return legs;
     }
     const allocs = set.allocate(selection.totalGross, floor);
     const sum = allocs.reduce((a, x) => a + x.grossBase, 0n);

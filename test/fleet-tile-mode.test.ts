@@ -6,7 +6,8 @@ import { Keypair } from "@solana/web3.js";
 import { tileLegs } from "../src/exec/candidates.js";
 import { WalletSet, type FundingFloor, type WalletState } from "../src/exec/wallets.js";
 import { TILES_COUNT } from "../src/strategy/ev.js";
-import { hashrateRebateUsd } from "../src/strategy/hashrate.js";
+import { dilutedHashrateValueUsd, hashrateRebateUsd } from "../src/strategy/hashrate.js";
+import { EPOCH_EQUAL_CURVE_BPS } from "../src/strategy/vault.js";
 import { maskToTiles } from "../src/adapter/mask.js";
 
 const FLOOR: FundingFloor = { minDeployBase: 1_000_000n, minLamports: 5_000_000 };
@@ -48,6 +49,13 @@ describe("tile mode — wallet i deploys tile i of a blanket", () => {
     expect(tileLegs(makeSet(5), blanket(2_000_000n), FLOOR)).toHaveLength(5);
   });
 
+  it("a partial blanket sends legs only for the tiles the selection funded", () => {
+    const alloc = blanket(2_000_000n); alloc[4] = 0n; alloc[9] = 0n;
+    const legs = tileLegs(makeSet(21), alloc, FLOOR);
+    expect(legs).toHaveLength(19);
+    expect(legs.map((l) => maskToTiles(l.mask)[0])).toEqual(Array.from({ length: 21 }, (_, i) => i).filter((i) => i !== 4 && i !== 9));
+  });
+
   it("a per-tile amount under the on-chain minimum yields no legs", () => {
     expect(tileLegs(makeSet(21), blanket(900_000n), FLOOR)).toEqual([]);
   });
@@ -60,6 +68,34 @@ describe("single-tile hashrate pricing for the fleet", () => {
     const tileValue = hashrateRebateUsd({ ...base, coveredOverride: 1 }, 21, 100);
     expect(blanketValue).toBeCloseTo(101 * 100 * 1e-4, 9);
     expect(tileValue).toBeCloseTo(121 * 100 * 1e-4, 9);
+  });
+});
+
+describe("hashrate dilution curve", () => {
+  const d = { roundsHeld: 1000, rawPerTicket: 100, epoch: { othersTickets: 900_000, poolUsd: 28_200, wallets: 21, curve: EPOCH_EQUAL_CURVE_BPS, uplift: 1.37 }, oneBtc: { othersTickets: 2_500_000, prizeUsd: 81_000 } };
+  it("a small pile is worth about the flat small-block price per ticket; a big pile is worth less per ticket", () => {
+    const small = dilutedHashrateValueUsd(100 * 1_000, d) / 1_000; // 1,000 tickets: the 1-BTC leg at $0.032 wins
+    const big = dilutedHashrateValueUsd(100 * 900_000, d) / 900_000; // half the epoch field
+    expect(small).toBeCloseTo(0.0324, 3);
+    expect(big).toBeLessThan(0.8 * small);
+    // epoch-only, the dedup closed form: ~$0.028 per ticket at a small pile, ~$0.011 at half the field
+    const epochOnly = { ...d, oneBtc: undefined };
+    expect(dilutedHashrateValueUsd(100 * 1_000, epochOnly) / 1_000).toBeCloseTo(0.0282, 3);
+    expect(dilutedHashrateValueUsd(100 * 900_000, epochOnly) / 900_000).toBeCloseTo(0.0112, 3);
+  });
+  it("the per-round credit bends the marginal EV down as the stake grows", () => {
+    const base = { streak: 100, valueUsdPerRawUnit: 2.4e-4, multiplier: 1, coveredOverride: 1, dilution: d };
+    const at = (g: number) => hashrateRebateUsd(base, 21, g);
+    const m1 = at(2) - at(1), m50 = at(51) - at(50), m200 = at(201) - at(200);
+    expect(m1).toBeGreaterThan(m50);
+    expect(m50).toBeGreaterThan(m200);
+    // and it never exceeds the flat valuation at the small-pile price for the same raw
+    expect(at(10)).toBeLessThanOrEqual(hashrateRebateUsd({ ...base, valueUsdPerRawUnit: 3.24e-4, dilution: undefined }, 21, 10) + 1e-9);
+  });
+  it("the 1-BTC leg floors the value when the epoch pile is saturated", () => {
+    const epochOnly = dilutedHashrateValueUsd(100 * 900_000, { ...d, oneBtc: undefined });
+    const both = dilutedHashrateValueUsd(100 * 900_000, d);
+    expect(both).toBeGreaterThanOrEqual(epochOnly);
   });
 });
 

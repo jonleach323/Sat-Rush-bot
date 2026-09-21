@@ -433,8 +433,15 @@ address.
    Non-blanket selections fall back to the slice split. Every wallet binds
    to the primary's affiliate at its first deploy (10 bps of its volume
    comes back to the primary as grubstake and is deployed from there).
-5. **Sizing.** `MAX_PER_ROUND_USD` is the FLEET's per-round gross; each
-   tile gets a 21st of it. Per-wallet target/low marks should cover a few
+5. **Sizing.** The selector adds $1 quanta to the best tile while the
+   marginal EV is positive, so it finds the EV-maximizing stake itself; the
+   hashrate leg is priced on the dilution curve (our tickets lower the value
+   of every ticket we hold), so the marginal bends down and the stop is the
+   true optimum, not a cap — `pnpm ev-size` prints the curve (today ~$20
+   unboosted, ~$50 boosted). Set `MAX_PER_ROUND_USD` ABOVE that optimum
+   (say $100): it is the fleet's per-round gross, each tile gets a 21st,
+   and a "cap-bound" alert means the cap, not the model, stopped the size.
+   `MIN_EDGE_BPS` is 25 under V2 (the optimum runs at 1–3% of gross). Per-wallet target/low marks should cover a few
    hundred rounds of that share: at $21/round fleet gross (a $1 tile each)
    the defaults ($20 target, $8 low) are ~20 rounds of pure misses per
    wallet, plenty since 89% refunds every round. Raise them with the stake.

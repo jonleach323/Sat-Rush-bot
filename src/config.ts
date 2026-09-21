@@ -288,10 +288,16 @@ const schema = z
      * profitable. 200 keeps a small margin for residual optimism without
      * gating out the tradeable range. Re-check as the post-fix sample grows:
      * realized consistently >= modeled -> lower toward 0; realized falling
-     * below modeled -> raise toward the break-even crossover. */
+     * below modeled -> raise toward the break-even crossover.
+     *
+     * V2 (2026-09-21): the EV-maximizing fleet blanket runs at 1–3% of gross
+     * (pnpm ev-size: $0.36 on $20 unboosted, $1.48 on $50 boosted), so the
+     * V1 floor of 200 bps skipped the unboosted optimum outright — "too
+     * little" by construction. 25 bps keeps a margin over model noise
+     * (uplift ±0.10 ≈ 20 bps) without gating the V2 band. */
     MIN_EDGE_BPS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(0).max(10_000).default(200),
+      z.coerce.number().int().min(0).max(10_000).default(25),
     ),
     /** Fractional-Kelly bet sizing ∈ [0,1]. Caps each round's total stake at
      * this fraction of the growth-optimal Kelly bet (sized to the live wallet
