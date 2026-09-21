@@ -26,7 +26,9 @@ pnpm test
 pnpm build
 
 echo "── rsync → $HOST:$REMOTE_DIR (secrets excluded) ──"
-rsync -az --delete --info=stats1 \
+# The app tree is owned by the service user and closed to other logins, so
+# rsync runs as root on the far end and ownership is restored afterwards.
+rsync -az --delete --info=stats1 --rsync-path="sudo rsync" \
   --exclude '.git/' \
   --exclude 'node_modules/' \
   --include '.env.example' \
@@ -41,28 +43,31 @@ rsync -az --delete --info=stats1 \
 echo "── remote install + unit reload ──"
 # Full install (not --prod): tsx is needed on the box for pnpm preflight and
 # scripts/experiments/*; better-sqlite3 must compile on the server's ABI.
-ssh "$HOST" REMOTE_DIR="$REMOTE_DIR" 'bash -s' <<'REMOTE'
+# Everything on the box runs under sudo with the `cd` inside it: the login
+# user cannot enter the service user's tree, and the env file is root's.
+ssh "$HOST" REMOTE_DIR="$REMOTE_DIR" 'sudo env "PATH=$PATH" REMOTE_DIR="$REMOTE_DIR" bash -s' <<'REMOTE'
 set -euo pipefail
 cd "$REMOTE_DIR"
+chown -R satrush:satrush "$REMOTE_DIR"
 # Backup before anything changes: state db, keys, env (the only things that
 # are not reproducible). Kept under the app tree, root-readable only.
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-sudo mkdir -p "$REMOTE_DIR/backups"
-sudo tar czf "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz" -C / "opt/satrush/data" "opt/satrush/keypairs" "etc/satrush/.env" 2>/dev/null || true
-sudo chmod 600 "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz"
-pnpm install --frozen-lockfile
+mkdir -p "$REMOTE_DIR/backups"
+tar czf "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz" -C / "opt/satrush/data" "opt/satrush/keypairs" "etc/satrush/.env" 2>/dev/null || true
+chmod 600 "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz"
+sudo -u satrush env "PATH=$PATH" pnpm install --frozen-lockfile
 # V1 → V2 env migration: comments out hand-set values the V2 bot derives
 # (a V1 MAX_PER_ROUND_USD would cap every round) and obsolete keys; a
 # timestamped .bak sits next to the file.
-sudo -E env "PATH=$PATH" pnpm env:migrate /etc/satrush/.env --write || true
-sudo chown root:satrush /etc/satrush/.env && sudo chmod 640 /etc/satrush/.env
+pnpm env:migrate /etc/satrush/.env --write || true
+chown root:satrush /etc/satrush/.env && chmod 640 /etc/satrush/.env
 # Preflight against the migrated env: stale facts or a config gate abort the restart.
 set -a; . /etc/satrush/.env; set +a
 pnpm preflight
-sudo install -m 644 deploy/satrush.service /etc/systemd/system/satrush.service
-sudo systemctl daemon-reload
-sudo systemctl enable satrush >/dev/null
-sudo systemctl restart satrush
+install -m 644 deploy/satrush.service /etc/systemd/system/satrush.service
+systemctl daemon-reload
+systemctl enable satrush >/dev/null
+systemctl restart satrush
 sleep 2
 systemctl --no-pager --lines=0 status satrush
 REMOTE
