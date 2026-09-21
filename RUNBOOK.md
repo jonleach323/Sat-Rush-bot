@@ -376,7 +376,8 @@ operationally — everything else in this runbook still applies:
   stale one. `pnpm hold-vs-stake` answers whether to leave winnings as
   unclaimed shares or claim and stake (hold, at today's rates);
   `pnpm buy-vs-mine` prices mining RUSH against buying it on Jupiter and
-  staking (buy, by a wide margin, unless spot exceeds the mined cost). The mint rate drifts ~1.7% a day and the field's shape sets
+  staking (buy for any single-tile play; a small blanket at the streak cap
+  mines it under spot, at break-even-to-+1% per round). The mint rate drifts ~1.7% a day and the field's shape sets
   the dedup uplift, so a week-old number is wrong, not approximate.
 - **Before the first live V2 round** (still outstanding): a real deploy +
   settle on a $1 stake with `MAX_PER_ROUND_USD=1`, watching the reconcile

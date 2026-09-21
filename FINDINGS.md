@@ -1609,37 +1609,57 @@ Re-run when `pnpm vault-carry` prints a token carry below 0.197%/day.
 ending up holding RUSH. The buy side is the live Jupiter route (USDC →
 RUSH) at $1k / $10k / $50k, then the staking treasury's reward stream
 diluted by our own stake (the stream is a fixed $/day from volume). The
-mine side is the V2 model on today's board with the RUSH leg priced at
-ZERO — the non-token toll — divided by the RUSH minted pro rata, so the
-cost of a mined RUSH is a dollar figure independent of its price.
+mine side is the V2 model on the MEAN board of the last 100 finished
+rounds with the RUSH leg priced at ZERO — the non-token toll — divided by
+the RUSH minted pro rata, so the cost of a mined RUSH is a dollar figure
+independent of its price. Credited on the mine side: the 89% losing-tile
+refund, own stake and the 5% sats leg back as BTC shares on a win, the
+strike jackpot pro rata (steady state: strike fee × 0.70 payout = 1.68% of
+gross; the live pot ÷ 1440 gives 1.37% today), and hashrate → epoch
+tickets at the equal-prize curve × 1.37x uplift. Not credited, each can
+only add: the 1-BTC lottery (≤ 0.48% of gross, engine-dependent), the
+affiliate rebate, and the 0.30%/day carry on the mined BTC shares.
 
 ```
-  spot $42.92 · board $113 · mint 0.405 RUSH/$1k · stake $318,787, stream $663/day → 0.208%/day undiluted
-  BUY   $1k  → $42.96 avg  (+0.10%)   $10k → $43.25 (+0.78%)   $50k → $46.13 (+7.49%)   Orca Whirlpool, $541k pool
-  MINE  fresh single tile   toll 7.46% of gross → $184/RUSH  (4.29× spot)
-        single tile at cap  toll 5.11%          → $126/RUSH  (2.94×)
-        21-tile blanket cap toll 3.02%          → $75/RUSH   (1.74×)
-        fleet ledger (21 wallets, epoch recovery) `pnpm v2-ledger 1000 21`: $49/RUSH (1.15×); with strike 0.95: $35 (0.82×)
-  $1,000 of RUSH after 30 d:  buy+stake $1,061  ·  mine+hold $250 / $365 / $616
-  yields afterwards: staked 0.207%/day (cbBTC, no lock/fee)  ·  vault shares 0.240%/day (RUSH, decays)
+  spot $42.90 · board $111 ± $2 (n = 99) · mint 0.4307 RUSH/$1k · yield 1.85% of gross
+  stake $318,496, stream $663/day → 0.208%/day undiluted (0.180% if $50k joined)
+  BUY   $1k → $42.94 avg (+0.09%)   $10k → $43.23 (+0.76%)   $50k → $46.08 (+7.41%)   Orca Whirlpool, $541k pool
+  MINE  toll per $ gross (without strike)    cost per RUSH   vs spot
+        fresh wallet, 1 tile     6.58% (7.48%)      $153          3.56×
+        1 tile at streak cap     4.23% (5.13%)       $98          2.29×
+        21-tile blanket at cap   1.34% (3.02%)       $31          0.73×
+        fleet ledger `pnpm v2-ledger 1000 21` (volume accounting, strike 0.70 / 0.95): $49 / $35
+  $1,000 committed, 30 d:  buy+stake $1,061  ·  mine+hold $301 / $468 / $1,473
+  yields afterwards: staked 0.208%/day (cbBTC, no lock, no fee)  ·  vault shares 0.240%/day (RUSH, decays)
 ```
 
-Buying wins at every size the pool can absorb without a 7% haircut, and it
-is not close: mining spends $1.74–$4.29 of toll per dollar of RUSH on a
-single wallet, and $1.15 even in the ledger's most favourable fleet
-accounting. The crossover is a spot price (the mint is volume-proportional,
-so a mined RUSH costs the same in dollars at any price): the single wallet
-needs RUSH above $126 at the cap, the fleet above $49–$75. The +1.74%/day
-mint drift lowers those by the same fraction per day while it lasts; a
-mint that instead targets a dollar yield at a lagging price would move
-with spot and never cross. Post-acquisition the two yields are within
-0.03%/day of each other, so the acquisition cost decides.
+Two answers, by configuration. Any single-tile deploy — fresh or at the
+cap — mines RUSH at 2.3–3.6× what the market charges: buy. A 21-tile
+blanket at the streak cap mines it at 0.73× spot, i.e. cheaper than
+buying: that row is the same statement as "a small blanket at the cap is
++0.5% per dollar per round on the mean board" (toll 1.34% against a 1.85%
+RUSH yield), which is inside the uncertainty of its inputs — the hashrate
+credit is 2.9% of gross at the cap (uplift 1.37 ± 0.10 → ±0.2 pts), the
+strike payout fraction is stated 0.70 (0.95 would add 0.6 pts), the mint
+rate has a 5% CV. Read it as break-even to +1%, not as an edge, and it
+needs the 99-round ramp to the cap and continuous presence (2-round
+grace) to exist at all. The single wallet's throughput is the other
+limit: $1,000 of RUSH is $54k of gross volume, 10,800 rounds at $5, 11.5
+days; a bigger stake raises own weight and thins the epoch ticket value.
+
+Post-acquisition the two yields are within 0.03%/day of each other, so
+the acquisition cost decides. The crossover is a spot price (the mint is
+volume-proportional): single tile needs RUSH above $98 at the cap; the
+fleet blanket is already under. The +1.74%/day mint drift lowers every
+mined cost by the same fraction per day while it lasts; a mint that
+targeted a dollar yield at a lagging price would move with spot instead.
 
 Staking terms (app Stake page chunk + treasury account read on chain,
 program `SaTsTaKpGdTfUEPSSwyYgLKkfnZu8uL3D1DbLXshdb7`, no IDL published):
 stake / unstake / claim, a 24-hour reward stream, no lock, cooldown or
 fee visible in the copy, the instruction data or the account.
 
-What mining buys that buying does not, and why it does not change the
-answer: BTC shares (the sats leg) and epoch tickets are already netted
-inside the toll above — the toll IS what is left after they are credited.
+Correction to the first version of this note (same day): the model rows
+had omitted the strike jackpot leg, which the orchestrator credits; with
+it the blanket row moved from $75 to $31 per RUSH and flipped. The ledger
+row always carried it.
