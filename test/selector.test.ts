@@ -410,3 +410,22 @@ describe("coarse-to-fine fill: uncapped runs are cheap and land where the $1 gre
     expect(sel.totalGross).toBe(usdToBase(50));
   });
 });
+
+describe("hurdle scales with the stake actually deployed", () => {
+  it("a small selection is charged the opportunity yield on ITS total, not on the cap", () => {
+    const flat = (evPerBase: number) => ({
+      predictedStakes: zeroStakes(),
+      ev: (alloc: bigint[]) => Number(alloc.reduce((a, b) => a + b, 0n)) * evPerBase,
+      marginal: (_a: bigint[], _t: number, inc: bigint) => Number(inc) * evPerBase,
+      returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(evPerBase * Number(alloc.reduce((a, b) => a + b, 0n))),
+    });
+    const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(9), maxPerRound: usdToBase(35_000) };
+    // +0.5%/$ on a cap-bound $35k fill = $175 of EV; per-unit hurdle 0.4%/$ = $140 → clears.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004 }).kind).toBe("deploy");
+    // Per-unit hurdle above the edge → skip, however large the cap.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.006 })).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+    // Fixed fees add on top of the scaled part.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004, minEvBase: usdToBase(40) })).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004, minEvBase: usdToBase(30) }).kind).toBe("deploy");
+  });
+});

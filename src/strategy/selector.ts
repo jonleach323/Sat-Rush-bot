@@ -50,6 +50,13 @@ export interface SelectorConfig {
    */
   minEvBase?: bigint | undefined;
   /**
+   * The part of the absolute floor that scales with the stake actually
+   * deployed (EV base units per stake base unit): the opportunity yield of
+   * the money over the round. Added to `minEvBase` × 1 for the selection's
+   * total, so a small ramp is not charged the yield on the whole bankroll.
+   */
+  minEvPerUnit?: number | undefined;
+  /**
    * Tiles the water-filler must leave empty — the candidate variants exclude
    * the previous pick's heaviest tile this way. (Inflating a rival stake on
    * the tile instead, V1's trick, turns it into a jackpot for every other
@@ -98,11 +105,12 @@ const EV_EPSILON = 1e-6;
 const BPS = 10_000;
 
 /** True when `ev` clears the configured minimum-edge floor for `gross`. */
-function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint): boolean {
+function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint, minEvPerUnit?: number): boolean {
   const bps = minEdgeBps ?? 0;
   const relative = bps > 0 ? (Number(gross) * bps) / BPS : 0;
-  const absolute = minEvBase !== undefined && minEvBase > 0n ? Number(minEvBase) : 0;
-  return ev >= Math.max(relative, absolute);
+  const fixed = minEvBase !== undefined && minEvBase > 0n ? Number(minEvBase) : 0;
+  const scaled = minEvPerUnit !== undefined && minEvPerUnit > 0 ? Number(gross) * minEvPerUnit : 0;
+  return ev >= Math.max(relative, fixed + scaled);
 }
 
 function validate(cfg: SelectorConfig): void {
@@ -321,7 +329,7 @@ function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
   if (ev <= 0) {
     return { kind: "skip", reason: "min_deploy_padding_made_ev_negative", strategy: "water_filling" };
   }
-  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps, cfg.minEvBase)) {
+  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps, cfg.minEvBase, cfg.minEvPerUnit)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "water_filling" };
   }
 
@@ -379,7 +387,7 @@ function selectKEmptiest(model: EvModel, cfg: SelectorConfig): Selection {
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
   allocation[tile] = amount;
   const ev = model.ev(allocation);
-  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps, cfg.minEvBase)) {
+  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps, cfg.minEvBase, cfg.minEvPerUnit)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "k_emptiest" };
   }
   return {

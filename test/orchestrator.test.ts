@@ -139,3 +139,19 @@ describe("ingest reconnect", () => {
     expect(reads.mock.calls.length).toBe(readsAfter);
   });
 });
+
+describe("ramp signal sizing (V2)", () => {
+  it("prices the ramp on the minimum blanket, not on the bankroll-sized cap", async () => {
+    // $35k on the primary → the auto cap is the bankroll; the ramp deploys $1 × 21 tiles.
+    h = await bootHarness({ env: { GAME_VERSION: "v2" }, primaryUsdc: 35_000_000_000n });
+    h.slotsTo(1_001);
+    await h.settle();
+    const diag = (h.orch as unknown as { evDiagnostics: () => Record<string, unknown> }).evDiagnostics();
+    expect(diag["rampBlanketUsd"]).toBe(21);
+    expect(diag["capBlanketUsd"] as number).toBeGreaterThan(30_000);
+    expect(typeof diag["blanketEvBpsAtStreakCap"]).toBe("number");
+    expect(typeof diag["capBlanketEvBpsAtStreakCap"]).toBe("number");
+    // The two are different questions: a $21 ramp and a $35k blanket do not price alike.
+    expect(diag["blanketEvBpsAtStreakCap"]).not.toBe(diag["capBlanketEvBpsAtStreakCap"]);
+  });
+});

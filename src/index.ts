@@ -1132,7 +1132,18 @@ export class Orchestrator {
       const model = "model" in src ? src.model(src.predictedStakes) : v1Model(src);
       const cap = this.effectiveMaxPerRoundBase();
       if (cap <= 0n) return {};
-      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / BigInt(TILES_COUNT));
+      // The ramp signal is priced on the MINIMUM blanket — the on-chain min
+      // deploy on every covered tile, which is exactly what the ramp deploys.
+      // Pricing it on a cap-sized blanket made the signal depend on the
+      // bankroll: with MAX_PER_ROUND auto-derived from $35k of USDC, a $35k
+      // blanket at the streak cap is deeply negative under dilution, the
+      // ramp never armed, and a bot at streak 1 sat out a 2× boost window
+      // that a $21 ramp would have paid in (2026-09-21 evening).
+      const minDeploy = BigInt(this.state.satrushConfig?.min_deploy_usd_amount.toString() ?? "1000000");
+      const tiles = BigInt(TILES_COUNT);
+      const rampTotal = minDeploy * tiles <= cap ? minDeploy * tiles : cap - (cap % tiles);
+      const rampBlanket = new Array<bigint>(TILES_COUNT).fill(rampTotal / tiles);
+      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / tiles);
       const emptiest = model.predictedStakes.reduce((b, s, i, a) => (s < (a[b] ?? 0n) ? i : b), 0);
       const single = new Array<bigint>(TILES_COUNT).fill(0n);
       single[emptiest] = cap;
@@ -1153,11 +1164,17 @@ export class Orchestrator {
       // (the refund, sats and strike legs come back pro rata whatever wins),
       // so its EV at the cap is the non-token toll against the RUSH yield —
       // positive means mining RUSH is cheaper than buying it (pnpm buy-vs-mine).
-      const blanketAtCap = capped ? bps(capped.ev(blanket), cap - (cap % BigInt(TILES_COUNT))) : null;
-      this.rampSignal(blanketAtCap);
+      const rampAtCap = capped && rampTotal > 0n ? bps(capped.ev(rampBlanket), rampTotal) : null;
+      this.rampSignal(rampAtCap);
       return {
-        blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
-        blanketEvBpsAtStreakCap: blanketAtCap,
+        // The minimum blanket (what the ramp deploys): today's streak, and at the streak cap (the ramp signal).
+        rampBlanketUsd: Number(rampTotal) / 1e6,
+        blanketEvBps: rampTotal > 0n ? bps(model.ev(rampBlanket), rampTotal) : null,
+        blanketEvBpsAtStreakCap: rampAtCap,
+        // The cap-sized blanket, for scale: how the bankroll-sized deploy prices.
+        capBlanketUsd: Number(cap - (cap % tiles)) / 1e6,
+        capBlanketEvBps: bps(model.ev(blanket), cap - (cap % tiles)),
+        capBlanketEvBpsAtStreakCap: capped ? bps(capped.ev(blanket), cap - (cap % tiles)) : null,
         emptiestTile: emptiest,
         emptiestEvBps: bps(model.ev(single), cap),
         emptiestEvBpsAtStreakCap: atCap,
@@ -1183,7 +1200,7 @@ export class Orchestrator {
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
       this.rampAlertArmed = false;
       this.alert(
-        `ramp pays: an even blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
+        `ramp pays: the minimum blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
     } else if (!this.rampAlertArmed && blanketAtCapBps < -min) {
@@ -1758,7 +1775,8 @@ export class Orchestrator {
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
       minEdgeBps: this.cfg.MIN_EDGE_BPS,
-      minEvBase: this.edgeHurdleBase(maxPerRound),
+      minEvBase: this.edgeHurdleBase(0n),
+      minEvPerUnit: this.opportunityPerUnit(),
       kellyFraction: this.cfg.KELLY_FRACTION,
       bankrollBase: this.usdcAvailableBase ?? undefined,
     };
@@ -1770,6 +1788,20 @@ export class Orchestrator {
    * live priority fee and SOL price, plus the opportunity yield of the stake
    * over one round. Undefined when the hurdle is off.
    */
+  /**
+   * The opportunity leg of the hurdle per unit of stake ACTUALLY deployed
+   * (EV base units per stake base unit, one round of OPPORTUNITY_YIELD_DAILY).
+   * Charged on the selection's total inside the selector, not on the cap:
+   * with the cap auto-derived from the bankroll, charging the cap taxed a
+   * $21 ramp with the yield on $35k.
+   */
+  private opportunityPerUnit(): number | undefined {
+    if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
+    return this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay;
+  }
+
   private edgeHurdleBase(stakeBase: bigint): bigint | undefined {
     if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
     const legs = this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
