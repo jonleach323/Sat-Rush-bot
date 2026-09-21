@@ -25,7 +25,7 @@
 import { REWARD_MAX_STREAK } from "@satrush/client";
 import { evOfAllocationV2, v2EconomicsFromConfig } from "../src/strategy/ev-v2.js";
 import { TILES_COUNT } from "../src/strategy/ev.js";
-import { EPOCH_DEDUP_UPLIFT, RUSH_MINT_PER_USD, SATS_VAULT_CARRY_DAILY, STAKING_YIELD_DAILY, STRIKE_PAYOUT_FRACTION, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
+import { EPOCH_DEDUP_UPLIFT, RUSH_MINT_PER_USD, SATS_VAULT_CARRY_DAILY, STAKING_YIELD_DAILY, STRIKE_PAYOUT_FRACTION, TOKEN_VAULT_CARRY_DAILY, V2_DEPLOY_FEE_LAYER_BPS, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
 import { EPOCH_EQUAL_CURVE_BPS, expectedWinningsUsd } from "../src/strategy/vault.js";
 import { usdToBase } from "../src/units.js";
 
@@ -76,7 +76,13 @@ const stakeYield = (ours: number) => streamUsdPerDay / (stakedUsd + ours);
 
 // ── MINE: the model on today's board, RUSH leg priced at zero ──────────────
 const closed = hist.find((h) => h.ended_at && h.pool_combined_usd_amount !== null)!;
-const econ = v2EconomicsFromConfig({ ...conf, buybacks_fee_bps: 50 }, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
+// The API config omits the buybacks leg; the layer is a fixed 600 bps on the
+// tape (every V2 round: net = 94% of gross), so the leg is the remainder. It
+// was 50 bps until round 64175 and 108 bps from 64176 (2026-09-17 21:04 UTC,
+// with strike 208→240 and epoch 194→104) — pnpm strike-payout / FINDINGS.
+const buybacksBps = V2_DEPLOY_FEE_LAYER_BPS.value - (conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps + conf.protocol_fee_bps);
+if (buybacksBps < 0) throw new Error(`fee legs exceed the ${V2_DEPLOY_FEE_LAYER_BPS.value} bps layer: re-measure V2_DEPLOY_FEE_LAYER_BPS`);
+const econ = v2EconomicsFromConfig({ ...conf, buybacks_fee_bps: buybacksBps }, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
 const pool = closed.pool_combined_usd_amount as number;
 const field = Number(closed.total_tickets);
 const block = Math.round(0.05 * field);

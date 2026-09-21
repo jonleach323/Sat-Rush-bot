@@ -123,13 +123,25 @@ export const TILES = fact(TILE_COUNT, "tiles", {
 });
 
 /**
- * Share of a Sat Strike bonus that reaches the winner. Replaced an invented
- * 0.9333 that flattered every deploying strategy by ~68 bps of gross.
+ * Share of the Sat Strike pot that reaches the winning tile AT TRIGGER.
+ * History: an unsourced 0.9333 default was replaced by the owner's stated
+ * 0.70 ("always been 70/30"; V1, 2026-08-15). Under V2 the rounds API exposes
+ * the split per strike round (`strike_bonus_*` / `strike_reserve_*` /
+ * `strike_seed_from_reserve_*`): every one of the 12 V2 strikes paid exactly
+ * 14/15 = 93.33% on all three legs (USD, BTC, RUSH) and retained 6.67%, and
+ * that reserve is SEEDED into the next pot — so the long-run payout of the
+ * strike fee is ~100%, and this fraction only times it. A program constant
+ * (zero variance), not a rate: no half-life.
  */
-export const STRIKE_PAYOUT_FRACTION = fact(0.70, "fraction", {
-  kind: "stated",
-  by: "game owner",
-  at: "2026-08-15",
+export const STRIKE_PAYOUT_FRACTION = fact(0.9333, "fraction", {
+  kind: "measured",
+  source: "pnpm strike-payout: rounds 54618–68617, 12 strikes 2026-09-10→20, bonus/(bonus+reserve+epoch) = 93.33% on "
+    + "every strike and every leg (sd 0); reserve seeded into the next pot ($229–$374 per strike)",
+  at: "2026-09-21",
+  n: 12,
+  stderr: 0,
+  halfLifeDays: null,
+  recheck: "pnpm strike-payout",
 });
 
 /**
@@ -443,11 +455,12 @@ export const TOKEN_VAULT_CARRY_DAILY = fact(0.0024, "fraction of share value per
 export const STAKING_YIELD_DAILY = fact(0.00224, "fraction of staked value per day", {
   kind: "measured",
   source: "pnpm staking-yield: /staking/treasury total_reward_deposited 0.0851 BTC over 10.4 d on $297k staked "
-    + "(6,969 RUSH at $42.60, 221 stakers)",
+    + "(6,969 RUSH at $42.60, 221 stakers). LIFETIME average spanning two regimes: the buybacks leg that funds it "
+    + "went 50 → 108 bps at round 64176 (2026-09-17), so the forward rate is likely higher than this — a lower bound",
   at: "2026-09-21",
   n: 1,
   stderr: 0.0005,
-  halfLifeDays: 7,
+  halfLifeDays: 3,
   recheck: "pnpm staking-yield",
 });
 

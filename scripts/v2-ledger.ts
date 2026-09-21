@@ -137,11 +137,12 @@ console.log(`  ${"app's sats vault apr today".padEnd(52)} ${pad(appSats === null
 console.log(`  The carry is BTC/RUSH-denominated, costs the 10% exit fee to realise, and is a transfer from claimers that decays as they run out.`);
 
 console.log(`\n══ SENSITIVITY (net per $, expectation) — by token yield, since the mint is not keyed to spot ══`);
-console.log("  token yield    1 wallet, strike 0.70   21 wallets, strike 0.70   21 wallets, strike 0.95");
+const SF = STRIKE_PAYOUT_FRACTION.value;
+console.log(`  token yield    1 wallet, strike ${SF}   21 wallets, strike ${SF}   21 wallets, strike 1.0 (reserve recycled)`);
 for (const y of [0, 0.005, 0.01, liveYield ?? 0.0137, 0.02, 0.03]) {
-  const a = ledger({ price: 0, wallets: 1, strikeRecovery: 0.70, buybacksLeak: true, yieldOverride: y }).net;
-  const b = ledger({ price: 0, wallets: 21, strikeRecovery: 0.70, buybacksLeak: true, yieldOverride: y }).net;
-  const c = ledger({ price: 0, wallets: 21, strikeRecovery: 0.95, buybacksLeak: true, yieldOverride: y }).net;
+  const a = ledger({ price: 0, wallets: 1, strikeRecovery: SF, buybacksLeak: true, yieldOverride: y }).net;
+  const b = ledger({ price: 0, wallets: 21, strikeRecovery: SF, buybacksLeak: true, yieldOverride: y }).net;
+  const c = ledger({ price: 0, wallets: 21, strikeRecovery: 1.0, buybacksLeak: true, yieldOverride: y }).net;
   console.log(`  ${pad(pct(y, 2), 10)}     ${pad(pct(a), 20)}   ${pad(pct(b), 22)}   ${pad(pct(c), 22)}` + (y === liveYield ? "   ← live" : ""));
 }
 const be = (wallets: number, strike: number): number => {
@@ -149,7 +150,7 @@ const be = (wallets: number, strike: number): number => {
   for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (ledger({ price: 0, wallets, strikeRecovery: strike, buybacksLeak: true, yieldOverride: mid }).net < 0) lo = mid; else hi = mid; }
   return (lo + hi) / 2;
 };
-console.log(`\n  break-even token yield: 1 wallet ${pct(be(1, 0.7), 2)} · 21 wallets ${pct(be(21, 0.7), 2)} (strike 0.70) · ${pct(be(21, 0.95), 2)} (strike 0.95)`);
+console.log(`\n  break-even token yield: 1 wallet ${pct(be(1, SF), 2)} · 21 wallets ${pct(be(21, SF), 2)} (strike ${SF}) · ${pct(be(21, 1.0), 2)} (strike 1.0, reserve recycled)`);
 console.log(`  live yield ${liveYield === null ? "n/a" : pct(liveYield, 2)}; if the mint targets 2% at a lagging reference price, the yield converges to 2% as that price settles.`);
 // ── farm-and-sell as an arbitrage: what does it cost to mint one RUSH? ──────
 // The non-token legs of the ledger leave a toll per dollar of volume; dividing
@@ -160,11 +161,11 @@ if (prev && spot) {
   const SLIPPAGE = 0.01; // ASSUMED: pool fee + impact on a modest clip
   console.log(`\n══ FARM-AND-SELL: COST TO MINT ONE RUSH vs WHAT IT SELLS FOR ══`);
   console.log("  wallets   toll per $ (non-token legs)   cost to mint 1 RUSH   sells for (spot −10% −1%)   break-even spot");
-  for (const [w, strike] of [[1, 0.70], [21, 0.70], [21, 0.95]] as [number, number][]) {
+  for (const [w, strike] of [[1, SF], [21, SF], [21, 1.0]] as [number, number][]) {
     const toll = -ledger({ price: 0, wallets: w, strikeRecovery: strike, buybacksLeak: true, yieldOverride: 0 }).net;
     const cost = toll / rate;
     const realised = spot * (1 - (conf.vault_exit_fee_bps ?? 1000) / 1e4) * (1 - SLIPPAGE);
-    console.log(`  ${pad(`${w}${strike === 0.95 ? " (strike 0.95)" : ""}`, 15)}   ${pad(pct(toll), 12)}               ${pad(`$${cost.toFixed(2)}`, 10)}          ${pad(`$${realised.toFixed(2)}`, 12)}              ${pad(`$${(cost / ((1 - (conf.vault_exit_fee_bps ?? 1000) / 1e4) * (1 - SLIPPAGE))).toFixed(2)}`, 8)}`);
+    console.log(`  ${pad(`${w}${strike === 1.0 ? " (strike 1.0)" : ""}`, 15)}   ${pad(pct(toll), 12)}               ${pad(`$${cost.toFixed(2)}`, 10)}          ${pad(`$${realised.toFixed(2)}`, 12)}              ${pad(`$${(cost / ((1 - (conf.vault_exit_fee_bps ?? 1000) / 1e4) * (1 - SLIPPAGE))).toFixed(2)}`, 8)}`);
   }
   console.log(`  at ${(1000 * rate).toFixed(4)} RUSH per $1,000 (previous round). The market has to pay more than the mint cost,`);
   console.log(`  after the exit fee and slippage, for farming-to-sell to be an arbitrage rather than a bet.`);

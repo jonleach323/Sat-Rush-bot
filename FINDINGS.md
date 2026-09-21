@@ -1663,3 +1663,47 @@ Correction to the first version of this note (same day): the model rows
 had omitted the strike jackpot leg, which the orchestrator credits; with
 it the blanket row moved from $75 to $31 per RUSH and flipped. The ledger
 row always carried it.
+
+## E-v2-strike: the strike payout measured at 14/15, and the fee split moved on 09-17 (2026-09-21)
+
+Prompted by "what does strike at 0.95 mean". `STRIKE_PAYOUT_FRACTION` was
+the owner's STATED 0.70 ("always been 70/30"; V1, 2026-08-15), and the
+ledger bracketed it against 0.95 for "the reserve comes back". The V2
+rounds API exposes the split per strike round, so `pnpm strike-payout`
+(pages the rounds list with `before`) now measures it instead.
+
+```
+  rounds 54621…68620 (14,099 finished): 12 strikes → one per 1,175 rounds (modulus 1440)
+  every strike, every leg (USD, BTC, RUSH): bonus / (bonus + reserve) = 93.33% exactly, sd 0
+  reserve retained 6.67%, then SEEDED into the next pot ($229–$374 per strike)
+  conservation: bonuses paid (all legs) $91,363 vs strike fee collected $94,849 = 96.3%; the rest is the live pot
+```
+
+So the program pays 14/15 of the pot at trigger and recycles the rest: the
+long-run payout of the strike fee is ~100%, and the fraction only times
+it. The fact is now `measured` (n = 12, zero variance, no half-life,
+recheck `pnpm strike-payout`), the config default follows it, the toll
+test pins 0.9333, and the ledger's brackets are the measured value and
+1.0. The earlier unsourced 0.9333 default was, by accident, right for V2.
+
+**The fee split moved at round 64176 (2026-09-17 21:04 UTC)**, found by
+preflight's economics gate tripping on epoch_fee_bps 194 → 104 and
+bisected on the per-round fee fields: strike 208 → 240, epoch 194 → 104,
+buybacks 50 → 108, one_btc 48, protocol 100, layer unchanged at 600
+(every V2 round nets exactly 94% of gross). Consequences: the strike leg
+is worth more per round (2.24% of gross in steady state), the epoch pool
+per iteration will be ~46% smaller at equal volume (iteration 16's pool
+per ticket is so far holding — $0.0377 vs 15's $0.0315 — because the
+field shrank too; re-measure at close), and the buybacks leg that funds
+staking doubled, so `STAKING_YIELD_DAILY` (a lifetime average across both
+regimes) is now a lower bound with a 3-day half-life. The API config omits
+the buybacks leg; the scripts derive it as 600 minus the four published
+legs (it was hardcoded at 50). Preflight is re-baselined.
+
+**Buy vs mine, on the measured payout and the new split** (spot $42.95,
+board $98 mean): fresh single tile $158/RUSH (3.7× spot), single tile at
+the cap $104 (2.4×), 21-tile blanket at the cap $32 (0.74×); ledger 21
+wallets $36 (0.84×). The verdicts stand: buy for any single-tile play; a
+small blanket at the cap mines under spot, now with the strike leg
+measured rather than bracketed. Its remaining uncertainty is the hashrate
+credit (epoch ticket value under the halved epoch fee) and the mint rate.

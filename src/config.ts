@@ -9,7 +9,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
-import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS } from "./strategy/facts.js";
+import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS, STRIKE_PAYOUT_FRACTION } from "./strategy/facts.js";
 import { PROGRAM_ADDRESS } from "./adapter/idl.js";
 
 const emptyToUndef = (v: unknown) =>
@@ -208,16 +208,16 @@ const schema = z
      * and understating a jackpot is the safe direction when it feeds Kelly. */
     /** Fraction of the Sat Strike pool that reaches the winning tile on trigger.
      *
-     * 0.70, stated by the operator: "It's always been 70/30, the only thing we
-     * have tweaked is what we do with the 30" (rolling reserve + straight
-     * rollover; it used to send 10 into epoch). The 0.9333 this defaulted to
-     * had no traceable source, and the project's own EV reference states the
-     * strike pays the FULL pot — a third, also wrong, figure. Overstating it
-     * inflates the strike leg of every round's EV, so the deployed program and
-     * the operator win over any note. */
+     * MEASURED under V2 (`pnpm strike-payout`, 12 strikes, zero variance):
+     * 14/15 = 0.9333 on every leg, the 6.67% reserve seeded into the next
+     * pot. The operator's V1 statement was "always been 70/30, the only thing
+     * we have tweaked is what we do with the 30" (rolling reserve + rollover),
+     * and an earlier unsourced default happened to be 0.9333 too; the deployed
+     * program wins over both. Overstating it inflates the strike leg of every
+     * round's EV, so the default is the measured value, never 1.0. */
     STRIKE_PAYOUT_FRACTION: z.preprocess(
       emptyToUndef,
-      z.coerce.number().gt(0).max(1).default(0.70),
+      z.coerce.number().gt(0).max(1).default(STRIKE_PAYOUT_FRACTION.value),
     ),
     /** Kill switch: if this file exists, all sending stops immediately. */
     KILL_SWITCH_FILE: z.preprocess(emptyToUndef, z.string().default("./KILL")),

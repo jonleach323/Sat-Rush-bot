@@ -15,7 +15,7 @@
 import { REWARD_MAX_STREAK } from "@satrush/client";
 import { evOfAllocationV2, v2EconomicsFromConfig } from "../src/strategy/ev-v2.js";
 import { TILES_COUNT } from "../src/strategy/ev.js";
-import { EPOCH_DEDUP_UPLIFT, RUSH_MINT_PER_USD, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
+import { EPOCH_DEDUP_UPLIFT, RUSH_MINT_PER_USD, V2_DEPLOY_FEE_LAYER_BPS, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "../src/strategy/facts.js";
 import { EPOCH_EQUAL_CURVE_BPS, expectedWinningsUsd } from "../src/strategy/vault.js";
 import { usdToBase } from "../src/units.js";
 
@@ -29,7 +29,13 @@ interface Iter { id: number; pool_combined_usd_amount: number | null; total_tick
 const [board, conf, hist] = await Promise.all([get<Board>("board"), get<Conf>("config"), get<Iter[]>("epoch/history?limit=3")]);
 const closed = hist.find((h) => h.ended_at && h.pool_combined_usd_amount !== null)!;
 const gross = Number(board.previous_round.total_gross_deployed_usd) / 1e6;
-const econ = v2EconomicsFromConfig({ ...conf, buybacks_fee_bps: 50 }, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
+// The API config omits the buybacks leg; the layer is a fixed 600 bps on the
+// tape (every V2 round: net = 94% of gross), so the leg is the remainder. It
+// was 50 bps until round 64175 and 108 bps from 64176 (2026-09-17 21:04 UTC,
+// with strike 208→240 and epoch 194→104) — pnpm strike-payout / FINDINGS.
+const buybacksBps = V2_DEPLOY_FEE_LAYER_BPS.value - (conf.strike_fee_bps + conf.epoch_fee_bps + conf.one_btc_fee_bps + conf.protocol_fee_bps);
+if (buybacksBps < 0) throw new Error(`fee legs exceed the ${V2_DEPLOY_FEE_LAYER_BPS.value} bps layer: re-measure V2_DEPLOY_FEE_LAYER_BPS`);
+const econ = v2EconomicsFromConfig({ ...conf, buybacks_fee_bps: buybacksBps }, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
 const tokenYield = RUSH_MINT_PER_USD.value * board.prices.token;
 const pool = closed.pool_combined_usd_amount as number;
 const field = Number(closed.total_tickets);

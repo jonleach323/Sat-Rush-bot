@@ -157,7 +157,8 @@ it is how deployment rent and winnings come back.
   unchanged selector through the `EvModel` swap point in `ev.ts`); the numbers
   are `pnpm v2-strategy`. Sizing is on the 11% toll at risk, not the stake.
 - V2 IS LIVE (2026-09-11). FINDINGS.md § E-v2-live verified the model to the cent:
-  fee legs 208/194/48/100/50 bps, 89% losing-tile refund, swap = 5%·V + 89%·W_win,
+  fee legs 208/194/48/100/50 bps (moved to 240/104/48/100/108 at round 64176,
+  2026-09-17; layer still 600), 89% losing-tile refund, swap = 5%·V + 89%·W_win,
   RUSH legs pro-rata by stake, hashrate on gross at the cap. The mint program
   (`sAtmiNt6…`) has no IDL and mints 1 RUSH per ~$3,600 (1.38% at spot), not the
   stated 1 per $500 — `RUSH_MINT_USD_YIELD` has a one-day half-life for that reason.

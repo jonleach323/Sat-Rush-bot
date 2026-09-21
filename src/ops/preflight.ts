@@ -41,8 +41,12 @@ export interface PreflightReport {
  * from this field; the gate only detects the owner changing the config.
  */
 export const MEASURED_ECONOMICS = {
-  strike_fee_bps: 208,
-  epoch_fee_bps: 194,
+  // Re-baselined 2026-09-21: the owner moved the split at round 64176
+  // (2026-09-17 21:04 UTC) — strike 208→240, epoch 194→104, buybacks 50→108,
+  // layer unchanged at 600 (pnpm strike-payout; FINDINGS § E-v2-strike).
+  strike_fee_bps: 240,
+  epoch_fee_bps: 104,
+  buybacks_fee_bps: 108,
   one_btc_fee_bps: 48,
   sats_vault_round_fee_bps: 1200,
   vault_exit_fee_bps: 1000,
