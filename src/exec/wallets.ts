@@ -222,7 +222,15 @@ export class WalletSet {
    * keeps its last balances (a flaky RPC must not disable the fleet); a
    * missing USDC ATA reads as 0, which `eligible()` then excludes.
    */
-  async refreshBalances(connection: Connection, usdMint: PublicKey): Promise<void> {
+  /**
+   * Re-read every wallet's SOL and USDC. A wallet whose read fails keeps its
+   * last values (never zeroed: a transient RPC error must not read as an
+   * empty wallet — the treasury would top it up again and the drift
+   * tripwire would see a drain). Only a genuinely missing ATA reads as 0.
+   * Returns true when every wallet was read fresh.
+   */
+  async refreshBalances(connection: Connection, usdMint: PublicKey): Promise<boolean> {
+    let allFresh = true;
     await Promise.all(
       this.wallets.map(async (w) => {
         try {
@@ -231,16 +239,20 @@ export class WalletSet {
             connection.getBalance(w.keypair.publicKey, "processed"),
             connection.getTokenAccountBalance(ata, "processed").then(
               (b) => BigInt(b.value.amount),
-              () => 0n, // no ATA yet
+              (err: unknown) => {
+                if (/could not find account|Invalid param/i.test(String(err))) return 0n; // no ATA yet
+                throw err;
+              },
             ),
           ]);
           w.lamports = lamports;
           w.usdcBase = usdc;
         } catch {
-          /* hold last values */
+          allFresh = false; // hold last values
         }
       }),
     );
+    return allFresh;
   }
 
   /** Aggregate balances, for risk reporting. */

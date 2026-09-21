@@ -2060,19 +2060,21 @@ export class Orchestrator {
   }
 
   /**
-   * Coarse wallet-drift tripwire: halts if on-chain USDC has left the wallet
-   * by MORE than everything we have deployed since the baseline (plus a
-   * tolerance) — i.e. an unexplained drain, not fee/BTC-leg noise. Baseline
-   * captured on first successful read.
+   * Coarse wallet-drift tripwire: halts if on-chain USDC has left the FLEET
+   * (every wallet's ATA summed) by MORE than everything we have deployed
+   * since the baseline (plus a tolerance) — i.e. an unexplained drain, not
+   * fee/BTC-leg noise. The aggregate is the right quantity: treasury top-ups
+   * and sweeps only move money between our own wallets and net to zero
+   * across the fleet, while a drain from ANY wallet still shows. Baseline
+   * captured on the first tick where every wallet read fresh.
    */
   private async checkWalletDrift(): Promise<void> {
     if (this.cfg.EXECUTION_MODE === "dry") return;
     let actual: bigint;
     try {
-      const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
-      const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
-      const bal = await this.connection.getTokenAccountBalance(ata, "processed");
-      actual = BigInt(bal.value.amount);
+      const fresh = await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      if (!fresh) return; // a held stale balance would read as a drop — try next tick
+      actual = this.wallets.totals().usdcBase;
     } catch {
       return; // transient — try next tick
     }
@@ -2088,8 +2090,8 @@ export class Orchestrator {
       this.usdcBaselineDate = today;
       return;
     }
-    // Worst legitimate case: we lose everything deployed today (same UTC day as
-    // the baseline above).
+    // Worst legitimate case: we lose everything the fleet deployed today (same
+    // UTC day as the baseline above).
     const res = reconcileWalletDrift({
       expectedDeltaBase: -this.pnl.deployedToday(),
       actualDeltaBase: actual - this.usdcBaselineBase,

@@ -194,16 +194,39 @@ describe("WalletSet.refreshBalances", () => {
         throw new Error("could not find account");
       },
     } as unknown as Connection;
-    await set.refreshBalances(connection, ixCtx.usdMint);
+    expect(await set.refreshBalances(connection, ixCtx.usdMint)).toBe(true);
     expect(w1!.usdcBase).toBe(usdToBase(12));
     expect(w1!.lamports).toBe(50_000_000);
     expect(w2!.usdcBase).toBe(0n);
     fail = true;
-    await set.refreshBalances(connection, ixCtx.usdMint);
+    expect(await set.refreshBalances(connection, ixCtx.usdMint)).toBe(false);
     expect(w1!.usdcBase).toBe(usdToBase(12)); // held
     expect(set.eligible({ minDeployBase: usdToBase(1), minLamports: 5_000_000 }).map((w) => w.keypair.publicKey)).toEqual([
       w1!.keypair.publicKey,
     ]);
+  });
+});
+
+describe("WalletSet.refreshBalances — a transient token-balance error is not an empty wallet", () => {
+  it("holds the last USDC value (never zeroes it) and reports the read as not fresh", async () => {
+    const set = makeSet(1, 0n);
+    const [w1] = set.all();
+    let tokenErr: string | null = null;
+    const connection = {
+      getBalance: async () => 10_000_000,
+      getTokenAccountBalance: async () => {
+        if (tokenErr) throw new Error(tokenErr);
+        return { value: { amount: usdToBase(20).toString() } };
+      },
+    } as unknown as Connection;
+    expect(await set.refreshBalances(connection, ixCtx.usdMint)).toBe(true);
+    expect(w1!.usdcBase).toBe(usdToBase(20));
+    tokenErr = "429 Too Many Requests";
+    expect(await set.refreshBalances(connection, ixCtx.usdMint)).toBe(false);
+    expect(w1!.usdcBase).toBe(usdToBase(20)); // a $20 top-up must not vanish into a re-top-up or a drift halt
+    tokenErr = "failed to get token account balance: Invalid param: could not find account";
+    expect(await set.refreshBalances(connection, ixCtx.usdMint)).toBe(true);
+    expect(w1!.usdcBase).toBe(0n); // a genuinely missing ATA is 0
   });
 });
 
