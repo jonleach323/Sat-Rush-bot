@@ -105,7 +105,7 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { STREAK_GRACE_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
 import { TokenFeed } from "./ingest/token-feed.js";
 import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
@@ -1333,29 +1333,32 @@ export class Orchestrator {
   /**
    * Current post-Sat-Strike hashrate promo multiplier (1 outside the window).
    *
-   * Measured in ROUNDS off the board's persistent strike_last_trigger_round_id
-   * where possible, so the window survives a restart; the observed-event clock
-   * is only the fallback. The configured window is in minutes, converted using
-   * the board's own round_duration (150 slots ≈ 60s on mainnet) rather than an
-   * assumed round length.
+   * The program's rule (SDK `STRIKE_BOOST_ROUNDS` = 240): `rotate_round` stamps
+   * `Round.is_hashrate_boosted` for the 240 rounds after a strike, and settle
+   * applies `STRIKE_BOOST_HASHRATE_MULTIPLIER` (2). Measured in ROUNDS off the
+   * board's persistent strike_last_trigger_round_id, so the window survives a
+   * restart; the observed-event clock (STRIKE_BONUS_WINDOW_MINUTES) is only the
+   * fallback before the board is read. The old minutes-to-rounds conversion
+   * gave 156 rounds at a 92 s round — a third of the window under-credited.
    */
   private strikeBonusMultiplier(): number {
     const board = this.state.board;
     let roundsSinceStrike: number | null = null;
     let windowRounds: number | null = null;
+    let windowMs = this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000;
     if (board) {
       const lastTrigger = board.strike_last_trigger_round_id;
       const duration = board.round_duration;
       if (lastTrigger > 0 && duration > 0) {
         roundsSinceStrike = board.round_id - lastTrigger;
-        const roundSeconds = duration * SLOT_SECONDS;
-        windowRounds = Math.round((this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60) / roundSeconds);
+        windowRounds = STRIKE_BOOST_WINDOW_ROUNDS.value;
+        windowMs = windowRounds * duration * SLOT_SECONDS * 1000;
       }
     }
     return strikeBonusMultiplier({
       lastStrikeAtMs: this.lastStrikeAtMs,
       nowMs: Date.now(),
-      windowMs: this.cfg.STRIKE_BONUS_WINDOW_MINUTES * 60_000,
+      windowMs,
       multiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER,
       roundsSinceStrike,
       windowRounds,
@@ -2661,7 +2664,7 @@ export class Orchestrator {
         `⚡ Sat Strike round ${reveal.round_id} — paid $${paid.toFixed(2)} of a ` +
           `$${poolBefore.toFixed(2)} pool (${(poolBefore > 0 ? paid / poolBefore : 0).toFixed(3)}× ` +
           `vs ${this.cfg.STRIKE_PAYOUT_FRACTION} configured) · ` +
-          `${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate for ${this.cfg.STRIKE_BONUS_WINDOW_MINUTES}min`,
+          `${this.cfg.STRIKE_HASHRATE_MULTIPLIER}× hashrate for ${STRIKE_BOOST_WINDOW_ROUNDS.value} rounds`,
       );
     }
     this.db.recordRound({

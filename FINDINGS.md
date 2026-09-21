@@ -1718,3 +1718,48 @@ unless iteration 16 closes with a pool per ticket near 15's — its live
 $0.0377 vs 15's $0.0315 says the field is shrinking faster than the fee
 did, which is the one thing that would keep the blanket under spot.
 Re-run at the close of iteration 16.
+
+## E-v2-map: every instruction and every number, audited in one pass — and four defects it found (2026-09-21)
+
+Prompted by "figure out how every single function and every single number
+works, then give a definitive answer". The result is `SAT-RUSH-MODEL.md`
+(the map) and `pnpm ev-map` (the live EV table). Sources walked: the 61
+instructions of the regenerated V2 IDL, the SDK's constants and formulas
+(`hashrateReward`, `nextStreakMultiplier`, `satsToBtc`), every top-level
+on-chain account decoded live, the app's rule text (About / Stake /
+Referrals chunks), the API, and FINDINGS. What the audit changed:
+
+1. **Boost window was 156 rounds, should be 240.** The program stamps
+   `Round.is_hashrate_boosted` for `STRIKE_BOOST_ROUNDS` = 240 rounds after
+   a strike (2× hashrate); the orchestrator converted a 240-MINUTE config to
+   rounds (156 at 92 s), under-crediting a third of every window. Fixed to
+   the SDK constant. This window is the one positive-EV deploy in the game.
+2. **Strike modulus is 1097, not 1440.** On-chain `strike_trigger_modulus`
+   (the SDK doc says "seeded at 1_440"); 12 V2 strikes came one per 1,175
+   rounds. Scripts now read the chain (`scripts/lib/onchain.ts`); the
+   orchestrator always had. Boost rounds are therefore 22% of all rounds.
+3. **The mint rule is known, and it is a dollar cap.** App text: rate =
+   min(tranche rate, $20 per $1k ÷ max(30 d TWAP, 1 d TWAP)); tranche 1 is
+   515,813 RUSH at 1/$500, then 75%/75% per tranche. The TWAP term binds
+   above $10, so the RUSH leg is worth ≤ 2% of gross in dollars at any
+   price (live 1.83%, implied TWAP $46.4). Consequence: a mined RUSH's cost
+   scales with spot, "mining beats buying at price X" is not a thing, and
+   the only test is toll < ~1.85% of gross. Facts added as `stated`.
+4. **The staking yield is a volume yield.** App text: 29% of the 1.08%
+   buybacks leg buys BTC for stakers. Forward = 31.3 bps × daily volume ÷
+   staked = 0.128%/day at $130k/day (lifetime 0.208% ran at higher volume).
+   `STAKING_YIELD_DAILY` is a lower bound with a 3-day half-life.
+
+Also confirmed: hashrate on GROSS dollars (`PublicDeployment.deployed_usd_
+amount` is gross), the 35% deferred hashrate releases only via `claim_sats`
+pro rata, grubstake plays earn no hashrate and their USD returns to the
+grubstake, affiliate points are 10 bps of referred volume 1:1 to grubstake,
+`claim_usd` is fee-free, staking has no lock/cooldown/fee, the epoch
+iteration is 2,318,400 slots (10.73 d; the app's "7 days" is stale), the
+1-BTC vault is at 12.74% with 231,393 tickets, and a 1-BTC ticket is worth
+1.6–3.5× an epoch ticket per unit of hashrate.
+
+The verdict (SAT-RUSH-MODEL.md § 0): the board is negative everywhere except
+a 21-tile blanket at the streak cap inside boost windows (+0.27%…+3.45% per
+$ per round, 22% of rounds); hold every share; stake bought RUSH for the
+volume yield; spend hashrate on 1-BTC tickets; never single tiles.

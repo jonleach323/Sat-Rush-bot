@@ -57,7 +57,8 @@
     "streak-ramp": "tsx scripts/streak-ramp.ts",
     "hold-vs-stake": "tsx scripts/hold-vs-stake.ts",
     "buy-vs-mine": "tsx scripts/buy-vs-mine.ts",
-    "strike-payout": "tsx scripts/strike-payout.ts"
+    "strike-payout": "tsx scripts/strike-payout.ts",
+    "ev-map": "tsx scripts/ev-map.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

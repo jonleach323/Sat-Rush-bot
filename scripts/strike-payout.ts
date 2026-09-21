@@ -8,8 +8,10 @@
  * `strike_reserve_*` (retained) and `strike_seed_from_reserve_*` (what the
  * retained reserve seeds into the NEXT pot). Pages the rounds list back with
  * `before`, keeps every `is_sat_strike` round, and prints per-leg payout
- * fractions, the seeding, and the strike interval against the 1-in-1440 modulus.
+ * fractions, the seeding, and the strike interval against the on-chain modulus.
  */
+import { readSatrushConfig } from "./lib/onchain.js";
+import { STRIKE_TRIGGER_MODULUS } from "../src/strategy/facts.js";
 const BASE = process.env["SATRUSH_API"] ?? "https://api.satrush.io/api/v1";
 const BACK = Number(process.argv[2] ?? 14000);
 const get = async <T>(p: string): Promise<T> =>
@@ -17,7 +19,9 @@ const get = async <T>(p: string): Promise<T> =>
 interface Row { id: number; state: string; is_sat_strike: boolean | null; total_gross_deployed_usd: string; strike_fee_usd: string;
   strike_bonus_usd: string; strike_bonus_btc: string; strike_bonus_token: string; strike_reserve_usd: string; strike_reserve_btc: string; strike_reserve_token: string;
   strike_seed_from_reserve_usd: string; strike_seed_from_reserve_btc: string; strike_seed_from_reserve_token: string; strike_epoch_usd: string; strike_epoch_btc: string; strike_epoch_token: string; strike_bonus_combined_usd: number | null; started_at: string | null }
-const [first, conf] = await Promise.all([get<Row[]>("rounds?limit=1"), get<{ strike_fee_bps: number }>("config")]);
+const [first, conf, chain] = await Promise.all([get<Row[]>("rounds?limit=1"), get<{ strike_fee_bps: number }>("config"), readSatrushConfig()]);
+const modulus = chain?.strike_trigger_modulus ?? STRIKE_TRIGGER_MODULUS.value;
+if (!chain) console.log(`(on-chain config unreadable — modulus from the ${STRIKE_TRIGGER_MODULUS.value} snapshot)`);
 const head = first[0]!.id;
 const strikes: Row[] = [];
 let feeUsd = 0, rounds = 0, before = head + 1;
@@ -34,7 +38,7 @@ while (before > stop) {
 }
 const n = (s: string, d: number) => Number(s) / 10 ** d;
 const pct = (x: number, d = 1) => `${(100 * x).toFixed(d)}%`;
-console.log(`rounds ${stop + 1}…${head} (${rounds} finished): ${strikes.length} strikes → one per ${(rounds / Math.max(1, strikes.length)).toFixed(0)} rounds (modulus 1440); strike fee collected $${feeUsd.toFixed(0)} (${conf.strike_fee_bps} bps × gross)`);
+console.log(`rounds ${stop + 1}…${head} (${rounds} finished): ${strikes.length} strikes → one per ${(rounds / Math.max(1, strikes.length)).toFixed(0)} rounds (on-chain modulus ${modulus} → expected one per ${modulus}); strike fee collected $${feeUsd.toFixed(0)} (${conf.strike_fee_bps} bps × gross)`);
 console.log(`\n  round    gross    bonus USD   reserve   seeded next   payout USD   payout BTC   payout RUSH   epoch leg   date`);
 const fr: number[] = [];
 let bonusUsdTotal = 0, bonusCombinedTotal = 0;

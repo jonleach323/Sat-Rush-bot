@@ -499,13 +499,70 @@ export const V2_AUTOMATION_GROSS_SHARE = fact(0.933, "fraction of round gross", 
  * buybacks_fee_usd = 50 bps of gross exactly. Half buys and burns RUSH, half
  * funds staking rewards (BUYBACKS_TO_TOKEN_BPS / _TO_STAKING_BPS, unexported).
  */
-export const V2_BUYBACKS_FEE_BPS = fact(50, "bps of gross", {
+export const V2_BUYBACKS_FEE_BPS = fact(108, "bps of gross", {
   kind: "measured",
-  source: "round 55437 buybacks_fee_usd / total_gross_deployed_usd; rotate tx 3N5JbUniM9aC… treasury delta",
-  at: "2026-09-11",
-  n: 2,
+  source: "on-chain SatrushConfig.buybacks_fee_bps = 108 and round 68602 buybacks_fee_usd / gross = 108.0 bps; it was 50 "
+    + "(round 55437, rotate tx 3N5JbUniM9aC…) until round 64175 and 108 from 64176 (2026-09-17 21:04 UTC), when the owner "
+    + "moved strike 208→240 and epoch 194→104 too. The API /config omits this leg: scripts read the chain (scripts/lib/onchain.ts)",
+  at: "2026-09-21",
+  n: 3,
   halfLifeDays: null,
-  recheck: "curl api.satrush.io/api/v1/rounds/<id> → buybacks_fee_usd",
+  recheck: "curl api.satrush.io/api/v1/rounds/<id> → buybacks_fee_usd; pnpm preflight (economics gate)",
+});
+
+/**
+ * The buybacks leg's split: the app's own rule text ("29% of the 1.08%
+ * buybacks and staking fee buys BTC, and it is distributed to stakers in
+ * proportion to their share of the pool"); the other 71% buys RUSH for
+ * `buyback_burn_token`. The SDK names the constants (`BUYBACKS_TO_STAKING_BPS`,
+ * `BUYBACKS_TO_TOKEN_BPS`) without exporting them; the treasury's two
+ * counters (`staking_buybacks_usd_amount`, `token_buybacks_usd_amount`) are
+ * the on-chain check. The staking yield is therefore 29% × 108 bps × daily
+ * volume ÷ staked value — a function of VOLUME, not a rate.
+ */
+export const BUYBACKS_TO_STAKING_BPS = fact(2900, "bps of the buybacks leg", {
+  kind: "stated",
+  by: "satrush.io About page (2026-09-21): '29% of the 1.08% buybacks and staking fee buys BTC … distributed to stakers'",
+  at: "2026-09-21",
+});
+
+/**
+ * The mint program's rule, from the app's About page (no IDL exists):
+ *   effective rate = min(tranche rate, $20 per $1k deployed ÷ max(30-day TWAP, 1-day TWAP))
+ * Tranche 1 mints 1 RUSH per $500 and holds 515,813 RUSH; each later tranche
+ * holds 75% of the previous tranche's tokens at 75% of its rate. The TWAP
+ * term is the binding one at any price above $10 (tranche rate 2 RUSH/$1k vs
+ * cap 20/price): so the RUSH leg is worth AT MOST 2% of gross volume in
+ * dollars, at the TWAP price, whatever RUSH trades at. Measured live rate
+ * 0.4308 RUSH/$1k at $42.95 spot = 1.85% (implied TWAP $46.4). This is why
+ * "cost per mined RUSH" scales with spot and mining never crosses buying
+ * on price alone: mining beats buying iff the non-token toll < 2% × spot/TWAP.
+ */
+export const RUSH_MINT_USD_CAP = fact(0.02, "USD of RUSH per USD of gross volume", {
+  kind: "stated",
+  by: "satrush.io About page (2026-09-21): 'never more than $20 of RUSH per $1,000 deployed at the higher of the two averages'",
+  at: "2026-09-21",
+});
+export const RUSH_MINT_TRANCHE_1_TOKENS = fact(515_813, "RUSH", {
+  kind: "stated",
+  by: "satrush.io About page (2026-09-21): first tranche holds 515,813 RUSH at 1 per $500",
+  at: "2026-09-21",
+});
+export const RUSH_MINT_TRANCHE_DECAY = fact(0.75, "fraction (tokens and rate per tranche)", {
+  kind: "stated",
+  by: "satrush.io About page (2026-09-21): 'each tranche after it holds 75% of the previous tranche's tokens and mints them at 75% of its rate'",
+  at: "2026-09-21",
+});
+
+/**
+ * Sat Strike odds: fires when `rng % strike_trigger_modulus == 0`. The SDK
+ * doc says "seeded at 1_440"; the deployed config reads 1097 (2026-09-21), and
+ * the 12 V2 strikes came one per 1,175 rounds. The orchestrator reads it from
+ * the on-chain config at use time; this snapshot is for scripts and docs.
+ */
+export const STRIKE_TRIGGER_MODULUS = fact(1097, "rounds per expected strike", {
+  kind: "derived",
+  from: "SatrushConfig.strike_trigger_modulus (on-chain, read 2026-09-21; scripts/lib/onchain.ts)",
 });
 
 /**
@@ -576,6 +633,11 @@ export const ALL_FACTS: Readonly<Record<string, Fact<number>>> = Object.freeze({
   SATS_VAULT_CARRY_DAILY,
   TOKEN_VAULT_CARRY_DAILY,
   STAKING_YIELD_DAILY,
+  BUYBACKS_TO_STAKING_BPS,
+  RUSH_MINT_USD_CAP,
+  RUSH_MINT_TRANCHE_1_TOKENS,
+  RUSH_MINT_TRANCHE_DECAY,
+  STRIKE_TRIGGER_MODULUS,
   V2_BOARD_FINAL_BEFORE_CUTOFF_S,
   V2_AUTOMATION_GROSS_SHARE,
   V2_BUYBACKS_FEE_BPS,

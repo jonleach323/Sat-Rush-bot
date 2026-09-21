@@ -378,6 +378,9 @@ operationally — everything else in this runbook still applies:
   `pnpm buy-vs-mine` prices mining RUSH against buying it on Jupiter and
   staking (buy for any single-tile play; a small blanket at the streak cap
   mines it under spot, at break-even-to-+1% per round).
+- **The map.** `SAT-RUSH-MODEL.md` is the complete model; `pnpm ev-map`
+  prints every action's EV from live data. Start there before changing any
+  economic setting.
 - **The flip signal.** The selector prices the wallet's CURRENT streak, so
   a −EV board at streak 1 keeps the bot skipping even when a blanket at the
   cap would pay. Every skip log carries `blanketEvBpsAtStreakCap`; when it

@@ -211,6 +211,14 @@ it is how deployment rent and winnings come back.
   legs from grubstake, exchanges affiliate points, and cross-checks the RUSH
   price against Jupiter. Ledger: −0.28%/$ before carry with 21 wallets.
 
+- **The complete map is `SAT-RUSH-MODEL.md`** (every instruction, every
+  number with its source, every action priced) and `pnpm ev-map` prints the
+  live EV table. Audit of 2026-09-21 (FINDINGS § E-v2-map): boost window is
+  240 ROUNDS (was mis-converted from minutes), strike modulus is 1097 on
+  chain (scripts read it), the mint is capped at $20 of RUSH per $1k at the
+  TWAP (so the RUSH leg is ≤ 2% of gross in dollars at any price), and the
+  staking yield is 29% of the buybacks leg ÷ staked — a volume yield.
+
 ## Roadmap notes from the owner
 - The `public` naming exists because private (Zinc-style) deployments are planned
   later, possibly transitioning to full-private. Launch is public-only. Therefore:
