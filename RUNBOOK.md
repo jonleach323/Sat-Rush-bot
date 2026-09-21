@@ -293,6 +293,15 @@ config/board/round/vaults/Miners over RPC on every reconnect regardless.
 Fires are gated on a live stream throughout, so a drop costs rounds, never
 a mis-priced deploy.
 
+**Rule out the bot's own event loop first.** Every model computation runs
+synchronously inside it; a slow one is indistinguishable from a silent
+stream (no data events are handled until it ends, then the watchdog reports
+the whole block as silence). The 2026-09-21 "100 s silences" on a healthy
+LaserStream were exactly that: the treasury planner's uncapped selector run
+walked toward $1M one dollar at a time, every 60 s and on every dashboard
+poll. `pnpm grpc-probe` in a separate process is the discriminator: a clean
+probe while the bot reports silence means the bot, not the stream.
+
 The journal line on a drop names how the stream lived:
 `ingest disconnected … (stream lived 1830s, 4571 slots, last slot N,
 reconnects K)`. One drop an hour is a provider/LB rotation and costs

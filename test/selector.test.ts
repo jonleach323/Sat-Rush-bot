@@ -363,3 +363,50 @@ describe("blanket seed (coverage non-convexity)", () => {
     expect(sel).toMatchObject({ kind: "skip", reason: "no_positive_marginal_ev" });
   });
 });
+
+describe("coarse-to-fine fill: uncapped runs are cheap and land where the $1 greedy would", () => {
+  const flat = (evPerBase: number) => ({
+    predictedStakes: zeroStakes(),
+    ev: (alloc: bigint[]) => Number(alloc.reduce((a, b) => a + b, 0n)) * evPerBase,
+    marginal: (_a: bigint[], _t: number, inc: bigint) => Number(inc) * evPerBase,
+    returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(evPerBase * Number(alloc.reduce((a, b) => a + b, 0n))),
+  });
+  const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(5) };
+
+  it("a marginal that never turns negative fills a $1M cap in milliseconds, not a million steps", () => {
+    const t0 = performance.now();
+    const sel = selectAllocation(flat(0.01), { ...base, maxPerRound: usdToBase(1_000_000) });
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.totalGross).toBe(usdToBase(1_000_000));
+    expect(sel.capBound).toBe(true);
+  });
+
+  it("stops within one quantum of the concave optimum on every tile (no overshoot from big steps)", () => {
+    // Per-tile concave: the k-th dollar on a tile is worth (40 − k) cents, so
+    // the optimum is exactly $39 per tile; the $1 greedy stops there too.
+    const perTile = (a: bigint) => { const n = Number(a) / 1e6; return (40 * n - (n * (n + 1)) / 2) * 1e4; };
+    const model = {
+      predictedStakes: zeroStakes(),
+      ev: (alloc: bigint[]) => alloc.reduce((s, a) => s + perTile(a), 0),
+      marginal: (alloc: bigint[], t: number, inc: bigint) => perTile((alloc[t] ?? 0n) + inc) - perTile(alloc[t] ?? 0n),
+      returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(alloc.reduce((s, a) => s + perTile(a), 0)),
+    };
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(100_000) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    for (const a of sel.allocation) expect(a).toBe(usdToBase(39));
+    expect(sel.capBound).toBe(false);
+  });
+
+  it("excludeTiles keeps those tiles empty even when they are the best", () => {
+    const sel = selectAllocation(flat(0.01), { ...base, maxPerRound: usdToBase(50), excludeTiles: [0, 1, 2] });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.allocation[0]).toBe(0n);
+    expect(sel.allocation[1]).toBe(0n);
+    expect(sel.allocation[2]).toBe(0n);
+    expect(sel.totalGross).toBe(usdToBase(50));
+  });
+});

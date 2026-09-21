@@ -2790,6 +2790,9 @@ export class Orchestrator {
    * in flight), with headroom, held for FLEET_FLOAT_ROUNDS. Floored at the
    * configured minimum; capped by what a round can ask (MAX_PER_ROUND ÷ tiles).
    */
+  /** The uncapped "want" is priced once per round; /fleet, the status API and the treasury share it. */
+  private floatWantMemo: { roundId: number | null; peakLegBase: bigint } | null = null;
+
   private fleetFloatTargetBase(): bigint {
     let observed = 0n;
     try {
@@ -2802,12 +2805,19 @@ export class Orchestrator {
     for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
     // Forward-looking: what the selector would deploy per tile RIGHT NOW with
     // no cash cap at all, so the float is ready before the spike, not after.
-    try {
-      const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
-      for (const sel of want) for (const a of sel.allocation) if (a > observed) observed = a;
-    } catch {
-      /* model not ready */
+    // Priced once per round (synchronous model work inside the event loop;
+    // the status API polls this every few seconds).
+    if (!this.floatWantMemo || this.floatWantMemo.roundId !== this.roundId) {
+      let peak = 0n;
+      try {
+        const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
+        for (const sel of want) for (const a of sel.allocation) if (a > peak) peak = a;
+      } catch {
+        /* model not ready */
+      }
+      this.floatWantMemo = { roundId: this.roundId, peakLegBase: peak };
     }
+    if (this.floatWantMemo.peakLegBase > observed) observed = this.floatWantMemo.peakLegBase;
     const tiles = BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
     return dynamicFloatBase({
       observedPeakLegBase: observed,
