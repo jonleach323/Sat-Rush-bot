@@ -811,24 +811,55 @@ export class Orchestrator {
       return;
     }
     const wait = Math.max(0, this.lastRefreshStartMs + REFRESH_MIN_INTERVAL_MS - Date.now());
-    const run = () => {
+    if (wait === 0) void this.runRefresh(trigger, true);
+    else this.refreshTimer = setTimeout(() => void this.runRefresh(trigger, true), wait);
+  }
+
+  /**
+   * The ARM edge: price the round on the FINAL board and the ramp signal of
+   * this very tick, then fire. The candidates on hand were built at the last
+   * occupancy update — with the forecast of that moment and before
+   * evDiagnostics() could floor the presence credit — so a round the
+   * diagnostics call positive at fire time could still carry a stale "no
+   * candidate" (round 68883: blanket +73 bps, selector empty).
+   */
+  private async armAndFire(): Promise<void> {
+    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
+    await this.refreshNow("armed");
+    await this.tryFire();
+  }
+
+  private refreshPromise: Promise<void> | null = null;
+
+  /** Run one refresh now, after any in-flight one; cancels a pending coalesced timer (this refresh supersedes it). */
+  private async refreshNow(trigger: string): Promise<void> {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
-      this.refreshInFlight = true;
-      this.lastRefreshStartMs = Date.now();
-      void this.refreshCandidates(trigger)
-        .then(() => {
-          if (this.botState === "ARMED") void this.tryFire();
-        })
-        .finally(() => {
-          this.refreshInFlight = false;
-          if (this.refreshQueued) {
-            this.refreshQueued = false;
-            this.requestRefresh(`${trigger}_trailing`);
-          }
-        });
-    };
-    if (wait === 0) run();
-    else this.refreshTimer = setTimeout(run, wait);
+    }
+    this.refreshQueued = false;
+    while (this.refreshPromise) await this.refreshPromise;
+    await this.runRefresh(trigger, false);
+  }
+
+  private runRefresh(trigger: string, fireAfter: boolean): Promise<void> {
+    this.refreshTimer = null;
+    this.refreshInFlight = true;
+    this.lastRefreshStartMs = Date.now();
+    const p = this.refreshCandidates(trigger)
+      .then(() => {
+        if (fireAfter && this.botState === "ARMED") void this.tryFire();
+      })
+      .finally(() => {
+        this.refreshInFlight = false;
+        this.refreshPromise = null;
+        if (this.refreshQueued) {
+          this.refreshQueued = false;
+          this.requestRefresh(`${trigger}_trailing`);
+        }
+      });
+    this.refreshPromise = p;
+    return p;
   }
 
   private async refreshCandidates(trigger: string): Promise<void> {
@@ -1108,7 +1139,10 @@ export class Orchestrator {
         `ramp pays: an even blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
-    } else if (!this.rampAlertArmed && blanketAtCapBps < 0) {
+    } else if (!this.rampAlertArmed && blanketAtCapBps < -min) {
+      // Hysteresis: re-arm only once the signal has fallen a full margin below
+      // zero, so a signal hovering around the threshold (−11 / +6 bps on
+      // 2026-09-21) does not alert every other round.
       this.rampAlertArmed = true;
     }
   }
@@ -1737,7 +1771,7 @@ export class Orchestrator {
       const cutoff = this.state.slotsToCutoff();
       if (cutoff !== null && cutoff <= this.currentFireOffset()) {
         this.transition("ARMED", { cutoff, fireOffset: this.currentFireOffset() });
-        void this.tryFire();
+        void this.armAndFire();
       }
     } else if (this.botState === "ARMED") {
       void this.tryFire();
