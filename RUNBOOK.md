@@ -481,3 +481,46 @@ address.
    (`pnpm ev-grid § A`); transaction fees per wallet (2 tx/round each —
    the grace lets presence deploy every third round if fees bite).
 
+## 11. Upgrading a running V1 deployment to the V2 fleet
+
+The V1 bot on the VPS keeps running until step 3; the V2 build is a
+different program model, a fleet, and derived limits, so the upgrade is:
+stop new risk → back up → deploy (migrates the env, preflights, restarts)
+→ watch it dry → arm with a canary → lift the canary.
+
+1. **Stop new risk on the old bot.** Telegram `/kill` (or `touch KILL` in
+   `/opt/satrush`). Let the in-flight round settle. Run the settle sweep
+   and let the compound loop claim USD (`§ 3` steps 2–3) so nothing is
+   left unsettled on the V1 code path. Do NOT claim shares.
+2. **Back up.** `deploy.sh` does it (`/opt/satrush/backups/pre-upgrade-
+   <ts>.tgz`: data, keypairs, env). Keep a copy off the box.
+3. **Deploy.** `./deploy/deploy.sh user@vps`. It builds and tests locally,
+   rsyncs (never secrets), installs, runs `pnpm env:migrate
+   /etc/satrush/.env --write` — which comments out every hand-set value
+   the V2 bot now derives (`MAX_PER_ROUND_USD`, `DAILY_LOSS_CAP_USD`,
+   `KELLY_FRACTION`, `MIN_EDGE_BPS`, …) and any obsolete key, with a .bak
+   beside it — runs `pnpm preflight` (stale facts or a failed gate abort
+   before the restart), installs the unit and restarts. The DB migrates
+   itself (additive columns). Run `pnpm env:migrate /etc/satrush/.env`
+   without `--write` first if you want to see the plan.
+4. **Watch it dry.** Leave `EXECUTION_MODE=dry` for the first start. On boot
+   the bot creates the 20 fleet keypairs under `/opt/satrush/keypairs/
+   fleet`, logs the deposit address (the existing operator wallet), and
+   prices every round: read ~30 rounds of skip logs (`blanketEvBps`,
+   `blanketEvBpsAtStreakCap`, the selector's chosen size), `/fleet` (the
+   treasury's plan, dry), `/deposit`. Fund the primary now if it is short:
+   `pnpm setup` prints the minimum.
+5. **Arm with a canary.** The V2 send path has been verified against the
+   tape but never fired from this client, so the first live rounds are a
+   test, not a strategy: in `/etc/satrush/.env` set
+   `EXECUTION_MODE=mainnet`, `MAINNET_CONFIRM=yes`, and temporarily
+   `MAX_PER_ROUND_USD=21` (one $1 per tile); `sudo systemctl restart
+   satrush`; remove the KILL file. Watch one deploy land on 21 tiles, its
+   settles, the reconcile lines match the 89% refund and the share legs,
+   the affiliate binding on an extra wallet's first deploy, one treasury
+   top-up, and one ticket buy. Then comment `MAX_PER_ROUND_USD` back out
+   and restart: sizing is now the model's.
+6. **Rollback.** `git checkout <previous tag>` and `deploy.sh` again, then
+   restore `/etc/satrush/.env` from the .bak. The DB is forward-compatible
+   (new columns have defaults); the V1 code ignores them.
+

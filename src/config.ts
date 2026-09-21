@@ -934,6 +934,12 @@ const schema = z
 
 export type Config = z.infer<typeof schema>;
 
+/** Every key the schema reads (for env migration: anything else in a .env is obsolete). */
+export const CONFIG_KEYS: readonly string[] = Object.keys(
+  ((schema as unknown as { innerType?: () => { shape: Record<string, unknown> } }).innerType?.() ??
+    (schema as unknown as { shape: Record<string, unknown> })).shape,
+);
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return schema.parse(env);
 }

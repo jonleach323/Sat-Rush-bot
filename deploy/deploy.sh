@@ -44,7 +44,21 @@ echo "── remote install + unit reload ──"
 ssh "$HOST" REMOTE_DIR="$REMOTE_DIR" 'bash -s' <<'REMOTE'
 set -euo pipefail
 cd "$REMOTE_DIR"
+# Backup before anything changes: state db, keys, env (the only things that
+# are not reproducible). Kept under the app tree, root-readable only.
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+sudo mkdir -p "$REMOTE_DIR/backups"
+sudo tar czf "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz" -C / "opt/satrush/data" "opt/satrush/keypairs" "etc/satrush/.env" 2>/dev/null || true
+sudo chmod 600 "$REMOTE_DIR/backups/pre-upgrade-$TS.tgz"
 pnpm install --frozen-lockfile
+# V1 → V2 env migration: comments out hand-set values the V2 bot derives
+# (a V1 MAX_PER_ROUND_USD would cap every round) and obsolete keys; a
+# timestamped .bak sits next to the file.
+sudo -E env "PATH=$PATH" pnpm env:migrate /etc/satrush/.env --write || true
+sudo chown root:satrush /etc/satrush/.env && sudo chmod 640 /etc/satrush/.env
+# Preflight against the migrated env: stale facts or a config gate abort the restart.
+set -a; . /etc/satrush/.env; set +a
+pnpm preflight
 sudo install -m 644 deploy/satrush.service /etc/systemd/system/satrush.service
 sudo systemctl daemon-reload
 sudo systemctl enable satrush >/dev/null
