@@ -220,8 +220,10 @@ it is how deployment rent and winnings come back.
   staking yield is 29% of the buybacks leg ÷ staked — a volume yield.
 
 - **EV-max, zero-config (2026-09-21):** every round fires at the model's EV
-  argmax and no further (dilution-priced marginal → 0); every default that
-  could size below it is off — `MIN_EDGE_BPS=0`, `KELLY_FRACTION=0`,
+  argmax and no further (dilution-priced marginal → 0), if it clears the
+  two floors: `MIN_EDGE_BPS` 25 (model noise) and the economic hurdle
+  (`EDGE_HURDLE_ENABLED`: every leg's round-trip tx fees + the staking
+  yield the stake would earn over the round); other brakes are off — `KELLY_FRACTION=0`,
   `VAULT_MAX_SHARE=1`, `STREAK_OPTION_DISCOUNT=1`; the risk limits derive
   from the bankroll (`MAX_PER_ROUND_USD=0` → deployable USDC;
   `DAILY_LOSS_CAP_USD=0` → the day's opening USDC; both still enforced by

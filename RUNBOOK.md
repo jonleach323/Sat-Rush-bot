@@ -438,8 +438,14 @@ address.
    comes back to the primary as grubstake and is deployed from there).
 5. **Sizing — EV-max, nothing to set.** Every round fires at the model's
    EV argmax and not a dollar past it: the water-filler stops where the
-   dilution-priced marginal turns non-positive. Nothing else sizes below
-   that by default — `MIN_EDGE_BPS=0`, `KELLY_FRACTION=0` (Kelly is
+   dilution-priced marginal turns non-positive — and it fires only if that
+   EV clears two floors: `MIN_EDGE_BPS` (25, a margin over the model's own
+   noise) and the economic hurdle (`EDGE_HURDLE_ENABLED`: every leg's
+   round-trip tx fees at the live priority fee and SOL price, plus the
+   staking yield the stake would earn over the round — "buying spot and
+   staking is +EV over this round" is that term; "mining RUSH is dearer
+   than buying it" is already the sign of the EV, as the RUSH leg is valued
+   at spot). Nothing else sizes below the argmax — `KELLY_FRACTION=0` (Kelly is
    log-growth, i.e. safer than EV-max), `VAULT_MAX_SHARE=1` (the curve
    prices our share), `STREAK_OPTION_DISCOUNT=1`, `MAX_PER_ROUND_USD=0`
    (cash is the only cap) and `DAILY_LOSS_CAP_USD=0` with

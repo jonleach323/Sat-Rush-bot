@@ -35,7 +35,9 @@ describe("config defaults", () => {
     expect(cfg.AUTO_RAMP).toBe(true);
     expect(cfg.RAMP_PRESENCE_TOLL_BPS).toBe(300);
     expect(cfg.ENDGAME_CONVERGENCE).toBeLessThanOrEqual(1);
-    expect(cfg.MIN_EDGE_BPS).toBe(0); // EV-max: every positive round fires at its argmax
+    expect(cfg.MIN_EDGE_BPS).toBe(25); // margin over the model's own noise
+    expect(cfg.EDGE_HURDLE_ENABLED).toBe(true);
+    expect(cfg.OPPORTUNITY_YIELD_DAILY).toBeGreaterThan(0);
     // Full Kelly by default (growth-maximizing); clamped at 1.0.
     expect(cfg.KELLY_FRACTION).toBe(0); // EV-max: Kelly (log-growth) would size below the argmax
     expect(cfg.AUTO_DAILY_LOSS_FRACTION).toBe(1);

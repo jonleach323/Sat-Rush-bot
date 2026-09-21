@@ -9,7 +9,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
-import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS, STRIKE_PAYOUT_FRACTION } from "./strategy/facts.js";
+import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS, STRIKE_PAYOUT_FRACTION, STAKING_YIELD_DAILY } from "./strategy/facts.js";
 import { PROGRAM_ADDRESS } from "./adapter/idl.js";
 
 const emptyToUndef = (v: unknown) =>
@@ -292,11 +292,14 @@ const schema = z
      *
      * V2 (2026-09-21): the EV-maximizing fleet blanket runs at 1–3% of gross
      * (pnpm ev-size), so the V1 floor of 200 bps skipped the unboosted
-     * optimum outright. EV-MAX MODE: 0 — every round with positive modelled
-     * EV fires at its argmax; a floor only refuses positive rounds. */
+     * optimum outright. 25 bps: a margin over the model's own noise (uplift
+     * ±0.10 ≈ 20 bps, mint CV 5% ≈ 9 bps) — a "positive" round inside that
+     * band is a coin flip on the inputs, not an edge. The ABSOLUTE floor
+     * (EDGE_HURDLE_ENABLED) sits alongside: fees and the alternative use of
+     * the money. The larger of the two applies. */
     MIN_EDGE_BPS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(0).max(10_000).default(0),
+      z.coerce.number().int().min(0).max(10_000).default(25),
     ),
     /** EV-MAX MODE: 0 (off). Kelly maximises log-growth, not EV — it sizes
      * BELOW the EV argmax whenever the stake is a large fraction of the
@@ -309,6 +312,18 @@ const schema = z
      * extraction, assuming the edge estimate is accurate. 0.5 = half-Kelly
      * (robust to edge-estimate error). 0 = off (pure EV-max). Values >1 are
      * rejected at load: over-betting Kelly provably lowers compounded growth. */
+    /**
+     * The economic hurdle: a round must also clear, in dollars, the
+     * round-trip transaction fees of every leg the fire needs (deploy +
+     * settle, at the live priority fee and SOL price) plus what the stake
+     * would earn elsewhere over the round (OPPORTUNITY_YIELD_DAILY ÷ rounds
+     * per day). "Buying spot and staking is +EV over this round" is exactly
+     * the second term; "mining RUSH is dearer than buying it" is already the
+     * sign of the EV itself, since the RUSH leg is valued at spot.
+     */
+    EDGE_HURDLE_ENABLED: boolFromEnv(true),
+    /** Daily yield of the alternative use of a deployed dollar (default: the measured staking yield, a lower bound). */
+    OPPORTUNITY_YIELD_DAILY: z.preprocess(emptyToUndef, z.coerce.number().min(0).max(1).default(STAKING_YIELD_DAILY.value)),
     KELLY_FRACTION: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).max(1).default(0),

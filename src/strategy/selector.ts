@@ -42,6 +42,14 @@ export interface SelectorConfig {
    */
   minEdgeBps?: number | undefined;
   /**
+   * Absolute EV floor (base units) the round must clear on top of the bps
+   * floor: the real costs and the alternative use of the money — round-trip
+   * transaction fees for every leg the fire needs, and what the stake would
+   * have earned elsewhere over the round. A round whose modelled EV does not
+   * cover them is not worth firing even though it is "positive".
+   */
+  minEvBase?: bigint | undefined;
+  /**
    * Fractional-Kelly multiplier ∈ (0,1]. When set (with `bankrollBase`), the
    * total round stake is capped at this fraction of the growth-optimal Kelly
    * bet — sizing up on fat edges and down on thin/high-variance ones, scaled to
@@ -83,10 +91,11 @@ const EV_EPSILON = 1e-6;
 const BPS = 10_000;
 
 /** True when `ev` clears the configured minimum-edge floor for `gross`. */
-function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined): boolean {
+function clearsEdgeFloor(ev: number, gross: bigint, minEdgeBps: number | undefined, minEvBase?: bigint | undefined): boolean {
   const bps = minEdgeBps ?? 0;
-  if (bps <= 0) return true;
-  return ev >= (Number(gross) * bps) / BPS;
+  const relative = bps > 0 ? (Number(gross) * bps) / BPS : 0;
+  const absolute = minEvBase !== undefined && minEvBase > 0n ? Number(minEvBase) : 0;
+  return ev >= Math.max(relative, absolute);
 }
 
 function validate(cfg: SelectorConfig): void {
@@ -239,7 +248,7 @@ function selectWaterFilling(model: EvModel, cfg: SelectorConfig): Selection {
   if (ev <= 0) {
     return { kind: "skip", reason: "min_deploy_padding_made_ev_negative", strategy: "water_filling" };
   }
-  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps)) {
+  if (!clearsEdgeFloor(ev, total, cfg.minEdgeBps, cfg.minEvBase)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "water_filling" };
   }
 
@@ -297,7 +306,7 @@ function selectKEmptiest(model: EvModel, cfg: SelectorConfig): Selection {
   const allocation = new Array<bigint>(TILES_COUNT).fill(0n);
   allocation[tile] = amount;
   const ev = model.ev(allocation);
-  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps)) {
+  if (!clearsEdgeFloor(ev, amount, cfg.minEdgeBps, cfg.minEvBase)) {
     return { kind: "skip", reason: "below_min_edge", strategy: "k_emptiest" };
   }
   return {

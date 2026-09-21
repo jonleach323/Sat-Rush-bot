@@ -1618,9 +1618,29 @@ export class Orchestrator {
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
       minEdgeBps: this.cfg.MIN_EDGE_BPS,
+      minEvBase: this.edgeHurdleBase(maxPerRound),
       kellyFraction: this.cfg.KELLY_FRACTION,
       bankrollBase: this.usdcAvailableBase ?? undefined,
     };
+  }
+
+  /**
+   * The absolute EV floor for a fire, in base units: round-trip tx fees for
+   * every leg (tile mode: one per covered tile; else one per wallet) at the
+   * live priority fee and SOL price, plus the opportunity yield of the stake
+   * over one round. Undefined when the hurdle is off.
+   */
+  private edgeHurdleBase(stakeBase: bigint): bigint | undefined {
+    if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
+    const legs = this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
+    const feeMicro = this.feeEstimator.currentMicroLamportsPerCu();
+    const lamportsPerTx = 5_000 + (feeMicro * this.cfg.DEPLOY_CU_LIMIT) / 1e6;
+    const solUsd = this.prices.solUsd();
+    const feesUsd = solUsd > 0 ? (legs * 2 * lamportsPerTx * solUsd) / 1e9 : 0;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
+    const opportunityUsd = (Number(stakeBase) / 1e6) * (this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay);
+    return BigInt(Math.ceil((feesUsd + opportunityUsd) * 1e6));
   }
 
   /** The single slot-tick check — every transition hangs off ingest events. */
