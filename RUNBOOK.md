@@ -374,7 +374,9 @@ operationally — everything else in this runbook still applies:
   `pnpm epoch-uplift`, `pnpm epoch-history`, `pnpm v2-timing`,
   `pnpm staking-yield` refresh every short-lived fact; preflight refuses a
   stale one. `pnpm hold-vs-stake` answers whether to leave winnings as
-  unclaimed shares or claim and stake (hold, at today's rates). The mint rate drifts ~1.7% a day and the field's shape sets
+  unclaimed shares or claim and stake (hold, at today's rates);
+  `pnpm buy-vs-mine` prices mining RUSH against buying it on Jupiter and
+  staking (buy, by a wide margin, unless spot exceeds the mined cost). The mint rate drifts ~1.7% a day and the field's shape sets
   the dedup uplift, so a week-old number is wrong, not approximate.
 - **Before the first live V2 round** (still outstanding): a real deploy +
   settle on a $1 stake with `MAX_PER_ROUND_USD=1`, watching the reconcile

@@ -1602,3 +1602,44 @@ dimension, so it is bracketed: constant, halving every 90 d, halving every
 Waiting is free: the fee is the same whenever it is paid, so "hold, then
 decide" dominates "claim now" on both legs. Claim USD always (fee-free).
 Re-run when `pnpm vault-carry` prints a token carry below 0.197%/day.
+
+### Addendum: buying RUSH and staking vs mining it (2026-09-21)
+
+`pnpm buy-vs-mine [usd-of-rush] [stake-per-round]` prices the two ways of
+ending up holding RUSH. The buy side is the live Jupiter route (USDC →
+RUSH) at $1k / $10k / $50k, then the staking treasury's reward stream
+diluted by our own stake (the stream is a fixed $/day from volume). The
+mine side is the V2 model on today's board with the RUSH leg priced at
+ZERO — the non-token toll — divided by the RUSH minted pro rata, so the
+cost of a mined RUSH is a dollar figure independent of its price.
+
+```
+  spot $42.92 · board $113 · mint 0.405 RUSH/$1k · stake $318,787, stream $663/day → 0.208%/day undiluted
+  BUY   $1k  → $42.96 avg  (+0.10%)   $10k → $43.25 (+0.78%)   $50k → $46.13 (+7.49%)   Orca Whirlpool, $541k pool
+  MINE  fresh single tile   toll 7.46% of gross → $184/RUSH  (4.29× spot)
+        single tile at cap  toll 5.11%          → $126/RUSH  (2.94×)
+        21-tile blanket cap toll 3.02%          → $75/RUSH   (1.74×)
+        fleet ledger (21 wallets, epoch recovery) `pnpm v2-ledger 1000 21`: $49/RUSH (1.15×); with strike 0.95: $35 (0.82×)
+  $1,000 of RUSH after 30 d:  buy+stake $1,061  ·  mine+hold $250 / $365 / $616
+  yields afterwards: staked 0.207%/day (cbBTC, no lock/fee)  ·  vault shares 0.240%/day (RUSH, decays)
+```
+
+Buying wins at every size the pool can absorb without a 7% haircut, and it
+is not close: mining spends $1.74–$4.29 of toll per dollar of RUSH on a
+single wallet, and $1.15 even in the ledger's most favourable fleet
+accounting. The crossover is a spot price (the mint is volume-proportional,
+so a mined RUSH costs the same in dollars at any price): the single wallet
+needs RUSH above $126 at the cap, the fleet above $49–$75. The +1.74%/day
+mint drift lowers those by the same fraction per day while it lasts; a
+mint that instead targets a dollar yield at a lagging price would move
+with spot and never cross. Post-acquisition the two yields are within
+0.03%/day of each other, so the acquisition cost decides.
+
+Staking terms (app Stake page chunk + treasury account read on chain,
+program `SaTsTaKpGdTfUEPSSwyYgLKkfnZu8uL3D1DbLXshdb7`, no IDL published):
+stake / unstake / claim, a 24-hour reward stream, no lock, cooldown or
+fee visible in the copy, the instruction data or the account.
+
+What mining buys that buying does not, and why it does not change the
+answer: BTC shares (the sats leg) and epoch tickets are already netted
+inside the toll above — the toll IS what is left after they are credited.

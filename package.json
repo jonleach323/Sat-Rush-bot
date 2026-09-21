@@ -55,7 +55,8 @@
     "staking-yield": "tsx scripts/staking-yield.ts",
     "v2-timing": "tsx scripts/v2-timing.ts",
     "streak-ramp": "tsx scripts/streak-ramp.ts",
-    "hold-vs-stake": "tsx scripts/hold-vs-stake.ts"
+    "hold-vs-stake": "tsx scripts/hold-vs-stake.ts",
+    "buy-vs-mine": "tsx scripts/buy-vs-mine.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
