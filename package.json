@@ -53,7 +53,8 @@
     "v1:full-accounting": "tsx scripts/v1/full-accounting.ts",
     "mint-rule": "tsx scripts/mint-rule.ts",
     "staking-yield": "tsx scripts/staking-yield.ts",
-    "v2-timing": "tsx scripts/v2-timing.ts"
+    "v2-timing": "tsx scripts/v2-timing.ts",
+    "streak-ramp": "tsx scripts/streak-ramp.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

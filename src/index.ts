@@ -111,7 +111,7 @@ import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
 import { adaptiveFireOffset } from "./strategy/fire-offset.js";
 import { maskToTiles } from "./adapter/mask.js";
-import { hashrateRawPerUsd, strikeBonusMultiplier } from "./strategy/hashrate.js";
+import { hashrateRawPerUsd, REWARD_MAX_STREAK, strikeBonusMultiplier } from "./strategy/hashrate.js";
 import {
   predictRivalInflow,
   profileCompetitors,
@@ -938,10 +938,21 @@ export class Orchestrator {
       const single = new Array<bigint>(TILES_COUNT).fill(0n);
       single[emptiest] = cap;
       const bps = (ev: number, gross: bigint) => Math.round((ev / Number(gross)) * 10_000);
+      // The same single tile with the streak at its cap: the hashrate credit
+      // at 121 raw/$ instead of today's. Positive here and negative above
+      // means the streak ramp (~100 rounds of a minimum deploy) would pay —
+      // `pnpm streak-ramp` prices it; it has not been positive yet.
+      const atCap = (() => {
+        const base = this.v2Base();
+        if (!("model" in src) || !base?.hashrate) return null;
+        const capped = v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK } });
+        return bps(capped.ev(single), cap);
+      })();
       return {
         blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
         emptiestTile: emptiest,
         emptiestEvBps: bps(model.ev(single), cap),
+        emptiestEvBpsAtStreakCap: atCap,
         tokenYield: this.tokenFeed?.status().live ? this.tokenFeed.status().yieldPerVolume : null,
         shareCarry: this.shareCarry(),
       };
@@ -955,6 +966,27 @@ export class Orchestrator {
    * refund/sats/RUSH economics (`v2Model`) on the same occupancy prediction;
    * the model factory lets candidates rebuild it for excluded-tile variants.
    */
+  /** The V2 context minus the stakes (null under V1 or before the config is read). */
+  private v2Base(): Omit<V2EvContext, "predictedStakes"> | null {
+    if (this.cfg.GAME_VERSION !== "v2") return null;
+    const config = this.state.satrushConfig;
+    if (!config) return null;
+    const ctx = this.evContext();
+    const econ = v2EconomicsFromConfig(config, { losingRefundBps: V2_LOSING_TILE_REFUND_BPS.value });
+    const feed = this.tokenFeed?.status();
+    const tokenYieldPerVolume =
+      feed && feed.live ? feed.yieldPerVolume : this.cfg.RUSH_USD_ESTIMATE * this.cfg.RUSH_MINT_PER_USD_ESTIMATE;
+    return {
+      econ,
+      mintedTokenValueBase: 0,
+      tokenYieldPerVolume,
+      strikeExpectedPot: this.strikeExpectedPotBase(),
+      ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
+      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
+    };
+  }
+
   private evSource(): EvSource {
     const ctx = this.evContext();
     if (this.cfg.GAME_VERSION !== "v2") return ctx;

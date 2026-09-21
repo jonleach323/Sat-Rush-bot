@@ -1553,3 +1553,28 @@ that never arrives). Volume is down 5x from launch's $580/round.
 carry** (token leg 1.83%, epoch 1.11% at 106% recovery, strike 1.68%), and
 the sats carry alone covers that in about 10 days of holding.
 
+### Addendum: the streak ramp, priced (2026-09-21)
+
+Hashrate per dollar is (streak + 21/n), so a wallet at the cap earns 5.5×
+what a fresh one does, and at 92 s rounds the cap is 2.5 h of continuous
+play away. `pnpm streak-ramp` prices a $5 single tile at a uniform board of
+the previous round's gross through the V2 model, with the hashrate credit
+at the live ticket value ($0.0237 per ticket on iteration 15's pool and
+field, 1.37x uplift, 5%-of-field block):
+
+```
+  streak    raw/$   hashrate credit   EV per $ (single tile, $117 board)
+       1       22          +0.52%           −6.53%
+      50       71          +1.68%           −5.37%
+     100      121          +2.87%           −4.18%
+  ramp: 99 × $1 minimum deploys ≈ 2.5 h, $5.32 of negative EV; at the cap still −4.18%/$
+```
+
+Presence is negative even at the cap: the credit is worth 2.9% of gross
+there against a single-tile toll of ~7% at a $117 board (own weight on a
+$5.60 tile). So the ramp is NOT built as a feature. The skip log now
+carries `emptiestEvBpsAtStreakCap` next to today's figure; when it turns
+positive the ramp pays, and `pnpm streak-ramp` gives the cost and payback.
+What would flip it: a bigger board (own weight falls), a higher token yield
+(the mint rate is rising 1.7%/day), or a richer epoch pool per ticket.
+
