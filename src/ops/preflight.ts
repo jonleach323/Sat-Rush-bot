@@ -17,6 +17,8 @@ import { loadKeypair } from "../exec/tx.js";
 import { YellowstoneIngest } from "../ingest/grpc.js";
 import { WsRpcIngest } from "../ingest/wsrpc.js";
 import { StateDb } from "../state/db.js";
+import { buildInfo } from "./build-info.js";
+import { lintConfig } from "./config-lint.js";
 import { usdToBase } from "../units.js";
 
 export interface GateResult {
@@ -349,8 +351,20 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
     gate("db_writable", false, `DB open failed: ${String(err)}`);
   }
 
+  lintGates(cfg, killFilePresent, walletUsdBase, gate);
   const passed = !gates.some((g) => !g.ok && g.fatal);
   return { mode: cfg.EXECUTION_MODE, effectiveMode: mode, passed, gates };
+}
+
+/**
+ * Operational lint as non-fatal gates: a warn-level finding shows as a
+ * failed (non-fatal) gate so it is impossible to miss in the report; an
+ * info-level one passes with its message as the detail.
+ */
+function lintGates(cfg: Config, killFilePresent: boolean, walletUsdBase: bigint | null, gate: (name: string, ok: boolean, detail: string, fatalWhenStrict?: boolean) => unknown): void {
+  for (const f of lintConfig(cfg, { killFilePresent, fleetUsdcBase: walletUsdBase ?? undefined, distStale: buildInfo().distStale })) {
+    gate(`lint_${f.key}`, f.severity !== "warn", f.message, false);
+  }
 }
 
 export function formatPreflight(report: PreflightReport): string {

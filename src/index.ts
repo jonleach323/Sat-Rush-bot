@@ -95,6 +95,7 @@ import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { buildInfo } from "./ops/build-info.js";
 import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
+import { lintConfig } from "./ops/config-lint.js";
 
 /** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
 const REFRESH_MIN_INTERVAL_MS = 750;
@@ -3433,8 +3434,17 @@ export class Orchestrator {
     );
     if (build.distStale) {
       this.log.warn({ distBuiltAt: build.distBuiltAt, srcNewestAt: build.srcNewestAt }, "STALE BUILD: dist/ is older than src/ — this process runs old code; run pnpm build and restart");
-      this.alert(`⚠ stale build: dist/ was built ${build.distBuiltAt} but src/ changed ${build.srcNewestAt} — run pnpm build and restart`);
     }
+    // Operational lint: the env values that each cost an hour of wrong
+    // diagnosis on 2026-09-21, named at boot with their fix.
+    const findings = lintConfig(this.cfg, {
+      killFilePresent: this.bankroll.killSwitchEngaged(),
+      fleetUsdcBase: this.wallets.totals().usdcBase,
+      distStale: build.distStale,
+    });
+    for (const f of findings) this.log[f.severity === "warn" ? "warn" : "info"]({ lint: f.key }, f.message);
+    const warns = findings.filter((f) => f.severity === "warn");
+    if (warns.length > 0) this.alert(`⚠ config lint (${warns.length}):\n` + warns.map((f) => `• ${f.message}`).join("\n"));
 
     process.once("SIGINT", () => void this.shutdown("SIGINT"));
     process.once("SIGTERM", () => void this.shutdown("SIGTERM"));
