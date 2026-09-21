@@ -93,6 +93,7 @@ import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from 
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
+import { buildInfo } from "./ops/build-info.js";
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
 import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
@@ -3252,15 +3253,22 @@ export class Orchestrator {
     // path is otherwise entirely untouched.
     if (this.cfg.VAULT_STRATEGY_ENABLED) this.startVaultManager();
     void this.source.start();
+    const build = buildInfo();
     this.log.info(
       {
         mode: this.cfg.EXECUTION_MODE,
         strategy: this.cfg.STRATEGY,
         wallet: this.payer.publicKey.toBase58(),
         roundId: this.state.board?.round_id,
+        rev: build.rev,
+        distBuiltAt: build.distBuiltAt,
       },
       "orchestrator started",
     );
+    if (build.distStale) {
+      this.log.warn({ distBuiltAt: build.distBuiltAt, srcNewestAt: build.srcNewestAt }, "STALE BUILD: dist/ is older than src/ — this process runs old code; run pnpm build and restart");
+      this.alert(`⚠ stale build: dist/ was built ${build.distBuiltAt} but src/ changed ${build.srcNewestAt} — run pnpm build and restart`);
+    }
 
     process.once("SIGINT", () => void this.shutdown("SIGINT"));
     process.once("SIGTERM", () => void this.shutdown("SIGTERM"));
