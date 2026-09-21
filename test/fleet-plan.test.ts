@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planFleet, type FleetPlanParams, type FleetWalletBalance } from "../src/exec/fleet-plan.js";
+import { dynamicFloatBase, planFleet, type FleetPlanParams, type FleetWalletBalance } from "../src/exec/fleet-plan.js";
 
 const P: FleetPlanParams = {
   targetUsdcBase: 20_000_000n,
@@ -58,3 +58,15 @@ describe("fleet treasury planner", () => {
     expect(plan.shortfallUsdcBase).toBe(20_000_000n);
   });
 });
+
+describe("dynamic float target", () => {
+  const base = { floorBase: 20_000_000n, perRoundCapBase: 14_000_000n, floatRounds: 8, headroom: 1.5 };
+  it("follows the observed peak leg with headroom over the float rounds", () => {
+    expect(dynamicFloatBase({ ...base, observedPeakLegBase: 7_000_000n })).toBe(84_000_000n); // $7 × 1.5 × 8
+  });
+  it("never drops below the configured floor and never exceeds what a round can ask", () => {
+    expect(dynamicFloatBase({ ...base, observedPeakLegBase: 0n })).toBe(20_000_000n);
+    expect(dynamicFloatBase({ ...base, observedPeakLegBase: 50_000_000n })).toBe(112_000_000n); // capped at $14 × 8
+  });
+});
+

@@ -86,7 +86,7 @@ import { CandidateSet, type EvSource } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
 import { assembleTx, loadKeypair } from "./exec/tx.js";
-import { planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
+import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
@@ -2663,6 +2663,32 @@ export class Orchestrator {
     return gross > 0 ? gross : 0;
   }
 
+  /**
+   * The per-wallet USDC float, derived from the selector's own behaviour:
+   * the largest leg any wallet sent over the recent window (plus the round
+   * in flight), with headroom, held for FLEET_FLOAT_ROUNDS. Floored at the
+   * configured minimum; capped by what a round can ask (MAX_PER_ROUND ÷ tiles).
+   */
+  private fleetFloatTargetBase(): bigint {
+    let observed = 0n;
+    try {
+      const since = Math.max(0, (this.roundId ?? 0) - this.cfg.FLEET_FLOAT_WINDOW_ROUNDS);
+      const row = this.db.query("SELECT MAX(CAST(amount AS INTEGER)) AS peak FROM my_deploys WHERE round_id > ? AND status IN ('fired','landed','dry')", since) as { peak: number | null }[];
+      observed = BigInt(Math.max(0, Math.round(row[0]?.peak ?? 0)));
+    } catch {
+      /* no history yet */
+    }
+    for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
+    const tiles = BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    return dynamicFloatBase({
+      observedPeakLegBase: observed,
+      floorBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
+      perRoundCapBase: usdToBase(this.cfg.MAX_PER_ROUND_USD) / tiles,
+      floatRounds: this.cfg.FLEET_FLOAT_ROUNDS,
+      headroom: this.cfg.FLEET_FLOAT_HEADROOM,
+    });
+  }
+
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
   private planFleetNow(): FleetPlan {
     const perRound = usdToBase(this.cfg.MAX_PER_ROUND_USD) / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
@@ -2672,9 +2698,12 @@ export class Orchestrator {
       lamports: w.lamports,
       perRoundBase: perRound,
     }));
+    const target = this.fleetFloatTargetBase();
+    const lowDyn = BigInt(Math.round(Number(target) * this.cfg.FLEET_LOW_FRACTION));
+    const lowFloor = usdToBase(this.cfg.FLEET_WALLET_LOW_USD);
     return planFleet(balances, {
-      targetUsdcBase: usdToBase(this.cfg.FLEET_WALLET_TARGET_USD),
-      lowUsdcBase: usdToBase(this.cfg.FLEET_WALLET_LOW_USD),
+      targetUsdcBase: target,
+      lowUsdcBase: lowDyn > lowFloor ? lowDyn : lowFloor,
       targetLamports: Math.round(this.cfg.FLEET_WALLET_TARGET_SOL * 1e9),
       lowLamports: Math.round(this.cfg.FLEET_WALLET_LOW_SOL * 1e9),
       reserveUsdcBase: usdToBase(this.cfg.FLEET_TREASURY_RESERVE_USD),
@@ -2739,6 +2768,7 @@ export class Orchestrator {
         runwayRounds: perRound > 0 ? Math.floor(w.usdc / perRound) : null,
       })),
       pending: plan ? plan.transfers.map((t) => ({ ...t, amount: t.asset === "usdc" ? Number(t.amount) / 1e6 : Number(t.amount) / 1e9 })) : [],
+      targetUsd: this.wallets.size > 1 ? Number(this.fleetFloatTargetBase()) / 1e6 : null,
       shortfallUsd: plan ? Number(plan.shortfallUsdcBase) / 1e6 : 0,
       shortfallSol: plan ? plan.shortfallLamports / 1e9 : 0,
       minRunwayRounds: plan?.minRunwayRounds ?? null,

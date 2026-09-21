@@ -107,3 +107,26 @@ export function planFleet(wallets: readonly FleetWalletBalance[], p: FleetPlanPa
   const minRunwayRounds = extras.length ? Math.min(...extras.map(runway)) : runway(primary);
   return { transfers, shortfallUsdcBase: shortfallUsdc, shortfallLamports: Number(shortfallSol), minRunwayRounds };
 }
+
+/**
+ * The per-wallet float, derived from what the selector actually deploys per
+ * tile rather than typed in: the observed peak leg over the recent window,
+ * with headroom for the next spike, held for `floatRounds` (rounds awaiting
+ * the fee-free USD claim plus a run of 11% misses), floored at the configured
+ * minimum and capped at what one round could ever ask of a wallet
+ * (MAX_PER_ROUND ÷ tiles, itself × floatRounds). All base units.
+ */
+export function dynamicFloatBase(p: {
+  observedPeakLegBase: bigint;
+  floorBase: bigint;
+  perRoundCapBase: bigint;
+  floatRounds: number;
+  headroom: number;
+}): bigint {
+  const peak = BigInt(Math.round(Number(p.observedPeakLegBase) * Math.max(1, p.headroom)));
+  const want = peak * BigInt(Math.max(1, Math.round(p.floatRounds)));
+  const cap = p.perRoundCapBase * BigInt(Math.max(1, Math.round(p.floatRounds)));
+  const bounded = want > cap ? cap : want;
+  return bounded > p.floorBase ? bounded : p.floorBase;
+}
+

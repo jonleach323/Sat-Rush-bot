@@ -634,8 +634,20 @@ const schema = z
      * and logs only. You fund the fleet by sending USDC and SOL to the primary.
      */
     FLEET_TREASURY_ENABLED: boolFromEnv(true),
+    /**
+     * The USDC float is DYNAMIC: target = the observed peak per-tile leg over
+     * the last FLEET_FLOAT_WINDOW_ROUNDS × FLEET_FLOAT_HEADROOM × FLEET_FLOAT_ROUNDS
+     * (rounds awaiting the fee-free claim plus a run of 11% misses), floored
+     * at FLEET_WALLET_TARGET_USD and capped by MAX_PER_ROUND ÷ tiles; low =
+     * FLEET_LOW_FRACTION of the target (never below FLEET_WALLET_LOW_USD). So
+     * the two USD numbers below are floors for an empty history, not settings.
+     */
     FLEET_WALLET_TARGET_USD: z.preprocess(emptyToUndef, z.coerce.number().positive().default(20)),
     FLEET_WALLET_LOW_USD: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(8)),
+    FLEET_FLOAT_ROUNDS: z.preprocess(emptyToUndef, z.coerce.number().int().min(1).max(200).default(8)),
+    FLEET_FLOAT_HEADROOM: z.preprocess(emptyToUndef, z.coerce.number().min(1).max(10).default(1.5)),
+    FLEET_FLOAT_WINDOW_ROUNDS: z.preprocess(emptyToUndef, z.coerce.number().int().min(100).default(3000)),
+    FLEET_LOW_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().gt(0).lt(1).default(0.4)),
     FLEET_WALLET_TARGET_SOL: z.preprocess(emptyToUndef, z.coerce.number().positive().default(0.02)),
     FLEET_WALLET_LOW_SOL: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(0.008)),
     FLEET_TREASURY_RESERVE_USD: z.preprocess(emptyToUndef, z.coerce.number().nonnegative().default(0)),

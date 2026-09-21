@@ -128,6 +128,8 @@ export interface FleetReport {
   primary: string;
   wallets: (WalletRow & { tile: number | null; runwayRounds: number | null })[];
   pending: { from: string; to: string; asset: "usdc" | "sol"; amount: number; reason: "top_up" | "sweep" }[];
+  /** Per-wallet USDC float the treasury is holding each wallet to (derived from the observed peak leg). */
+  targetUsd: number | null;
   shortfallUsd: number;
   shortfallSol: number;
   minRunwayRounds: number | null;
@@ -388,7 +390,7 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     if (f.size <= 1) return void ctx.reply("single wallet — no fleet (set FLEET_SIZE and run pnpm fleet:init)");
     const lines = [
       `🏦 fleet of ${f.size} · tile mode ${f.tileMode ? "on" : "off"} · treasury ${f.treasuryEnabled ? "on" : "off"} · deposit to ${short(f.primary)}`,
-      `thinnest wallet: ${f.minRunwayRounds ?? "?"} rounds of runway` +
+      `float target $${(f.targetUsd ?? 0).toFixed(0)}/wallet (from the peak leg) · thinnest wallet: ${f.minRunwayRounds ?? "?"} rounds of runway` +
         (f.shortfallUsd > 0 || f.shortfallSol > 0 ? ` · ⚠ NEEDS ${f.shortfallUsd > 0 ? usdn(f.shortfallUsd) + " USDC " : ""}${f.shortfallSol > 0 ? f.shortfallSol.toFixed(3) + " SOL" : ""}` : " · funded"),
       ...f.wallets.map((w, i) => `${i === 0 ? "★" : " "} t${String(w.tile ?? "-").padStart(2)} ${short(w.pubkey)} ${usdn(w.usdc)} · ${w.sol.toFixed(3)} SOL · ${w.runwayRounds ?? "?"} rds · streak ${w.streak}` + (w.disabled ? ` ⚠ ${w.disabled}` : "")),
       f.pending.length ? `pending: ${f.pending.map((t) => `${t.reason === "top_up" ? "→" : "←"} ${short(t.to)} ${t.asset === "usdc" ? usdn(t.amount) : t.amount.toFixed(3) + " SOL"}`).join(", ")}` : "pending: none",
