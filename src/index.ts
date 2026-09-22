@@ -3025,8 +3025,23 @@ export class Orchestrator {
   }
 
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
+  /**
+   * What one wallet actually sends per round: the peak leg observed (or the
+   * model's per-tile want), floored at the on-chain minimum. Runway and the
+   * top-up order run on this — dividing the auto cap ($35k of USDC) by 21
+   * read every sub-wallet as "0 rounds of runway".
+   */
+  private perWalletLegBase(): bigint {
+    const minDeploy = BigInt(this.state.satrushConfig?.min_deploy_usd_amount.toString() ?? "1000000");
+    const want = this.floatWantMemo?.peakLegBase ?? 0n;
+    let observed = 0n;
+    for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
+    const leg = want > observed ? want : observed;
+    return leg > minDeploy ? leg : minDeploy;
+  }
+
   private planFleetNow(): FleetPlan {
-    const perRound = this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    const perRound = this.perWalletLegBase();
     const balances = this.wallets.all().map((w) => ({
       pubkey: w.keypair.publicKey.toBase58(),
       usdcBase: w.usdcBase,
@@ -3091,7 +3106,7 @@ export class Orchestrator {
   /** Fleet view for Telegram /fleet and the status API: balances, runway, the last plan. */
   fleetReport(): FleetReport {
     const plan = this.wallets.size > 1 ? this.planFleetNow() : null;
-    const perRound = Number(this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)))) / 1e6;
+    const perRound = Number(this.perWalletLegBase()) / 1e6;
     return {
       size: this.wallets.size,
       tileMode: this.cfg.FLEET_TILE_MODE && this.wallets.size > 1,
