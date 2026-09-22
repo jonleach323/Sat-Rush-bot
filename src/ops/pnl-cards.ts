@@ -79,26 +79,25 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         `<i>deferred hashrate (35%) is released by a sats claim; held, not claimed</i>`;
     }
     case "hold": {
-      if (!pos) return "<b>📈 30-day hold</b>\n<i>not available yet</i>";
-      const p = pos.projection, r = pos.rate;
+      if (!pos) return "<b>📈 Unclaimed, bot stopped</b>\n<i>not available yet</i>";
+      const p = pos.projection, r = pos.rate, a = pos.apr;
+      const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
       const t = table3(["", "now", `+${p.days}d`], [
         ["BTC", num(pos.btc, 6), num(p.btc, 6)],
         ["RUSH", num(pos.rush, 3), num(p.rush, 3)],
-        ["tickets", num(pos.tickets, 1), num(p.tickets, 1)],
         ["BTC $", money(pos.btcUsd, 0), money(p.btcUsd, 0)],
         ["RUSH $", money(pos.rushUsd, 0), money(p.rushUsd, 0)],
       ], [8, 11, 11]);
       const rows: (readonly [string, string])[] = [
-        ["per day: BTC", `+${num(r.btcPerDay, 6)}`],
-        ["  RUSH", `+${num(r.rushPerDay, 3)}`],
-        ["  hashrate", `+${num(r.hashratePerDay)}`],
-        ["  net USD", `${signed(r.usdNetPerDay)} on ${money(r.grossPerDay, 0)}`],
+        ["APR on BTC shares", `${pct(a.sats)} (${pct(a.satsCompounded)} comp.)`],
+        ["APR on RUSH shares", `${pct(a.token)} (${pct(a.tokenCompounded)} comp.)`],
         ["", ""],
-        [`USD change +${p.days}d`, signed(p.gainUsd)],
-        ["  of which carry", signed(p.carryUsd)],
+        [`gain in ${p.days}d`, signed(p.gainUsd)],
+        ["  BTC", `+${num(p.btc - pos.btc, 6)}`],
+        ["  RUSH", `+${num(p.rush - pos.rush, 3)}`],
       ];
-      return `<b>📈 ${p.days}-day hold</b> · run rate of the last ${r.sampleHours.toFixed(1)} h (${r.settlements} settlements)\n${t}${table(rows)}` +
-        `<i>carry ${pctd(pos.carry.sats)} BTC · ${pctd(pos.carry.token)} RUSH (${pos.carrySource}); prices held</i>`;
+      return `<b>📈 Unclaimed, bot stopped</b> · what the holdings earn on their own\n${t}${table(rows)}` +
+        `<i>vault carry ${pctd(pos.carry.sats)} BTC · ${pctd(pos.carry.token)} RUSH (${pos.carrySource}): the exit fees of those who claim, paid to those who stay; prices held. While the bot runs it adds +${num(r.btcPerDay, 6)} BTC · +${num(r.rushPerDay, 3)} RUSH a day at the last ${r.sampleHours.toFixed(0)} h rate.</i>`;
     }
     case "verdict": {
       if (!pos) return "<b>⚖️ Hold vs claim</b>\n<i>not available yet</i>";
@@ -129,6 +128,6 @@ export function pnlKeyboard(active: PnlTab): InlineKeyboard {
     .text(label("today", "Today"), "pnl:today")
     .text(label("position", "Position"), "pnl:position")
     .row()
-    .text(label("hold", "30-day"), "pnl:hold")
+    .text(label("hold", "Bot stopped"), "pnl:hold")
     .text(label("verdict", "Hold vs claim"), "pnl:verdict");
 }

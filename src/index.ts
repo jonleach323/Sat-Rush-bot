@@ -3578,7 +3578,9 @@ export class Orchestrator {
     const liveToken = feed?.live && feed.tokenVaultApr !== null && feed.tokenVaultApr > 0 ? feed.tokenVaultApr / 365 : null;
     const carry = liveSats !== null && liveToken !== null ? { sats: liveSats, token: liveToken } : { sats: SATS_VAULT_CARRY_DAILY.value, token: TOKEN_VAULT_CARRY_DAILY.value };
     const carrySource: "live" | "measured" = liveSats !== null && liveToken !== null ? "live" : "measured";
-    const projection = projectHolding({ position: pos, rate, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
+    // "If I stopped the bot today": the carry alone on what is held — no accrual. The run rate is reported beside it.
+    const stopped = { ...rate, btcPerDay: 0, rushPerDay: 0, hashratePerDay: 0, usdNetPerDay: 0, grossPerDay: 0 };
+    const projection = projectHolding({ position: pos, rate: stopped, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
     const verdict = holdVsClaim({ btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, carry, stakingYieldDaily: STAKING_YIELD_DAILY.value, exitFeeBps: this.state.satrushConfig?.vault_exit_fee_bps ?? 1000, days: 30 });
     const vp = this.vaultPoolCache;
     const vaults = vp
@@ -3601,6 +3603,7 @@ export class Orchestrator {
       totalUnclaimedUsd: pos.totalUnclaimedUsd,
       btcPrice: btcUsd, rushPrice: rushUsd,
       rate, carry, carrySource, vaults,
+      apr: { sats: carry.sats * 365, token: carry.token * 365, satsCompounded: Math.pow(1 + carry.sats, 365) - 1, tokenCompounded: Math.pow(1 + carry.token, 365) - 1 },
       verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value },
       projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },
     };
