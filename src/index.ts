@@ -99,6 +99,7 @@ import { buildInfo } from "./ops/build-info.js";
 import { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
 export { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
 import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
+import { AlertThrottle, Digest, type NoteKind } from "./ops/digest.js";
 import { lintConfig } from "./ops/config-lint.js";
 
 /** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
@@ -653,6 +654,29 @@ export class Orchestrator {
     void this.telegram?.alert(message);
   }
 
+  /** Routine events: logged, and summarised in the digest instead of pushed. */
+  private readonly digest = new Digest();
+  private readonly throttle = new AlertThrottle();
+  private digestTimer: NodeJS.Timeout | null = null;
+  note(kind: NoteKind, message: string, usd = 0): void {
+    this.log.info({ note: kind }, message);
+    this.digest.note(kind, message, usd);
+  }
+  /** Push at most once per `cooldownMs` for this key; otherwise note it. */
+  alertThrottled(key: string, cooldownMs: number, kind: NoteKind, message: string): void {
+    if (this.throttle.allow(key, cooldownMs)) this.alert(message);
+    else this.note(kind, message);
+  }
+  /** Render and send the digest (scheduled, or /digest). */
+  sendDigest(title?: string): string | null {
+    const text = this.digest.flush(title);
+    if (text) {
+      this.log.info({ digest: true }, text);
+      void this.telegram?.alert(text);
+    }
+    return text;
+  }
+
   /**
    * Engage the kill switch for an INTEGRITY violation (invariant, reconcile
    * tripwire, HaltError, unhandled error). Trips the in-memory switch AND
@@ -700,6 +724,7 @@ export class Orchestrator {
       deps: {
         getStatus: () => this.statusReport(),
         getPosition: () => this.positionReport(),
+        digest: () => this.sendDigest("🗒 digest (on demand)") ?? "nothing to report since the last digest",
         getPnl: () => {
           const date = utcDate();
           const row = this.db.queryOne<{
@@ -1214,7 +1239,8 @@ export class Orchestrator {
     if (blanketAtCapBps === null || !(min > 0)) return;
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
       this.rampAlertArmed = false;
-      this.alert(
+      this.note(
+        "ramp",
         `ramp pays: holding the streak cap across the boost cycle is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
@@ -2076,7 +2102,8 @@ export class Orchestrator {
       const key = `${this.roundId}:cap_bound`;
       if (!this.skipLogged.has(key)) {
         this.skipLogged.add(key);
-        this.alert(
+        this.note(
+          "cap_bound",
           `cap-bound round ${this.roundId}: fired $${(Number(selection.totalGross) / 1e6).toFixed(2)} at MAX_PER_ROUND with next-quantum marginal EV still +$${(selection.marginalEvAtStop / 1e6).toFixed(3)} — raising the cap/float would extract more`,
         );
       }
@@ -2151,12 +2178,17 @@ export class Orchestrator {
       else if (r.outcome !== "dry") this.db.updateMyDeployStatus(leg.signature, "failed");
     });
     const landedLegs = results.filter((r) => r.outcome === "landed");
-    if (candidate.legs.length > 1 && landedLegs.length !== results.length) {
-      this.alert(
-        `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (${results
-          .map((r, i) => `${candidate.legs[i]!.wallet.slice(0, 6)}:${r.outcome}`)
-          .join(" ")})`,
-      );
+    if (candidate.legs.length > 1 && results.some((r) => r.outcome !== "dry")) {
+      const missed = results.flatMap((r, i) => (r.outcome === "landed" ? [] : [candidate.legs[i]!.wallet.slice(0, 6)]));
+      const recent = this.digest.fleetRound(results.length, landedLegs.length, missed);
+      if (missed.length > 0) {
+        this.note("fleet_partial", `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (missed ${missed.join(" ")})`);
+      }
+      // Escalate on a rate, not per round: a sustained landing problem pushes once an hour.
+      if (this.digest.recentFleetRounds() >= 5 && recent < this.cfg.FLEET_LANDED_ALERT_FRACTION) {
+        this.alertThrottled("fleet_landing_rate", 3_600_000, "fleet_partial",
+          `⚠ fleet landing rate ${(recent * 100).toFixed(0)}% over the last ${this.digest.recentFleetRounds()} fleet rounds (below ${(this.cfg.FLEET_LANDED_ALERT_FRACTION * 100).toFixed(0)}%) — the fire offset or the RPC is losing legs; /health and the journal's "fire resolved" lines`);
+      }
     }
     const result =
       landedLegs[0] ??
@@ -2176,10 +2208,10 @@ export class Orchestrator {
     } else if (result.outcome === "dry") {
       this.transition("SETTLING", { dry: true });
     } else if (result.outcome === "missed_round") {
-      this.alert(`missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
+      this.alertThrottled("missed_round", 3_600_000, "missed_round", `missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
       this.transition("LOGGED", { missed: true });
     } else {
-      this.alert(`deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
+      this.alertThrottled(`deploy_${result.outcome}`, 3_600_000, "deploy_failed", `deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
       this.transition("LOGGED", { failed: true });
     }
     this.pnl.refreshDaily();
@@ -2888,7 +2920,7 @@ export class Orchestrator {
       this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, wallet, sig: signature });
     }
     if (result.outcome === "landed") {
-      this.alert(`⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
+      this.note("vault_buy", `⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
     }
     return signature;
   }
@@ -3041,7 +3073,7 @@ export class Orchestrator {
     }
     if (settled + gone + failed > 0) {
       this.log.info({ candidates: legs.length, settled, gone, failed }, "settle sweep");
-      if (failed > 0 && settled === 0) this.alert(`⚠ settle sweep: ${failed} landed leg(s) could not be settled (${legs.length} unsettled on record) — refunds are parked in deployment accounts; see the journal's "settle sweep" lines`);
+      if (failed > 0 && settled === 0) this.alertThrottled("settle_sweep", 6 * 3_600_000, "settle_sweep_failed", `⚠ settle sweep: ${failed} landed leg(s) could not be settled (${legs.length} unsettled on record) — refunds are parked in deployment accounts; see the journal's "settle sweep" lines`);
     }
   }
 
@@ -3357,7 +3389,7 @@ export class Orchestrator {
     );
     this.log.info({ amount: amount.toString(), wallet: authority.toBase58(), outcome }, "usd compound claim resolved");
     if (outcome === "landed") {
-      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`);
+      this.note("compound_claim", `compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`, Number(amount) / 1e6);
     }
   }
 
@@ -3845,6 +3877,10 @@ export class Orchestrator {
     });
 
     this.configSnapshot = this.configFields();
+    if (this.cfg.ALERT_DIGEST_HOURS > 0) {
+      this.digestTimer = setInterval(() => void this.sendDigest(), this.cfg.ALERT_DIGEST_HOURS * 3_600_000);
+      this.digestTimer.unref?.();
+    }
     this.loop.start();
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
@@ -3922,6 +3958,7 @@ export class Orchestrator {
     this.candidates.clear();
     this.health.stop();
     this.loop.stop();
+    if (this.digestTimer) clearInterval(this.digestTimer);
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();

@@ -842,6 +842,13 @@ const schema = z
      */
     AUTO_RAMP: boolFromEnv(true),
     RAMP_PRESENCE_TOLL_BPS: z.preprocess(emptyToUndef, z.coerce.number().int().min(0).max(10_000).default(300)),
+    /** Hours between Telegram digests of routine events (fleet leg outcomes,
+     * compound claims, ticket buys, cap-bound rounds). 0 = no scheduled digest
+     * (still on demand with /digest). Incidents push immediately regardless. */
+    ALERT_DIGEST_HOURS: z.preprocess(emptyToUndef, z.coerce.number().min(0).max(168).default(6)),
+    /** Escalate to one push when the fleet's landed-leg fraction over the last
+     * 10 fleet rounds falls below this. */
+    FLEET_LANDED_ALERT_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().min(0).max(1).default(0.8)),
     RAMP_ALERT_MIN_BPS: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).default(5),

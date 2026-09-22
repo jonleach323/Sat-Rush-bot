@@ -222,3 +222,23 @@ describe("settle on reveal, whatever the state machine is doing", () => {
     expect(settle).toHaveBeenCalledWith(99);
   });
 });
+
+describe("alert tiers", () => {
+  it("routine fleet outcomes go to the digest; a sustained low landing rate pushes once", async () => {
+    h = await bootHarness();
+    const pushed: string[] = [];
+    vi.spyOn(h.orch, "alert").mockImplementation((m: string) => void pushed.push(m));
+    const digest = (h.orch as unknown as { digest: { fleetRound: (s: number, l: number, m: string[]) => number } }).digest;
+    const orch = h.orch as unknown as { note: (k: string, m: string, u?: number) => void; alertThrottled: (k: string, c: number, n: string, m: string) => void };
+    // 40 compound claims: noted, never pushed.
+    for (let i = 0; i < 40; i++) orch.note("compound_claim", `claim ${i}`, 50);
+    expect(pushed).toHaveLength(0);
+    // The throttled incident path pushes once per window.
+    for (let i = 0; i < 5; i++) orch.alertThrottled("missed_round", 3_600_000, "missed_round", `missed ${i}`);
+    expect(pushed).toEqual(["missed 0"]);
+    digest.fleetRound(21, 21, []);
+    const text = h.orch.sendDigest()!;
+    expect(text).toContain("USD compound claims: 40 · $2000.00");
+    expect(text).toContain("missed rounds: 4");
+  });
+});

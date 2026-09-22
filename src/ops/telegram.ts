@@ -161,6 +161,8 @@ export interface TelegramDeps {
   getStatus(): StatusReport | Promise<StatusReport>;
   getPnl(): PnlSummary | Promise<PnlSummary>;
   getPosition?(): PositionReport | Promise<PositionReport>;
+  /** Flush the routine-event digest now; returns its text (also pushed). */
+  digest?(): string;
   pause(): void;
   resume(): void;
   kill(reason: string): void;
@@ -292,6 +294,12 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     if (!authorized(ctx.chat?.id)) return;
     const c = await pnlCard("today");
     await ctx.reply(c.text, c.extra);
+  });
+  bot.command("digest", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.digest) return void ctx.reply("digest unavailable");
+    const text = opts.deps.digest();
+    if (text.startsWith("nothing")) await ctx.reply(text);
   });
   bot.command("position", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
@@ -503,7 +511,7 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(
       [
         "⛏ SAT RUSH commands (V2)",
-        "view: /status /board /me /pnl /position /rounds /competitors /vault /wallets /fleet /deposit /health",
+        "view: /status /board /me /pnl /position /digest /rounds /competitors /vault /wallets /fleet /deposit /health",
         "control: /pause /resume /kill",
         "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),
