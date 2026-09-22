@@ -108,6 +108,30 @@ TOLERANCE` and `WALLET_DRIFT_TOLERANCE_USD` stay at their §0/​default values
    COUNT(*) FROM my_deploys GROUP BY 1;`). A tripwire halt (KILL file) means
    stop and investigate — otherwise let the EV engine run.
 
+## 1a. Engineering discipline (what "production" means here)
+
+- **CI** (`.github/workflows/ci.yml`) runs `pnpm typecheck`, `pnpm lint`,
+  `pnpm test` and `pnpm build` on every push; `pnpm check` is the same
+  locally. Lint is typescript-eslint's type-checked set plus the rules that
+  match this bot's failure modes (dropped promises, promises in booleans,
+  switch exhaustiveness, dead code).
+- **The orchestrator has its own tests** (`test/orchestrator.test.ts` on
+  `test/harness/`): a full round on fakes — real Bankroll, CandidateSet,
+  RaceSender (dry) and GameState; fake RPC, fake ingest, in-memory DB,
+  IDL-encoded account fixtures. Any change to `src/index.ts` that touches
+  ordering (refresh, ARM, fire), the kill switch, bursts or reconnects
+  gets a test there first; that layer is where every 2026-09-21 bug lived.
+- **The process measures itself**: `/health` (Telegram and `/api/health`)
+  reports event-loop delay, the worst block of the window and lifetime,
+  and every timed job's last/max/mean. `event_loop_blocked` alerts name
+  the job. A silent stream, a frozen Telegram and a late fire all start
+  as a blocked loop; look there first.
+- **Config lint** at boot and in preflight names each operationally wrong
+  env value with its fix (§7a lists the ones that bit).
+- **Upgrades are one command**: `sudo /opt/satrush/deploy/upgrade.sh`
+  (§11). It refuses to restart on a failed preflight and verifies the
+  revision the service logs is the one it built.
+
 ## 2. Rollback / emergency stop
 
 Fastest to slowest — all of these stop *new* risk immediately:
@@ -121,9 +145,17 @@ Fastest to slowest — all of these stop *new* risk immediately:
    closed. In-flight round: the bankroll latch already prevents re-fires;
    an already-sent deploy settles normally later.
 
-The kill switch stops deploys, settles, and sweeps. It does NOT cancel a
-transaction already on the wire — that one resolves via confirm.ts and is
-recorded either way.
+The kill switch stops deploys, settles, and sweeps — and the fleet
+treasury with them: under `/kill` or a KILL file no deposit is distributed
+to the sub-wallets, no USD is claimed, and the affiliate tag is not
+registered (the tag is retried on the first treasury cycle after the file
+goes). It does NOT cancel a transaction already on the wire — that one
+resolves via confirm.ts and is recorded either way.
+
+To hold *trading only* while the treasury keeps moving your own money
+between your own wallets, use **Telegram `/pause`** instead: deploys skip
+with reason `paused`, top-ups, sweeps and USD claims continue, `/resume`
+re-arms. The KILL file is the full stop.
 
 ## 3. Drain procedure (exit the game entirely)
 
@@ -271,6 +303,67 @@ Use an outbound tunnel from the VPS:
 paste the HTTPS URL + token; Claude fetches `<url>/api/status` etc. and
 diagnoses. Use a monitoring-scoped API_TOKEN you can rotate (it's read-only
 and everything it shows is public chain data, but rotate it after sharing).
+
+### 7a. Ingest drops: what the journal shows and what to do
+
+A stream that goes quiet (no error, no end — a half-open connection) is
+rebuilt by the gRPC source itself: HTTP/2 keepalive (PING every 10 s, dead
+after 5 s) surfaces most of them at the transport within ~15 s, and the
+silence watchdog kills anything else after 5 × `STALENESS_MS` (floor 7.5 s,
+cap 30 s). The reconnect asks LaserStream to **replay from the last slot
+seen** (`fromSlot`, ~3000 slots of retention), so the gap fills itself; a
+refused replay falls back to live-only once, and the orchestrator re-reads
+config/board/round/vaults/Miners over RPC on every reconnect regardless.
+Fires are gated on a live stream throughout, so a drop costs rounds, never
+a mis-priced deploy.
+
+**Rule out the bot's own event loop first.** Every model computation runs
+synchronously inside it; a slow one is indistinguishable from a silent
+stream (no data events are handled until it ends, then the watchdog reports
+the whole block as silence). The 2026-09-21 "100 s silences" on a healthy
+LaserStream were exactly that: the treasury planner's uncapped selector run
+walked toward $1M one dollar at a time, every 60 s and on every dashboard
+poll. `pnpm grpc-probe` in a separate process is the discriminator: a clean
+probe while the bot reports silence means the bot, not the stream.
+
+The journal line on a drop names how the stream lived:
+`ingest disconnected … (stream lived 1830s, 4571 slots, last slot N,
+reconnects K)`. One drop an hour is a provider/LB rotation and costs
+nothing; several an hour is worth escalating. Get evidence with
+
+    pnpm grpc-probe 15
+
+(scripts on the box find `/etc/satrush/.env` on their own when there is no
+`.env` in the working directory; `DOTENV_CONFIG_PATH=<file>` overrides)
+which subscribes exactly as the bot does and prints slots/s, the worst
+silence, the lag against the HTTP RPC head and every disconnect, then a
+verdict. If the RPC head kept moving while the stream was silent, the
+stream is at fault: send the output, the endpoint region and the timestamps
+to the provider. Keep `STALENESS_MS` at 1500: it is the fire gate, and a
+large value only delays the watchdog (a 20 s value gave a 100 s grace).
+
+### 7b. Load budget (what the process does per unit time)
+
+Audited 2026-09-21 after the event-loop blocks. Everything the bot does on
+a timer, with its cost, so a slow `/fleet` or a "silent" stream can be
+checked against the budget instead of the box being blamed:
+
+| every | job | cost |
+|---|---|---|
+| slot (~2.5/s) | apply slot, fire check while ARMED | µs; `evDiagnostics` a few EV evaluations while ARMED |
+| Round write (burst at round open) | apply account, **one** snapshot row per 5 slots, **one coalesced** candidate refresh per 750 ms (selector ×3 variants + one signature per wallet) | ~150 ms CPU per refresh, ≤ ~1.3/s during a burst |
+| 10 s | health: RPC `getSlot`, SOL + USDC balance | 3 RPC calls |
+| 30 s | drift check (21 wallets × 2 RPC), limits, fire-offset / hashrate / rival queries (LIMIT 200–500 rows), price feed | 42 RPC calls, ms of SQLite |
+| 30 s | token feed: API oracle + Jupiter quote | 2 HTTPS calls |
+| 60 s | treasury: 21 wallets × 2 RPC, USD claims, plan (uncapped want **memoized per round**) | 42 RPC calls + sends |
+| 20 rounds | automation book `getProgramAccounts` (~600 accounts) | one heavy RPC call |
+| 1 h | prune observation history older than 6000 rounds | one transaction |
+| dashboard viewer, 3 s | 8 JSON endpoints; intel **cached 10 s** | LIMIT queries |
+
+RSS is ~150–250 MB (node + Yellowstone napi + SQLite). On a 1 GB box keep
+the 2 GB swapfile (§6) and check `free -m`: swapping shows up as multi-second
+stalls that look exactly like the blocks above. `nproc` 1 is enough; the bot
+is single-threaded and the budget above is a few percent of one core.
 
 ## 8. Send-path infrastructure (latency + inclusion)
 
@@ -482,6 +575,16 @@ address.
    the grace lets presence deploy every third round if fees bite).
 
 ## 11. Upgrading a running V1 deployment to the V2 fleet
+
+**Routine upgrades after that** (any later commit on the branch):
+
+    sudo /opt/satrush/deploy/upgrade.sh            # fast-forward the current branch
+    sudo /opt/satrush/deploy/upgrade.sh <branch>   # or switch to a branch / rev
+
+Backup → fetch → install → build → dist-newer-than-src check → env:migrate
+→ preflight (a failure keeps the old build running) → restart → the boot
+line's `rev` must equal the built revision or the script fails loudly.
+
 
 The V1 bot on the VPS keeps running until step 3; the V2 build is a
 different program model, a fleet, and derived limits, so the upgrade is:

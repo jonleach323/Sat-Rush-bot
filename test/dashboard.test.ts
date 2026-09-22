@@ -59,6 +59,7 @@ function loadDashboard() {
     },
   };
   const errors: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const factory = new Function(
     "document",
     "fetch",

@@ -229,14 +229,36 @@ export async function bootstrapGameState(
   opts: BootstrapOptions = {},
 ): Promise<GameState> {
   const programId = opts.programId ?? PROGRAM_ID;
+  const minerAddresses = minerAddressesOf(opts, programId);
+  const state = new GameState(minerAddresses.length > 0 ? minerAddresses : null, opts.onRollback);
+  await reseedGameState(connection, state, opts);
+  return state;
+}
+
+function minerAddressesOf(opts: BootstrapOptions, programId: PublicKey): PublicKey[] {
   const authorities =
     opts.minerAuthority === undefined
       ? []
       : Array.isArray(opts.minerAuthority)
         ? opts.minerAuthority
         : [opts.minerAuthority];
-  const minerAddresses = authorities.map((a) => minerPda(a, programId));
-  const state = new GameState(minerAddresses.length > 0 ? minerAddresses : null, opts.onRollback);
+  return authorities.map((a) => minerPda(a, programId));
+}
+
+/**
+ * Re-read the tracked accounts over HTTP RPC into an EXISTING state, stamped
+ * at the RPC head slot so the monotonicity guard orders them after whatever
+ * the stream last delivered. Used after an ingest reconnect: a stream that
+ * was silent for minutes missed the Board/Round/Miner writes in the gap,
+ * and Yellowstone does not replay them.
+ */
+export async function reseedGameState(
+  connection: Connection,
+  state: GameState,
+  opts: BootstrapOptions = {},
+): Promise<{ slot: number; roundId: number | undefined }> {
+  const programId = opts.programId ?? PROGRAM_ID;
+  const minerAddresses = minerAddressesOf(opts, programId);
 
   const staticKeys = [
     satrushConfigPda(programId),
@@ -273,5 +295,5 @@ export async function bootstrapGameState(
     // snapshot — an unstamped baseline would compare against older replays.
     if (roundInfo) state.applyAccount(roundAddress, roundInfo.data, bootSlot);
   }
-  return state;
+  return { slot: bootSlot, roundId };
 }

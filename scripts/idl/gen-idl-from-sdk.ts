@@ -185,7 +185,7 @@ function instructionAccounts(pascal: string): IxAccount[] {
     ?? new RegExp(`function get${pascal}Instruction\\(input, config\\) \\{([\\s\\S]*?)\\n\\}`).exec(mjs);
   if (!fn) return fail(`no builder for ${pascal}`);
   const body = fn[1] as string;
-  const table = /const originalAccounts = \{([\s\S]*?)\n  \};/.exec(body);
+  const table = /const originalAccounts = \{([\s\S]*?)\n {2}\};/.exec(body);
   if (!table) return fail(`no account table for ${pascal}`);
   const inputType = new RegExp(`type ${pascal}(?:Async)?Input<[\\s\\S]*?> = \\{([\\s\\S]*?)\\n\\};`).exec(dts);
   const signers = new Set([...(inputType?.[1] ?? "").matchAll(/(\w+)\??: TransactionSigner</g)].map((m) => m[1] as string));

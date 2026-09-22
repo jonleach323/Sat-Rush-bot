@@ -8,7 +8,6 @@ import { selectAllocation as productionSelect } from "../src/strategy/selector.j
 import {
   runScenario,
   SCENARIOS,
-  STRATEGIES,
   simulateRound,
   type RivalProfile,
   type Split,

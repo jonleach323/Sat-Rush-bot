@@ -4,13 +4,29 @@
  *
  * Run directly (`tsx src/config.ts`) to print a redacted summary and exit.
  */
-import "dotenv/config";
-import { realpathSync } from "node:fs";
+import { config as loadDotenv } from "dotenv";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
 import { EPOCH_DEDUP_UPLIFT, EPOCH_FIELD_BANKED_SHARE, EPOCH_LAST_CLOSE_POOL_USD, EPOCH_LAST_CLOSE_TICKETS, STRIKE_PAYOUT_FRACTION, STAKING_YIELD_DAILY } from "./strategy/facts.js";
 import { PROGRAM_ADDRESS } from "./adapter/idl.js";
+
+/**
+ * Where the env comes from, first match wins: DOTENV_CONFIG_PATH, `.env` in
+ * the working directory, then the service's `/etc/satrush/.env` — so
+ * `pnpm preflight` / `pnpm grpc-probe` on the VPS read the same file the
+ * systemd unit does without sourcing it by hand. Variables already in the
+ * process environment always win (dotenv never overrides).
+ */
+export const ENV_FILE_CANDIDATES = [".env", "/etc/satrush/.env"] as const;
+export function resolveEnvFile(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.DOTENV_CONFIG_PATH) return env.DOTENV_CONFIG_PATH;
+  for (const p of ENV_FILE_CANDIDATES) if (existsSync(p)) return p;
+  return null;
+}
+const envFile = resolveEnvFile();
+if (envFile) loadDotenv({ path: envFile });
 
 const emptyToUndef = (v: unknown) =>
   typeof v === "string" && v.trim() === "" ? undefined : v;
@@ -486,10 +502,14 @@ const schema = z
       pubkeyString.optional().default("7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"),
     ),
     /** Max slots between an update's posted slot and chain head before it is
-     * rejected as stale (~150 slots ≈ 60s). */
+     * rejected as stale. The mainnet sponsored feeds heartbeat every ~60 s
+     * (~150 slots), so a 150-slot gate rejected the feed at every heartbeat
+     * edge (observed stale_173_slots at boot); 400 slots ≈ 160 s leaves two
+     * missed heartbeats. The price feeds marks and the fee hurdle, not a
+     * trade price. A stale-but-verified quote is still held over the seed. */
     PRICE_MAX_STALE_SLOTS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(150),
+      z.coerce.number().int().positive().default(400),
     ),
     /** Reject a quote whose confidence/price exceeds this. */
     PRICE_MAX_CONFIDENCE_RATIO: z.preprocess(

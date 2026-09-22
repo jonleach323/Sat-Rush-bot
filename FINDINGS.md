@@ -1755,7 +1755,7 @@ amount` is gross), the 35% deferred hashrate releases only via `claim_sats`
 pro rata, grubstake plays earn no hashrate and their USD returns to the
 grubstake, affiliate points are 10 bps of referred volume 1:1 to grubstake,
 `claim_usd` is fee-free, staking has no lock/cooldown/fee, the epoch
-iteration is 2,318,400 slots (10.73 d; the app's "7 days" is stale), the
+iteration is 2,318,400 slots (7.2 d at the live 267 ms slot — the "10.73 d" first written here assumed 400 ms slots; the app's "7 days" was right), the
 1-BTC vault is at 12.74% with 231,393 tickets, and a 1-BTC ticket is worth
 1.6–3.5× an epoch ticket per unit of hashrate.
 
@@ -1810,3 +1810,38 @@ $1.49, 3.6%) on its own — the curve's optimum to within a few dollars.
 MIN_EDGE_BPS defaults to 25 under V2; tile mode applies to partial
 blankets too (the water-filler weights toward emptier tiles and may leave
 a crowded one out).
+
+
+## E-v2-retune — the owner's "Tuning the vaults" announcement (2026-09-21)
+
+Announced: the Sat Strike takes a bigger cut of every deployment ("pots
+climb roughly 15% faster"), and the Epoch Vault moves "from a 3-day cycle
+to a weekly one". Read on chain at round 69694 (`readSatrushConfig`):
+strike 240 / epoch 104 / one_btc 48 / protocol 100 / buybacks 108 bps,
+modulus 1097, iteration 2,318,400 slots — nothing had moved yet. At the
+live 267 ms slot that iteration is already 7.2 days (iteration 16:
+2026-09-16 09:33 → 09-23 13:55), so the epoch change may describe what is
+on chain rather than a pending write; the strike change is pending.
+
+What adapts on its own: every fee leg, the refund arithmetic, the strike
+pot growth and the epoch horizon are read from the SatrushConfig account
+at use time, and the account is now in the ingest watch list — a rewrite
+is decoded, named in an alert (`strike_fee_bps 240→276 …`), the per-round
+memos dropped and the round re-priced (harness test "on-chain config
+retune"). Preflight's `economics_within_tolerance` is non-fatal for the
+same reason. A 15% strike increase inside a fixed 600 bps layer means
+another leg shrinks; the fee legs were 208/194/48/100/50 at launch and
+240/104/48/100/108 since round 64176, so the epoch or buybacks leg is the
+likely donor.
+
+What does NOT adapt and wants a re-measure once the split lands:
+`MEASURED_ECONOMICS` (preflight baseline), `V2_BUYBACKS_FEE_BPS` (facts),
+`STRIKE_PAYOUT_FRACTION` (should hold — "nothing else about the strike
+changes"), the epoch pool-per-ticket facts (`EPOCH_LAST_CLOSE_*`: a bigger
+strike cut funded from the epoch leg lowers the pool per ticket; funded
+from buybacks it lowers the staking yield `STAKING_YIELD_DAILY` instead),
+and `pnpm ev-map` / `pnpm buy-vs-mine` for the new toll. Direction for the
+fleet: a larger strike leg is a larger pro-rata return to a blanket (the
+strike pays everyone on the winning tile), so the blanket's toll falls
+slightly and boost windows get a bigger jackpot; a smaller epoch leg
+lowers the hashrate value that the same blanket earns.

@@ -57,6 +57,7 @@ import {
   minerPda,
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
+  satrushConfigPda,
   satsVaultPda,
   tokenVaultPda,
   affiliatePda,
@@ -87,18 +88,38 @@ import { CandidateSet, type EvSource,
 } from "./exec/candidates.js";
 import { FeeEstimator } from "./exec/fees.js";
 import { RaceSender } from "./exec/sender.js";
-import { assembleTx, loadKeypair } from "./exec/tx.js";
+import { assembleTx } from "./exec/tx.js";
 import { depositInfo, qrDataUrl, qrPng } from "./ops/deposit.js";
 import { dynamicFloatBase, planFleet, type FleetPlan, type FleetTransfer } from "./exec/fleet-plan.js";
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
+import { buildInfo } from "./ops/build-info.js";
+import { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
+export { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
+import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
+import { lintConfig } from "./ops/config-lint.js";
+
+/** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
+const REFRESH_MIN_INTERVAL_MS = 750;
+/**
+ * The final re-pricing runs this many slots BEFORE the fire offset, not at
+ * it: a blockhash fetch plus 21 signatures cost ~0.5 s, and spending that
+ * inside the fire window (offset 5 slots ≈ 2 s, send→land 1–2 slots) is
+ * how round 69566 landed after cutoff (round_not_active). The board is
+ * final ~40 s before cutoff, so pricing 3 slots earlier loses nothing.
+ */
+const PRE_ARM_SLOTS = 3;
+/** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
+const SNAPSHOT_MIN_SLOTS = 5;
+/** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
+const OBSERVATION_KEEP_ROUNDS = 6_000;
 import { assertDeployInvariants, assertFeeBearingInvariants } from "./exec/guards.js";
 import { reconcileRoundOutcome, reconcileRoundOutcomeV2, reconcileWalletDrift } from "./strategy/reconcile.js";
 import { parseTransactionEvents } from "./ingest/events.js";
 import { YellowstoneIngest } from "./ingest/grpc.js";
 import { PriceFeed } from "./ingest/prices.js";
-import { bootstrapGameState, type GameState } from "./ingest/snapshot.js";
+import { bootstrapGameState, reseedGameState, type GameState } from "./ingest/snapshot.js";
 import type { IngestSource } from "./ingest/types.js";
 import { WsRpcIngest } from "./ingest/wsrpc.js";
 import { logger } from "./logger.js";
@@ -112,7 +133,9 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { selectAllocation } from "./strategy/selector.js";
+import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
 import { TokenFeed } from "./ingest/token-feed.js";
 import { WalletSet, type WalletState } from "./exec/wallets.js";
 import { predictFinalOccupancy } from "./strategy/predict.js";
@@ -141,35 +164,14 @@ export type BotState =
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 
-/**
- * The risk limits in auto mode. Per round: the fleet's deployable USDC (cash
- * is the only cap; the selector and Kelly size below it). Daily: a fraction
- * of the day's opening USDC, never below $5. A configured positive value is a
- * hard figure instead. Exported for tests.
- */
-export function deriveLimits(
-  cfg: { MAX_PER_ROUND_USD: number; DAILY_LOSS_CAP_USD: number; AUTO_DAILY_LOSS_FRACTION: number },
-  fleetUsdcBase: bigint,
-  dayOpenUsdcBase: bigint | null,
-): { maxPerRound: bigint; dailyLossCap: bigint } {
-  const floor = usdToBase(1);
-  const maxPerRound = cfg.MAX_PER_ROUND_USD > 0 ? usdToBase(cfg.MAX_PER_ROUND_USD) : fleetUsdcBase > floor ? fleetUsdcBase : floor;
-  const base = dayOpenUsdcBase ?? fleetUsdcBase;
-  const autoDaily = BigInt(Math.round(Number(base) * cfg.AUTO_DAILY_LOSS_FRACTION));
-  const dailyFloor = usdToBase(5);
-  const dailyLossCap = cfg.DAILY_LOSS_CAP_USD > 0 ? usdToBase(cfg.DAILY_LOSS_CAP_USD) : autoDaily > dailyFloor ? autoDaily : dailyFloor;
-  return { maxPerRound, dailyLossCap };
-}
-
-/** Affiliate tag derived from the primary's public key when none is configured: `sr` + the first 10 alphanumerics, lower-cased. */
-export function autoAffiliateTag(primary: PublicKey): string {
-  return ("sr" + primary.toBase58().toLowerCase().replace(/[^a-z0-9]/g, "")).slice(0, 12);
-}
-
 export class Orchestrator {
   botState: BotState = "BOOT";
   private roundId: number | null = null;
   private paused = false;
+  /** Set on an ingest drop; the next connect re-reads the tracked accounts over RPC. */
+  private ingestWasDown = false;
+  /** Affiliate tag confirmed on chain (or registered) — the treasury cycle retries until then. */
+  private affiliateTagDone = false;
   /** Armed until the ramp alert fires; re-armed when the signal drops below 0. */
   private rampAlertArmed = true;
   /** Last blanket-at-streak-cap EV (bps of gross), presence credit excluded; the auto-ramp reads it. */
@@ -217,6 +219,11 @@ export class Orchestrator {
   private telegram: TelegramOps | null = null;
   private api: MonitorApi | null = null;
   private readonly health: HealthMonitor;
+  /** Event-loop instrumentation: a block gets a duration and a job name (ops/loop-lag.ts). */
+  private readonly loop = new EventLoopMonitor();
+  private readonly jobs = new JobTimer({
+    onSlow: (name, ms, budgetMs) => this.log.warn({ job: name, ms: Math.round(ms), budgetMs }, "slow job — the event loop was held this long"),
+  });
   private readonly monitor: MonitorData;
   private readonly startedAtMs = Date.now();
 
@@ -259,6 +266,8 @@ export class Orchestrator {
         },
         dbLastWriteError: () => this.db.lastWriteError(),
         alert: (m) => this.alert(m),
+        loop: () => this.loop.snapshot(),
+        slowestJob: () => this.jobs.window(),
       },
       {
         solFloorLamports: Math.round(cfg.SOL_FLOOR_SOL * 1e9),
@@ -279,6 +288,11 @@ export class Orchestrator {
       maxPerRoundBase: () => this.bankroll.maxPerRoundBase,
       dailyLossCapBase: () => this.bankroll.dailyLossCapBase,
       myAuthority: this.payer.publicKey.toBase58(),
+      loopHealth: () => {
+        const last = this.health.lastLoopSnapshot();
+        return last ? { ...last, worstEverMs: Math.round(this.loop.worstEverMs), worstEverAt: this.loop.worstEverAt } : null;
+      },
+      jobStats: () => this.jobs.stats(),
       deposit: () => this.depositBlock ?? { ...depositInfo(this.payer.publicKey.toBase58(), this.ixCtx.usdMint.toBase58(), this.wallets.size), usdcQr: "", solQr: "" },
       solBalanceLamports: () =>
         this.connection.getBalance(this.payer.publicKey, "processed"),
@@ -320,6 +334,38 @@ export class Orchestrator {
         return { usdPerRawUnit, source };
       },
     });
+  }
+
+  /**
+   * Test seam: build an orchestrator from already-constructed parts (fakes
+   * for the connection, ingest source and sender; an in-memory DB). The
+   * orchestration — state machine, refresh coalescing, ARM-edge re-pricing,
+   * kill-switch gating, treasury — is otherwise reachable only through
+   * boot() against live RPC, which is where every 2026-09-21 bug lived.
+   */
+  static forTest(parts: {
+    cfg: Config;
+    connection: Connection;
+    state: GameState;
+    source: IngestSource;
+    db: StateDb;
+    pnl: Pnl;
+    bankroll: Bankroll;
+    candidates: CandidateSet;
+    sender: RaceSender;
+    feeEstimator: FeeEstimator;
+    payer: Keypair;
+    ixCtx: InstructionContext;
+    fees: FeeModel;
+    prices: PriceFeed;
+    tokenFeed: TokenFeed | null;
+    wallets: WalletSet;
+  }): Orchestrator {
+    return new Orchestrator(
+      parts.cfg, parts.connection, parts.state, parts.source, parts.db, parts.pnl, parts.bankroll,
+      parts.candidates, parts.sender, parts.feeEstimator, parts.payer, parts.ixCtx, parts.fees,
+      parts.prices, parts.tokenFeed, parts.wallets,
+    );
   }
 
   static async boot(cfg: Config): Promise<Orchestrator> {
@@ -551,6 +597,7 @@ export class Orchestrator {
     });
 
     const watch = [
+      satrushConfigPda(programId), // the fee split and durations: re-priced live when the owner moves them
       satsVaultPda(programId),
       tokenVaultPda(programId),
       ...wallets.pubkeys().map((w) => minerPda(w, programId)),
@@ -764,6 +811,7 @@ export class Orchestrator {
     this.roundId = roundId;
     this.skipLogged.clear();
     this.fireInFlight = false;
+    this.preArmed = false;
     this.transition("ROUND_OPEN", { cutoff: this.state.slotsToCutoff() });
     void this.refreshCandidates("round_open");
   }
@@ -775,6 +823,84 @@ export class Orchestrator {
     this.log.info({ roundId: this.roundId, reason: key, ...detail }, "fire skipped");
     // Persisted too: a log line cannot answer "why has it not fired all day".
     if (this.roundId !== null) this.db.recordSkip(this.roundId, key, detail);
+  }
+
+  /** Coalescing state for occupancy-driven refreshes (see requestRefresh). */
+  private refreshInFlight = false;
+  private refreshQueued = false;
+  private refreshTimer: NodeJS.Timeout | null = null;
+  private lastRefreshStartMs = 0;
+
+  /**
+   * Occupancy updates arrive in bursts — every deploy on the board rewrites
+   * the Round account, and the automation crank fires dozens at round open.
+   * Each refresh runs the selector (three variants) and signs one leg per
+   * wallet, all synchronously, so refreshing per update spends seconds of
+   * CPU per round inside the event loop. This coalesces: one refresh in
+   * flight at a time, at most one per REFRESH_MIN_INTERVAL_MS, and a burst
+   * collapses into a single trailing refresh that sees the final board.
+   * The fire check runs after each refresh while ARMED, as before.
+   */
+  private requestRefresh(trigger: string): void {
+    if (this.refreshInFlight || this.refreshTimer) {
+      this.refreshQueued = true;
+      return;
+    }
+    const wait = Math.max(0, this.lastRefreshStartMs + REFRESH_MIN_INTERVAL_MS - Date.now());
+    if (wait === 0) void this.runRefresh(trigger, true);
+    else this.refreshTimer = setTimeout(() => void this.runRefresh(trigger, true), wait);
+  }
+
+  /** Set once per round when the pre-arm re-pricing has been started. */
+  private preArmed = false;
+
+  /**
+   * PRE_ARM_SLOTS before the fire offset: price the round on the (final)
+   * board and this tick's ramp signal, and rebuild the signed legs with a
+   * fresh blockhash — so the ARM tick has nothing left to do but send. The
+   * candidates on hand before this were built at the last occupancy update,
+   * with that moment's forecast and before evDiagnostics() could floor the
+   * presence credit (round 68883: blanket +73 bps, selector empty). If the
+   * bot is already ARMED when this refresh lands, it fires from here.
+   */
+  private async preArm(cutoff: number): Promise<void> {
+    this.log.debug({ roundId: this.roundId, cutoff }, "pre-arm: final re-pricing");
+    if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
+    await this.refreshNow("pre_arm", true);
+  }
+
+  private refreshPromise: Promise<void> | null = null;
+
+  /** Run one refresh now, after any in-flight one; cancels a pending coalesced timer (this refresh supersedes it). */
+  private async refreshNow(trigger: string, fireAfter = false): Promise<void> {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    this.refreshQueued = false;
+    while (this.refreshPromise) await this.refreshPromise;
+    await this.runRefresh(trigger, fireAfter);
+  }
+
+  private runRefresh(trigger: string, fireAfter: boolean): Promise<void> {
+    this.refreshTimer = null;
+    this.refreshInFlight = true;
+    this.lastRefreshStartMs = Date.now();
+    const p = this.jobs
+      .timed("candidate_refresh", () => this.refreshCandidates(trigger), 1_000)
+      .then(() => {
+        if (fireAfter && this.botState === "ARMED") void this.tryFire();
+      })
+      .finally(() => {
+        this.refreshInFlight = false;
+        this.refreshPromise = null;
+        if (this.refreshQueued) {
+          this.refreshQueued = false;
+          this.requestRefresh(`${trigger}_trailing`);
+        }
+      });
+    this.refreshPromise = p;
+    return p;
   }
 
   private async refreshCandidates(trigger: string): Promise<void> {
@@ -1000,7 +1126,18 @@ export class Orchestrator {
       const model = "model" in src ? src.model(src.predictedStakes) : v1Model(src);
       const cap = this.effectiveMaxPerRoundBase();
       if (cap <= 0n) return {};
-      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / BigInt(TILES_COUNT));
+      // The ramp signal is priced on the MINIMUM blanket — the on-chain min
+      // deploy on every covered tile, which is exactly what the ramp deploys.
+      // Pricing it on a cap-sized blanket made the signal depend on the
+      // bankroll: with MAX_PER_ROUND auto-derived from $35k of USDC, a $35k
+      // blanket at the streak cap is deeply negative under dilution, the
+      // ramp never armed, and a bot at streak 1 sat out a 2× boost window
+      // that a $21 ramp would have paid in (2026-09-21 evening).
+      const minDeploy = BigInt(this.state.satrushConfig?.min_deploy_usd_amount.toString() ?? "1000000");
+      const tiles = BigInt(TILES_COUNT);
+      const rampTotal = minDeploy * tiles <= cap ? minDeploy * tiles : cap - (cap % tiles);
+      const rampBlanket = new Array<bigint>(TILES_COUNT).fill(rampTotal / tiles);
+      const blanket = new Array<bigint>(TILES_COUNT).fill(cap / tiles);
       const emptiest = model.predictedStakes.reduce((b, s, i, a) => (s < (a[b] ?? 0n) ? i : b), 0);
       const single = new Array<bigint>(TILES_COUNT).fill(0n);
       single[emptiest] = cap;
@@ -1014,18 +1151,29 @@ export class Orchestrator {
         if (!("model" in src) || !base?.hashrate) return null;
         // Presence credit excluded: the auto-ramp floors it off THIS signal,
         // so including it would make the signal confirm itself.
-        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0 });
+        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
       })();
       const atCap = capped ? bps(capped.ev(single), cap) : null;
       // The blanket at the cap is the "flip" signal: a blanket is parimutuel
       // (the refund, sats and strike legs come back pro rata whatever wins),
       // so its EV at the cap is the non-token toll against the RUSH yield —
       // positive means mining RUSH is cheaper than buying it (pnpm buy-vs-mine).
-      const blanketAtCap = capped ? bps(capped.ev(blanket), cap - (cap % BigInt(TILES_COUNT))) : null;
-      this.rampSignal(blanketAtCap);
+      const rampAtCap = capped && rampTotal > 0n ? bps(capped.ev(rampBlanket), rampTotal) : null;
+      // The boost cycle: what the cap is worth ACROSS windows, not on this
+      // unboosted round alone. Argmax deploys at the cap (unboosted, boosted)
+      // are priced once per round; the ramp signal is the cycle-weighted EV.
+      const cycle = this.boostCycleAtCap(src, rampBlanket, rampTotal);
+      this.rampSignal(cycle?.cycleEvBps ?? rampAtCap);
       return {
-        blanketEvBps: bps(model.ev(blanket), cap - (cap % BigInt(TILES_COUNT))),
-        blanketEvBpsAtStreakCap: blanketAtCap,
+        ...(cycle ?? {}),
+        // The minimum blanket (what the ramp deploys): today's streak, and at the streak cap (the ramp signal).
+        rampBlanketUsd: Number(rampTotal) / 1e6,
+        blanketEvBps: rampTotal > 0n ? bps(model.ev(rampBlanket), rampTotal) : null,
+        blanketEvBpsAtStreakCap: rampAtCap,
+        // The cap-sized blanket, for scale: how the bankroll-sized deploy prices.
+        capBlanketUsd: Number(cap - (cap % tiles)) / 1e6,
+        capBlanketEvBps: bps(model.ev(blanket), cap - (cap % tiles)),
+        capBlanketEvBpsAtStreakCap: capped ? bps(capped.ev(blanket), cap - (cap % tiles)) : null,
         emptiestTile: emptiest,
         emptiestEvBps: bps(model.ev(single), cap),
         emptiestEvBpsAtStreakCap: atCap,
@@ -1051,10 +1199,13 @@ export class Orchestrator {
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
       this.rampAlertArmed = false;
       this.alert(
-        `ramp pays: an even blanket at the streak cap is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
+        `ramp pays: holding the streak cap across the boost cycle is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
-    } else if (!this.rampAlertArmed && blanketAtCapBps < 0) {
+    } else if (!this.rampAlertArmed && blanketAtCapBps < -min) {
+      // Hysteresis: re-arm only once the signal has fallen a full margin below
+      // zero, so a signal hovering around the threshold (−11 / +6 bps on
+      // 2026-09-21) does not alert every other round.
       this.rampAlertArmed = true;
     }
   }
@@ -1080,7 +1231,7 @@ export class Orchestrator {
       tokenYieldPerVolume,
       strikeExpectedPot: this.strikeExpectedPotBase(),
       ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
-      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...this.presenceTerms(ctx.presenceCreditBase ?? 0),
       ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
     };
   }
@@ -1107,7 +1258,7 @@ export class Orchestrator {
       tokenYieldPerVolume,
       strikeExpectedPot: this.strikeExpectedPotBase(),
       ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
-      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...this.presenceTerms(ctx.presenceCreditBase ?? 0),
       ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
     };
     return {
@@ -1126,12 +1277,83 @@ export class Orchestrator {
    * priced sink, so this can never conjure a credit out of an unpriceable
    * asset.
    */
+  /**
+   * How the presence credit enters the V2 model. Tile mode: one credit per
+   * covered tile, priced on that tile's WALLET (its own streak, its own
+   * grace window, its own ramp), and no round-level credit. Otherwise the
+   * single credit as before.
+   */
+  private presenceTerms(single: number): { presenceCreditBase: number; presenceCreditPerTileBase?: number[] } {
+    const perTile = this.presenceCreditPerTile();
+    return perTile ? { presenceCreditBase: 0, presenceCreditPerTileBase: perTile } : { presenceCreditBase: single };
+  }
+
+  /**
+   * The ramp floor for ONE wallet-round: what makes the selector keep this
+   * wallet's minimum leg in the blanket while its streak climbs — the
+   * minimum blanket's per-tile toll at today's streak, plus the edge floor
+   * and this leg's share of the fee hurdle, so the whole 21-leg blanket
+   * clears both. Zero unless the cycle signal says the cap pays.
+   */
+  private rampFloorPerTileBase(): number {
+    if (!this.cfg.AUTO_RAMP || this.cfg.GAME_VERSION !== "v2") return 0;
+    if (this.lastBlanketAtCapBps === null || this.lastBlanketAtCapBps < this.cfg.RAMP_ALERT_MIN_BPS) return 0;
+    const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
+    const tiles = TILES_COUNT;
+    const tollBase = (this.cycleMemo?.minBlanketTollUsd ?? 0) * 1e6;
+    const legacyFloor = (minDeploy * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000;
+    const edge = (minDeploy * this.cfg.MIN_EDGE_BPS) / 10_000;
+    const fees = Number(this.edgeHurdleBase(0n) ?? 0n) / tiles;
+    return Math.max(legacyFloor, tollBase / tiles) + edge + fees;
+  }
+
+  /** Per-tile presence credits for the fleet's tile mode (wallet i → tile i), or null outside it. */
+  private presenceCreditPerTile(): number[] | null {
+    if (!(this.cfg.FLEET_TILE_MODE && this.wallets.size > 1)) return null;
+    const out = new Array<number>(TILES_COUNT).fill(0);
+    if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return out;
+    const floor = this.rampFloorPerTileBase();
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const liquidFraction = 1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000;
+    const valueUsdPerRawUnit = this.hashrateValueUsdPerRawUnit();
+    const cycle = this.cycleMemo;
+    const perWalletDeployUsd = cycle
+      ? boostWeightedDeployUsd({ pBoosted: cycle.pBoosted, unboostedDeployUsd: cycle.unboostedDeployUsd, boostedDeployUsd: cycle.boostedDeployUsd, boostMultiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER }) / TILES_COUNT
+      : Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000) / 1e6;
+    this.wallets.all().forEach((w, i) => {
+      if (i >= TILES_COUNT) return;
+      const miner = this.state.minerAt(minerPda(w.keypair.publicKey, programId));
+      const streak = miner?.current_streak_count ?? 1;
+      const option = streakOptionValueUsd({
+        streak,
+        deployPerRoundUsd: perWalletDeployUsd,
+        valueUsdPerRawUnit,
+        liquidFraction,
+        discount: this.cfg.STREAK_OPTION_DISCOUNT,
+        ...(miner && this.roundId !== null ? { roundId: this.roundId, lastMinedRoundId: miner.last_mined_round_id, graceRounds: STREAK_GRACE_ROUNDS.value } : {}),
+      });
+      let credit = option > 0 ? option * 1e6 : 0;
+      // The ramp: every play advances this wallet's counter, grace or not.
+      if (streak < REWARD_MAX_STREAK) credit = Math.max(credit, floor);
+      out[i] = credit;
+    });
+    return out;
+  }
+
   private presenceCreditBase(): number {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
     const miner = this.state.miner;
+    // The deploy the streak's raw accrues on: the boost-weighted optimum at
+    // the cap (a few dollars unboosted, tens boosted at 2×), never the cash
+    // cap — sizing it on MAX_PER_ROUND priced the option on $35k of USDC.
+    const minBlanketUsd = (Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000) / 1e6) * TILES_COUNT;
+    const cycle = this.cycleMemo?.roundId === this.roundId ? this.cycleMemo : null;
+    const deployPerRoundUsd = cycle
+      ? boostWeightedDeployUsd({ pBoosted: cycle.pBoosted, unboostedDeployUsd: cycle.unboostedDeployUsd, boostedDeployUsd: cycle.boostedDeployUsd, boostMultiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER })
+      : minBlanketUsd;
     const usd = streakOptionValueUsd({
       streak: miner?.current_streak_count ?? 1,
-      deployPerRoundUsd: Number(this.bankroll.maxPerRoundBase) / 1e6,
+      deployPerRoundUsd,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
       liquidFraction:
         1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
@@ -1158,9 +1380,7 @@ export class Orchestrator {
       this.lastBlanketAtCapBps !== null &&
       this.lastBlanketAtCapBps >= this.cfg.RAMP_ALERT_MIN_BPS
     ) {
-      const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
-      const tiles = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
-      credit = Math.max(credit, (minDeploy * tiles * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000);
+      credit = Math.max(credit, this.rampFloorPerTileBase() * TILES_COUNT);
     }
     return credit;
   }
@@ -1623,7 +1843,8 @@ export class Orchestrator {
       ),
       kEmptiest: this.cfg.K_EMPTIEST,
       minEdgeBps: this.cfg.MIN_EDGE_BPS,
-      minEvBase: this.edgeHurdleBase(maxPerRound),
+      minEvBase: this.edgeHurdleBase(0n),
+      minEvPerUnit: this.opportunityPerUnit(),
       kellyFraction: this.cfg.KELLY_FRACTION,
       bankrollBase: this.usdcAvailableBase ?? undefined,
     };
@@ -1635,6 +1856,20 @@ export class Orchestrator {
    * live priority fee and SOL price, plus the opportunity yield of the stake
    * over one round. Undefined when the hurdle is off.
    */
+  /**
+   * The opportunity leg of the hurdle per unit of stake ACTUALLY deployed
+   * (EV base units per stake base unit, one round of OPPORTUNITY_YIELD_DAILY).
+   * Charged on the selection's total inside the selector, not on the cap:
+   * with the cap auto-derived from the bankroll, charging the cap taxed a
+   * $21 ramp with the yield on $35k.
+   */
+  private opportunityPerUnit(): number | undefined {
+    if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
+    return this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay;
+  }
+
   private edgeHurdleBase(stakeBase: bigint): bigint | undefined {
     if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
     const legs = this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
@@ -1654,7 +1889,7 @@ export class Orchestrator {
     // denominator for the payout-fraction measurement in onRevealed().
     const pool = this.state.strikePoolUsd();
     if (pool > 0n) this.strikePoolBeforeReveal = pool;
-    void this.refreshAutomationBook();
+    void this.jobs.timed("automation_book", () => this.refreshAutomationBook(), 5_000);
     if (this.botState === "BOOT") this.transition("SYNCED");
     const board = this.state.board;
     if (!board) return;
@@ -1681,6 +1916,10 @@ export class Orchestrator {
 
     if (this.botState === "ROUND_OPEN") {
       const cutoff = this.state.slotsToCutoff();
+      if (cutoff !== null && !this.preArmed && cutoff <= this.currentFireOffset() + PRE_ARM_SLOTS) {
+        this.preArmed = true;
+        void this.preArm(cutoff);
+      }
       if (cutoff !== null && cutoff <= this.currentFireOffset()) {
         this.transition("ARMED", { cutoff, fireOffset: this.currentFireOffset() });
         void this.tryFire();
@@ -1741,7 +1980,7 @@ export class Orchestrator {
     }
     // Refresh the blanket-at-cap signal every round (it drives the auto-ramp
     // and the alert), not only when the selector has already skipped.
-    if (this.cfg.GAME_VERSION === "v2") this.evDiagnostics();
+    if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
     const candidate = this.candidates.best(this.roundId);
     if (!candidate) {
       this.skipOnce("no_candidate", {
@@ -2058,19 +2297,21 @@ export class Orchestrator {
   }
 
   /**
-   * Coarse wallet-drift tripwire: halts if on-chain USDC has left the wallet
-   * by MORE than everything we have deployed since the baseline (plus a
-   * tolerance) — i.e. an unexplained drain, not fee/BTC-leg noise. Baseline
-   * captured on first successful read.
+   * Coarse wallet-drift tripwire: halts if on-chain USDC has left the FLEET
+   * (every wallet's ATA summed) by MORE than everything we have deployed
+   * since the baseline (plus a tolerance) — i.e. an unexplained drain, not
+   * fee/BTC-leg noise. The aggregate is the right quantity: treasury top-ups
+   * and sweeps only move money between our own wallets and net to zero
+   * across the fleet, while a drain from ANY wallet still shows. Baseline
+   * captured on the first tick where every wallet read fresh.
    */
   private async checkWalletDrift(): Promise<void> {
     if (this.cfg.EXECUTION_MODE === "dry") return;
     let actual: bigint;
     try {
-      const { getAssociatedTokenAddressSync } = await import("@solana/spl-token");
-      const ata = getAssociatedTokenAddressSync(this.ixCtx.usdMint, this.payer.publicKey);
-      const bal = await this.connection.getTokenAccountBalance(ata, "processed");
-      actual = BigInt(bal.value.amount);
+      const fresh = await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
+      if (!fresh) return; // a held stale balance would read as a drop — try next tick
+      actual = this.wallets.totals().usdcBase;
     } catch {
       return; // transient — try next tick
     }
@@ -2086,8 +2327,8 @@ export class Orchestrator {
       this.usdcBaselineDate = today;
       return;
     }
-    // Worst legitimate case: we lose everything deployed today (same UTC day as
-    // the baseline above).
+    // Worst legitimate case: we lose everything the fleet deployed today (same
+    // UTC day as the baseline above).
     const res = reconcileWalletDrift({
       expectedDeltaBase: -this.pnl.deployedToday(),
       actualDeltaBase: actual - this.usdcBaselineBase,
@@ -2663,6 +2904,8 @@ export class Orchestrator {
     if (this.bankroll.killSwitchEngaged()) return;
     this.fleetCycleInFlight = true;
     try {
+      // A boot under the KILL file skipped the tag; retry once the switch clears.
+      if (!this.affiliateTagDone) await this.ensureAffiliateTag();
       await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
       const p = this.wallets.primary();
       const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
@@ -2711,9 +2954,10 @@ export class Orchestrator {
   /**
    * Register AFFILIATE_TAG on the primary once, so the extras bind to it at
    * their first deploy. Skipped when the primary already has an Affiliate
-   * account, when no tag is configured, in dry mode, or with the kill switch
-   * engaged. Extras that deploy before this lands bind to nothing (the
-   * program only reads the slot at Miner creation) — the log says so.
+   * account, in dry mode, or with the kill switch engaged; retried from the
+   * treasury cycle until it lands, so a boot under the KILL file does not
+   * leave the extras binding to nothing once the file is removed (the
+   * program only reads the affiliate slot at Miner creation).
    */
   private async ensureAffiliateTag(): Promise<void> {
     const tag = this.cfg.AFFILIATE_TAG ?? autoAffiliateTag(this.payer.publicKey);
@@ -2721,11 +2965,16 @@ export class Orchestrator {
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
     try {
       const info = await this.connection.getAccountInfo(affiliatePda(this.payer.publicKey, programId), "confirmed");
-      if (info) return;
+      if (info) {
+        this.affiliateTagDone = true;
+        return;
+      }
       const outcome = await this.fireClaim(buildSetMinerTag(this.ixCtx, { authority: this.payer.publicKey, tag }), { kind: "set_miner_tag", tag });
       this.log.info({ tag, outcome }, "affiliate tag registered on the primary");
-      if (outcome === "landed") this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
-      else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — restart to retry`);
+      if (outcome === "landed") {
+        this.affiliateTagDone = true;
+        this.alert(`🏷 affiliate tag "${tag}" registered — fleet wallets bind to the primary at their first deploy`);
+      } else this.alert(`⚠ affiliate tag "${tag}" not registered (${outcome}); extras deploying now bind to no affiliate — retrying on the next treasury cycle`);
     } catch (err) {
       this.log.warn({ err: String(err).slice(0, 160) }, "affiliate tag registration failed");
     }
@@ -2775,6 +3024,9 @@ export class Orchestrator {
    * in flight), with headroom, held for FLEET_FLOAT_ROUNDS. Floored at the
    * configured minimum; capped by what a round can ask (MAX_PER_ROUND ÷ tiles).
    */
+  /** The uncapped "want" is priced once per round; /fleet, the status API and the treasury share it. */
+  private floatWantMemo: { roundId: number | null; peakLegBase: bigint } | null = null;
+
   private fleetFloatTargetBase(): bigint {
     let observed = 0n;
     try {
@@ -2787,12 +3039,19 @@ export class Orchestrator {
     for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
     // Forward-looking: what the selector would deploy per tile RIGHT NOW with
     // no cash cap at all, so the float is ready before the spike, not after.
-    try {
-      const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
-      for (const sel of want) for (const a of sel.allocation) if (a > observed) observed = a;
-    } catch {
-      /* model not ready */
+    // Priced once per round (synchronous model work inside the event loop;
+    // the status API polls this every few seconds).
+    if (!this.floatWantMemo || this.floatWantMemo.roundId !== this.roundId) {
+      let peak = 0n;
+      try {
+        const want = computeCandidateSelections(this.evSource(), { ...this.selectorConfig(), maxPerRound: usdToBase(1_000_000), kellyFraction: 0, bankrollBase: undefined });
+        for (const sel of want) for (const a of sel.allocation) if (a > peak) peak = a;
+      } catch {
+        /* model not ready */
+      }
+      this.floatWantMemo = { roundId: this.roundId, peakLegBase: peak };
     }
+    if (this.floatWantMemo.peakLegBase > observed) observed = this.floatWantMemo.peakLegBase;
     const tiles = BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
     return dynamicFloatBase({
       observedPeakLegBase: observed,
@@ -2804,8 +3063,23 @@ export class Orchestrator {
   }
 
   /** The plan from current balances: each wallet's per-round need is its tile share of MAX_PER_ROUND (or an equal slice). */
+  /**
+   * What one wallet actually sends per round: the peak leg observed (or the
+   * model's per-tile want), floored at the on-chain minimum. Runway and the
+   * top-up order run on this — dividing the auto cap ($35k of USDC) by 21
+   * read every sub-wallet as "0 rounds of runway".
+   */
+  private perWalletLegBase(): bigint {
+    const minDeploy = BigInt(this.state.satrushConfig?.min_deploy_usd_amount.toString() ?? "1000000");
+    const want = this.floatWantMemo?.peakLegBase ?? 0n;
+    let observed = 0n;
+    for (const c of this.candidates.current()) for (const l of c.legs) if (l.amountGross > observed) observed = l.amountGross;
+    const leg = want > observed ? want : observed;
+    return leg > minDeploy ? leg : minDeploy;
+  }
+
   private planFleetNow(): FleetPlan {
-    const perRound = this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)));
+    const perRound = this.perWalletLegBase();
     const balances = this.wallets.all().map((w) => ({
       pubkey: w.keypair.publicKey.toBase58(),
       usdcBase: w.usdcBase,
@@ -2870,7 +3144,7 @@ export class Orchestrator {
   /** Fleet view for Telegram /fleet and the status API: balances, runway, the last plan. */
   fleetReport(): FleetReport {
     const plan = this.wallets.size > 1 ? this.planFleetNow() : null;
-    const perRound = Number(this.bankroll.maxPerRoundBase / BigInt(Math.max(1, Math.min(this.wallets.size, TILES_COUNT)))) / 1e6;
+    const perRound = Number(this.perWalletLegBase()) / 1e6;
     return {
       size: this.wallets.size,
       tileMode: this.cfg.FLEET_TILE_MODE && this.wallets.size > 1,
@@ -3030,6 +3304,145 @@ export class Orchestrator {
 
   // ── event wiring ────────────────────────────────────────────────────────────
 
+  /**
+   * After an ingest reconnect the stream has a hole: every Board/Round/Miner
+   * write during the outage is gone (Yellowstone does not replay). Re-read
+   * them over RPC, stamped at the head slot, then re-run the selector.
+   */
+  private async reseedAfterReconnect(): Promise<void> {
+    try {
+      const r = await reseedGameState(this.connection, this.state, {
+        minerAuthority: this.wallets.pubkeys(),
+        programId: new PublicKey(this.cfg.PROGRAM_ID),
+      });
+      this.cacheRoundWindow();
+      this.log.info({ slot: r.slot, roundId: r.roundId }, "snapshot re-seeded from RPC after ingest reconnect");
+      await this.refreshCandidates("reseed");
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 160) }, "snapshot re-seed after reconnect failed — stream updates will catch up");
+    }
+  }
+
+  /** The fee split and durations as last seen, to name what changed when the config account is rewritten. */
+  private configSnapshot: Record<string, number> | null = null;
+  private static readonly CONFIG_WATCH_FIELDS = [
+    "strike_fee_bps", "epoch_fee_bps", "one_btc_fee_bps", "sats_vault_round_fee_bps", "vault_exit_fee_bps",
+    "protocol_fee_bps", "buybacks_fee_bps", "unclaimed_hashrate_bps", "strike_trigger_modulus",
+    "min_deploy_usd_amount", "epoch_vault_iteration_duration",
+  ] as const;
+
+  private configFields(): Record<string, number> | null {
+    const c = this.state.satrushConfig;
+    if (!c) return null;
+    return Object.fromEntries(Orchestrator.CONFIG_WATCH_FIELDS.map((f) => [f, Number((c as unknown as Record<string, { toString(): string }>)[f]?.toString() ?? 0)]));
+  }
+
+  /**
+   * The owner retunes the game in place (the 2026-09-17 split move, the
+   * announced strike-cut increase and weekly epochs). The model reads the
+   * config account at use time, so a change is priced from the next round;
+   * this names it, drops the per-round memos, re-prices, and alerts once.
+   */
+  private onConfigUpdate(): void {
+    const now = this.configFields();
+    if (!now) return;
+    const prev = this.configSnapshot;
+    this.configSnapshot = now;
+    if (!prev) return;
+    const changes = Orchestrator.CONFIG_WATCH_FIELDS.filter((f) => prev[f] !== now[f]).map((f) => `${f} ${prev[f]}→${now[f]}`);
+    if (changes.length === 0) return;
+    this.log.warn({ changes }, "on-chain SatrushConfig changed — re-pricing from the live values");
+    this.alert(`⚙ on-chain config changed: ${changes.join(", ")} — fee legs re-priced live from this round; preflight's MEASURED_ECONOMICS baseline and the epoch/strike facts want a re-measure`);
+    this.cycleMemo = null;
+    this.floatWantMemo = null;
+    if (this.roundId !== null) this.requestRefresh("config_change");
+  }
+
+  /** Per-round memo of the boost-cycle pricing at the streak cap (see boostCycleAtCap). */
+  private cycleMemo: {
+    roundId: number | null;
+    pBoosted: number;
+    unboostedDeployUsd: number;
+    boostedDeployUsd: number;
+    boostedEvUsd: number;
+    cycleEvBps: number | null;
+    /** −EV of the minimum blanket at TODAY's streak with no presence credit (USD, ≥ 0): the ramp's per-round toll. */
+    minBlanketTollUsd: number;
+  } | null = null;
+
+  /**
+   * Price the streak cap across the boost cycle. p = window / modulus of
+   * rounds are boosted (memoryless strike). Unboosted, the bot plays the
+   * minimum blanket at the cap (or the argmax if one pays); boosted, the
+   * argmax at 2× hashrate. The cycle EV per dollar is the ramp signal, and
+   * the boost-weighted deploy sizes the streak option. Memoized per round.
+   */
+  private boostCycleAtCap(src: EvSource, rampBlanket: bigint[], rampTotal: bigint): Record<string, number | null> | null {
+    const base = this.v2Base();
+    if (!("model" in src) || !base?.hashrate) return null;
+    const cap = this.effectiveMaxPerRoundBase();
+    if (this.cycleMemo?.roundId !== this.roundId) {
+      const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? STRIKE_TRIGGER_MODULUS.value;
+      const pBoosted = Math.min(1, STRIKE_BOOST_WINDOW_ROUNDS.value / Math.max(1, modulus));
+      const at = (multiplier: number) =>
+        v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate!, streak: REWARD_MAX_STREAK, multiplier }, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
+      // The ramp's own toll: the minimum blanket at today's streak, no credit.
+      const today = v2Model({ ...base, predictedStakes: src.predictedStakes, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
+      const minBlanketTollUsd = rampTotal > 0n ? Math.max(0, -today.ev(rampBlanket) / 1e6) : 0;
+      const argmax = (model: ReturnType<typeof v2Model>) => {
+        const sel = selectAllocation(model, { ...this.selectorConfig(), maxPerRound: cap, kellyFraction: 0, bankrollBase: undefined, minEdgeBps: 0, minEvBase: undefined, minEvPerUnit: undefined });
+        return sel.kind === "deploy" ? { usd: Number(sel.totalGross) / 1e6, evUsd: sel.ev / 1e6 } : { usd: 0, evUsd: 0 };
+      };
+      const unboosted = at(1);
+      const boosted = at(this.cfg.STRIKE_HASHRATE_MULTIPLIER);
+      const u = argmax(unboosted);
+      const b = argmax(boosted);
+      // Unboosted the bot holds the cap with the minimum blanket when nothing larger pays.
+      const uStake = u.usd > 0 ? u.usd : Number(rampTotal) / 1e6;
+      const uEv = u.usd > 0 ? u.evUsd : rampTotal > 0n ? unboosted.ev(rampBlanket) / 1e6 : 0;
+      this.cycleMemo = {
+        roundId: this.roundId,
+        pBoosted,
+        unboostedDeployUsd: uStake,
+        boostedDeployUsd: b.usd,
+        boostedEvUsd: b.evUsd,
+        minBlanketTollUsd,
+        cycleEvBps: cycleEvBps({ pBoosted, unboostedEvUsd: uEv, unboostedStakeUsd: uStake, boostedEvUsd: b.evUsd, boostedStakeUsd: b.usd > 0 ? b.usd : uStake }),
+      };
+    }
+    const m = this.cycleMemo;
+    return {
+      pBoosted: Number(m.pBoosted.toFixed(4)),
+      unboostedDeployUsd: Number(m.unboostedDeployUsd.toFixed(2)),
+      boostedArgmaxUsd: Number(m.boostedDeployUsd.toFixed(2)),
+      boostedEvUsd: Number(m.boostedEvUsd.toFixed(3)),
+      cycleEvBpsAtStreakCap: m.cycleEvBps,
+    };
+  }
+
+  /** Snapshot throttle: last slot a row was written, per round. */
+  private lastSnapshot: { roundId: number; slot: number } | null = null;
+  private shouldSnapshot(roundId: number, slot: number): boolean {
+    if (!this.lastSnapshot || this.lastSnapshot.roundId !== roundId || slot - this.lastSnapshot.slot >= SNAPSHOT_MIN_SLOTS) {
+      this.lastSnapshot = { roundId, slot };
+      return true;
+    }
+    return false;
+  }
+
+  /** Once an hour, drop observation history older than OBSERVATION_KEEP_ROUNDS. */
+  private lastPruneMs = 0;
+  private maybePruneObservations(): void {
+    if (this.roundId === null || Date.now() - this.lastPruneMs < 3_600_000) return;
+    this.lastPruneMs = Date.now();
+    try {
+      const removed = this.db.pruneObservations(this.roundId, OBSERVATION_KEEP_ROUNDS);
+      if (Object.values(removed).some((n) => n > 0)) this.log.info({ removed, keepRounds: OBSERVATION_KEEP_ROUNDS }, "observation history pruned");
+    } catch (err) {
+      this.log.warn({ err: String(err).slice(0, 120) }, "observation prune failed");
+    }
+  }
+
   private cacheRoundWindow(): void {
     const board = this.state.board;
     if (!board) return;
@@ -3134,7 +3547,11 @@ export class Orchestrator {
         if (applied.kind === "Board") this.cacheRoundWindow();
         if (applied.kind === "Round" && applied.roundId !== undefined) {
           const round = this.state.round(applied.roundId);
-          if (round) {
+          // One snapshot row per SNAPSHOT_MIN_SLOTS per round, not one per
+          // Round-account write: the readers (intel, the float planner) use
+          // the latest row per round, and a burst of deploys was writing a
+          // 21-stake JSON row per deploy.
+          if (round && this.shouldSnapshot(applied.roundId, u.slot)) {
             this.db.recordOccupancySnapshot(
               applied.roundId,
               u.slot,
@@ -3143,15 +3560,14 @@ export class Orchestrator {
             );
           }
           if (applied.roundId === this.state.board?.round_id) {
-            // Occupancy changed on the live round → re-run the selector.
-            void this.refreshCandidates("occupancy_update").then(() => {
-              if (this.botState === "ARMED") void this.tryFire();
-            });
+            // Occupancy changed on the live round → re-run the selector (coalesced).
+            this.requestRefresh("occupancy_update");
           }
         }
         if (applied.kind === "Miner" || applied.kind === "SatsVault" || applied.kind === "TokenVault") {
           void this.maybeSweep();
         }
+        if (applied.kind === "SatrushConfig") this.onConfigUpdate();
       } catch (err) {
         if (err instanceof HaltError) {
           // Persist the halt (KILL file) so a restart can't resume on bad data.
@@ -3212,10 +3628,20 @@ export class Orchestrator {
     });
 
     this.source.on("status", (s) => {
-      if (!s.connected) this.log.warn({ detail: s.detail }, "ingest disconnected");
-      else this.log.info({ detail: s.detail }, "ingest connected");
+      if (!s.connected) {
+        this.ingestWasDown = true;
+        this.log.warn({ detail: s.detail }, "ingest disconnected");
+        return;
+      }
+      this.log.info({ detail: s.detail }, "ingest connected");
+      if (this.ingestWasDown) {
+        this.ingestWasDown = false;
+        void this.reseedAfterReconnect();
+      }
     });
 
+    this.configSnapshot = this.configFields();
+    this.loop.start();
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
     // same tick refreshes the measured hashrate-per-deploy for the unified EV.
@@ -3223,32 +3649,52 @@ export class Orchestrator {
     this.refreshFireOffset();
     this.refreshRivalProfiles();
     this.walletDriftTimer = setInterval(() => {
-      void this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint).then(() => this.refreshLimits());
-      void this.checkWalletDrift();
-      this.validateHashrateFormula();
-      this.refreshFireOffset();
-      this.refreshRivalProfiles();
+      // The drift check re-reads every wallet's balances itself; derive the
+      // limits from that read rather than reading all 21 wallets twice.
+      void this.jobs.timed("wallet_drift", () => this.checkWalletDrift(), 5_000).then(() => this.refreshLimits());
+      this.jobs.timedSync("tick30s_queries", () => {
+        this.validateHashrateFormula();
+        this.refreshFireOffset();
+        this.refreshRivalProfiles();
+        this.maybePruneObservations();
+      }, 500);
     }, 30_000);
     this.walletDriftTimer.unref?.();
     void this.buildDepositBlock();
     if (this.wallets.size > 1 && this.cfg.FLEET_TREASURY_ENABLED) {
       void this.ensureAffiliateTag();
-      this.fleetTimer = setInterval(() => void this.fleetTreasuryCycle(), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
+      this.fleetTimer = setInterval(() => void this.jobs.timed("treasury", () => this.fleetTreasuryCycle(), 20_000), this.cfg.FLEET_REBALANCE_INTERVAL_MS);
       this.fleetTimer.unref?.();
     }
     // Hashrate raffle vaults — only started when explicitly enabled; the deploy
     // path is otherwise entirely untouched.
     if (this.cfg.VAULT_STRATEGY_ENABLED) this.startVaultManager();
     void this.source.start();
+    const build = buildInfo();
     this.log.info(
       {
         mode: this.cfg.EXECUTION_MODE,
         strategy: this.cfg.STRATEGY,
         wallet: this.payer.publicKey.toBase58(),
         roundId: this.state.board?.round_id,
+        rev: build.rev,
+        distBuiltAt: build.distBuiltAt,
       },
       "orchestrator started",
     );
+    if (build.distStale) {
+      this.log.warn({ distBuiltAt: build.distBuiltAt, srcNewestAt: build.srcNewestAt }, "STALE BUILD: dist/ is older than src/ — this process runs old code; run pnpm build and restart");
+    }
+    // Operational lint: the env values that each cost an hour of wrong
+    // diagnosis on 2026-09-21, named at boot with their fix.
+    const findings = lintConfig(this.cfg, {
+      killFilePresent: this.bankroll.killSwitchEngaged(),
+      fleetUsdcBase: this.wallets.totals().usdcBase,
+      distStale: build.distStale,
+    });
+    for (const f of findings) this.log[f.severity === "warn" ? "warn" : "info"]({ lint: f.key }, f.message);
+    const warns = findings.filter((f) => f.severity === "warn");
+    if (warns.length > 0) this.alert(`⚠ config lint (${warns.length}):\n` + warns.map((f) => `• ${f.message}`).join("\n"));
 
     process.once("SIGINT", () => void this.shutdown("SIGINT"));
     process.once("SIGTERM", () => void this.shutdown("SIGTERM"));
@@ -3261,9 +3707,16 @@ export class Orchestrator {
   }
 
   async shutdown(reason: string): Promise<void> {
+    await this.close(reason);
+    process.exit(0);
+  }
+
+  /** Everything shutdown() does except exiting the process (tests, embedding). */
+  async close(reason: string): Promise<void> {
     this.log.info({ reason }, "shutting down");
     this.candidates.clear();
     this.health.stop();
+    this.loop.stop();
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();
@@ -3274,7 +3727,6 @@ export class Orchestrator {
     await this.api?.stop().catch(() => undefined);
     await this.telegram?.stop().catch(() => undefined);
     this.db.close();
-    process.exit(0);
   }
 }
 

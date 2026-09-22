@@ -152,7 +152,7 @@ gross = shares × (assets+1) ÷ (shares_issued+1000)) · AFFILIATE_TAG 3–16.
 **On-chain config (2026-09-21):** strike 240 · epoch 104 · one_btc 48 ·
 protocol 100 · buybacks 108 (= 600) · vault_exit_fee 1000 · unclaimed_
 hashrate 3500 · min deploy $1 · round 230 slots · epoch iteration
-2,318,400 slots (10.73 d) · settle grace 0 · strike_trigger_modulus 1097.
+2,318,400 slots (7.2 d at the live 267 ms slot; iteration 16 ran 2026-09-16 09:33 → 09-23 13:55) · settle grace 0 · strike_trigger_modulus 1097.
 The API's `/config` omits buybacks and the modulus; scripts read the chain
 (`scripts/lib/onchain.ts`); the orchestrator decodes it at boot.
 

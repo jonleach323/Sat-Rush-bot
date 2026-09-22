@@ -17,6 +17,8 @@ import { loadKeypair } from "../exec/tx.js";
 import { YellowstoneIngest } from "../ingest/grpc.js";
 import { WsRpcIngest } from "../ingest/wsrpc.js";
 import { StateDb } from "../state/db.js";
+import { buildInfo } from "./build-info.js";
+import { lintConfig } from "./config-lint.js";
 import { usdToBase } from "../units.js";
 
 export interface GateResult {
@@ -99,12 +101,17 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
 
   // 2. kill switch must be clear
   const killFilePresent = cfg.KILL_SWITCH_FILE !== "" && existsSync(cfg.KILL_SWITCH_FILE);
+  // A kill file is a HOLD, not a launch failure: the bot boots, prices every
+  // round, runs its ops surfaces, and the bankroll guard re-reads the file
+  // before every send. Crash-looping under systemd instead would hide the
+  // state and spam the journal.
   gate(
     "kill_switch_clear",
     !killFilePresent,
     killFilePresent
-      ? `kill file present at ${cfg.KILL_SWITCH_FILE} — refusing to launch`
+      ? `kill file present at ${cfg.KILL_SWITCH_FILE} — launching HELD: no sends until it is removed`
       : `no kill file at ${cfg.KILL_SWITCH_FILE}`,
+    false,
   );
 
   // 3. program id matches the IDL
@@ -118,6 +125,19 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
   );
 
   const connection = new Connection(cfg.RPC_HTTP_URL, "confirmed");
+  // The primary's USDC, read once for the cap gates and the funding gate.
+  let walletUsdBase: bigint | null = null;
+  const readWalletUsd = async (): Promise<bigint | null> => {
+    try {
+      const payer = loadKeypair(cfg.KEYPAIR_PATH);
+      const usdMint = new PublicKey(cfg.USD_MINT ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+      const ata = getAssociatedTokenAddressSync(usdMint, payer.publicKey);
+      const balance = await connection.getTokenAccountBalance(ata, "confirmed");
+      return BigInt(balance.value.amount);
+    } catch {
+      return null;
+    }
+  };
   const programId = new PublicKey(cfg.PROGRAM_ID);
 
   // 4. program deployed + executable
@@ -147,12 +167,19 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
   // 5. economics within tolerance of the measured baseline
   if (satrushConfig) {
     const econ = compareEconomics(satrushConfig);
+    // Non-fatal: every fee leg is read from the config account at use time
+    // (and re-read on every on-chain change while running), so a moved split
+    // does not stale the model — it stales THIS baseline and the measured
+    // facts that depend on the split (epoch pool per ticket, strike pot
+    // growth). The owner announced a bigger strike cut on 2026-09-21; a
+    // fatal gate here would have refused the restart that carries the fix.
     gate(
       "economics_within_tolerance",
       econ.ok,
       econ.ok
         ? `all fee bps within ${ECONOMICS_TOLERANCE * 100}% of the mainnet V2 baseline`
-        : `ECONOMICS CHANGED — EV model is stale: ${econ.deviations.join("; ")}`,
+        : `fee split moved on chain (model reads it live; re-baseline MEASURED_ECONOMICS and re-measure the epoch/strike facts): ${econ.deviations.join("; ")}`,
+      false,
     );
     // 5b. the model version must match the program on chain. A V2 config
     // carries a real token_mint; V1's layout decodes that slot as zeros.
@@ -185,23 +212,34 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
       );
     }
     const minDeploy = BigInt(satrushConfig.min_deploy_usd_amount.toString());
+    walletUsdBase = await readWalletUsd();
+    const effectiveCap = cfg.MAX_PER_ROUND_USD > 0 ? usdToBase(cfg.MAX_PER_ROUND_USD) : (walletUsdBase ?? 0n);
     gate(
       "min_deploy_vs_caps",
-      minDeploy <= usdToBase(cfg.MAX_PER_ROUND_USD),
-      `on-chain min deploy ${minDeploy} vs MAX_PER_ROUND ${usdToBase(cfg.MAX_PER_ROUND_USD)}`,
+      minDeploy <= effectiveCap,
+      `on-chain min deploy ${minDeploy} vs MAX_PER_ROUND ${cfg.MAX_PER_ROUND_USD > 0 ? effectiveCap : `auto = deployable USDC ${effectiveCap}`}`,
     );
   }
 
-  // 6. caps sanity (config cross-checks re-asserted at the gate)
+  // 6. caps sanity: hand-set values must be coherent; in AUTO mode (0) they
+  // derive from the bankroll (Bankroll.setLimits every 30 s) and the gate is
+  // that the wallet actually holds the on-chain minimum to derive from.
   const ladder = cfg.STAKE_LADDER_USD.map(usdToBase);
-  const capsOk =
-    cfg.MAX_PER_ROUND_USD > 0 &&
-    cfg.MAX_PER_ROUND_USD <= cfg.DAILY_LOSS_CAP_USD &&
-    ladder.every((l) => l <= usdToBase(cfg.MAX_PER_ROUND_USD));
+  const autoCaps = cfg.MAX_PER_ROUND_USD === 0 || cfg.DAILY_LOSS_CAP_USD === 0;
+  const minDeployBase = satrushConfig ? BigInt(satrushConfig.min_deploy_usd_amount.toString()) : 1_000_000n;
+  if (walletUsdBase === null) walletUsdBase = await readWalletUsd();
+  const capsOk = autoCaps
+    ? (walletUsdBase ?? 0n) >= minDeployBase && ladder.every((l) => l <= (walletUsdBase ?? 0n))
+    : cfg.MAX_PER_ROUND_USD > 0 &&
+      cfg.MAX_PER_ROUND_USD <= cfg.DAILY_LOSS_CAP_USD &&
+      ladder.every((l) => l <= usdToBase(cfg.MAX_PER_ROUND_USD));
+  const usdcNow = walletUsdBase === null ? "?" : `$${(Number(walletUsdBase) / 1e6).toFixed(2)}`;
   gate(
     "caps_set",
     capsOk,
-    `MAX_PER_ROUND $${cfg.MAX_PER_ROUND_USD}, DAILY_LOSS_CAP $${cfg.DAILY_LOSS_CAP_USD}, ladder [${cfg.STAKE_LADDER_USD.join(",")}]`,
+    autoCaps
+      ? `AUTO — per-round cap = deployable USDC (${usdcNow}), daily cap = ${cfg.AUTO_DAILY_LOSS_FRACTION} × the day's opening USDC; ladder [${cfg.STAKE_LADDER_USD.join(",")}]`
+      : `MAX_PER_ROUND $${cfg.MAX_PER_ROUND_USD}, DAILY_LOSS_CAP $${cfg.DAILY_LOSS_CAP_USD}, ladder [${cfg.STAKE_LADDER_USD.join(",")}]`,
   );
 
   // 7. wallet: keypair loads, SOL above floor, USDC ATA funded
@@ -218,7 +256,9 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
       try {
         const balance = await connection.getTokenAccountBalance(ata, "confirmed");
         const usd = BigInt(balance.value.amount);
-        const needed = usdToBase(cfg.MAX_PER_ROUND_USD);
+        const needed = cfg.MAX_PER_ROUND_USD > 0
+          ? usdToBase(cfg.MAX_PER_ROUND_USD)
+          : BigInt(satrushConfig.min_deploy_usd_amount.toString()) * BigInt(Math.max(1, Math.min(cfg.FLEET_SIZE, 21)));
         const tenRounds = needed * 10n;
         gates.push({
           gate: "usdc_ata_funded",
@@ -318,8 +358,20 @@ export async function runPreflight(opts: PreflightOptions): Promise<PreflightRep
     gate("db_writable", false, `DB open failed: ${String(err)}`);
   }
 
+  lintGates(cfg, killFilePresent, walletUsdBase, gate);
   const passed = !gates.some((g) => !g.ok && g.fatal);
   return { mode: cfg.EXECUTION_MODE, effectiveMode: mode, passed, gates };
+}
+
+/**
+ * Operational lint as non-fatal gates: a warn-level finding shows as a
+ * failed (non-fatal) gate so it is impossible to miss in the report; an
+ * info-level one passes with its message as the detail.
+ */
+function lintGates(cfg: Config, killFilePresent: boolean, walletUsdBase: bigint | null, gate: (name: string, ok: boolean, detail: string, fatalWhenStrict?: boolean) => unknown): void {
+  for (const f of lintConfig(cfg, { killFilePresent, fleetUsdcBase: walletUsdBase ?? undefined, distStale: buildInfo().distStale })) {
+    gate(`lint_${f.key}`, f.severity !== "warn", f.message, false);
+  }
 }
 
 export function formatPreflight(report: PreflightReport): string {

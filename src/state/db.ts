@@ -604,6 +604,26 @@ export class StateDb {
     return this.db.prepare(sql).get(...params) as T | undefined;
   }
 
+  /**
+   * Drop OBSERVATION history older than `keepRounds` rounds: occupancy
+   * snapshots, competitor deploys and skip records. Never the ledger
+   * (rounds, my_deploys, settlements, pnl_daily, vault_*). Without this the
+   * file grows by every Round-account update the stream delivers — tens of
+   * thousands of rows a day on a busy board — and every dashboard poll
+   * scans it. Returns rows removed per table.
+   */
+  pruneObservations(currentRoundId: number, keepRounds: number): Record<string, number> {
+    const cutoff = currentRoundId - Math.max(1, Math.trunc(keepRounds));
+    if (cutoff <= 0) return { occupancy_snapshots: 0, competitor_deploys: 0, skips: 0 };
+    return this.write(() => {
+      const out: Record<string, number> = {};
+      for (const t of ["occupancy_snapshots", "competitor_deploys", "skips"]) {
+        out[t] = this.db.prepare(`DELETE FROM ${t} WHERE round_id < ?`).run(cutoff).changes;
+      }
+      return out;
+    });
+  }
+
   tableCounts(): Record<string, number> {
     const tables = [
       "rounds",

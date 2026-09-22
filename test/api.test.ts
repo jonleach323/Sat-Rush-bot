@@ -89,6 +89,8 @@ const fakeData: MonitorData = {
     strike: { rounds: 999, strikes: 1, roundsSinceLast: 990 },
   }),
   health: async () => ({
+    eventLoop: null,
+    jobs: {},
     ingestFresh: true,
     ingestSlotAgeMs: 100,
     solBalance: 0.5,

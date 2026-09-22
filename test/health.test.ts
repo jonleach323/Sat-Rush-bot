@@ -154,3 +154,21 @@ describe("HealthMonitor", () => {
     expect(alerts).toEqual([]);
   });
 });
+
+describe("HealthMonitor — event loop", () => {
+  it("names a block over the threshold with the slowest job, and stays quiet below it", async () => {
+    let worst = 40;
+    const { deps, alerts } = makeDeps({
+      loop: () => ({ p50Ms: 1, p99Ms: 12, maxMs: worst, worstBlockMs: worst, blocks: worst > 1_000 ? 1 : 0 }),
+      slowestJob: () => ({ name: "candidate_refresh", ms: worst }),
+    });
+    const monitor = new HealthMonitor(deps, { solFloorLamports: 20_000_000 });
+    expect(await monitor.check()).toEqual([]);
+    worst = 101_261;
+    const issues = await monitor.check();
+    expect(issues.map((i) => i.key)).toEqual(["event_loop_blocked"]);
+    expect(alerts[0]).toMatch(/event loop blocked 101261 ms/);
+    expect(alerts[0]).toMatch(/slowest job: candidate_refresh 101261 ms/);
+    expect(monitor.lastLoopSnapshot()?.worstBlockMs).toBe(101_261);
+  });
+});

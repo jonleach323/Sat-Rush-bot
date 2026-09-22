@@ -105,7 +105,6 @@ const midRound = await get<{ epoch_fee_usd: string; total_gross_deployed_usd: st
 const closedEpochBps = midRound && Number(midRound.total_gross_deployed_usd) > 0 ? (1e4 * Number(midRound.epoch_fee_usd)) / Number(midRound.total_gross_deployed_usd) : conf.epoch_fee_bps;
 const poolScale = conf.epoch_fee_bps / closedEpochBps;
 const rawUsdAt = (scale: number) => (ticketUsd * scale) / VAULT_HASHRATE_PER_TICKET.value;
-const rawUsd = rawUsdAt(1);
 const others = new Array<bigint>(TILES_COUNT).fill(usdToBase((gross * (1 - econ.feeLayerBps / 1e4)) / TILES_COUNT));
 const mintRate = Number.isFinite(mintLive) && mintLive > 0 ? mintLive : RUSH_MINT_PER_USD.value;
 // The strike jackpot leg, pro rata on the winning tile: the strike fee of every

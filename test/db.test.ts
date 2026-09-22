@@ -295,3 +295,24 @@ describe("wallet-set attribution", () => {
   });
 });
 
+
+describe("pruneObservations — history is bounded, the ledger is not", () => {
+  it("drops snapshots, competitor deploys and skips older than keepRounds and leaves my_deploys alone", () => {
+    const db = freshDb();
+    const comp = (roundId: number) => ({ roundId, authority: `A${roundId}`, mask: 7, amount: usdToBase(5), totalStake: usdToBase(4.6), isAutomation: true, reload: false, slot: roundId * 10, sig: `s${roundId}` });
+    for (const r of [1, 2, 3, 50, 51]) {
+      db.recordOccupancySnapshot(r, r * 10, new Array<bigint>(21).fill(0n), "grpc");
+      db.recordCompetitorDeploy(comp(r));
+      db.recordSkip(r, "paused", {});
+    }
+    db.recordMyDeploy({ roundId: 1, mask: 1, amount: usdToBase(1), evExpected: 0.1, firedSlot: 10, sig: "mine-1", status: "fired" });
+    const removed = db.pruneObservations(51, 10); // keep rounds > 41
+    expect(removed).toEqual({ occupancy_snapshots: 3, competitor_deploys: 3, skips: 3 });
+    const counts = db.tableCounts();
+    expect(counts["occupancy_snapshots"]).toBe(2);
+    expect(counts["competitor_deploys"]).toBe(2);
+    expect(counts["my_deploys"]).toBe(1); // the ledger is never pruned
+    expect(db.pruneObservations(51, 10)).toEqual({ occupancy_snapshots: 0, competitor_deploys: 0, skips: 0 });
+    db.close();
+  });
+});

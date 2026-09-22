@@ -93,3 +93,42 @@ describe("selector model swap", () => {
     expect(sel.totalGross).toBe(usdToBase(1));
   });
 });
+
+describe("per-tile presence credits (fleet tile mode)", () => {
+  it("a credit per covered tile is claimed by covering the tiles, not by one $1 leg", () => {
+    // Even $390 board: every lone $1 tile is negative; a flat per-tile credit
+    // above the per-tile toll makes each tile positive on its own, so the
+    // fill covers all 21 — one leg per wallet — instead of one tile.
+    const stakes = new Array<bigint>(TILES_COUNT).fill(usdToBase((390 * 0.94) / 21));
+    const ctx: V2EvContext = { predictedStakes: stakes, econ: statedV2Economics(), mintedTokenValueBase: 0, tokenYieldPerVolume: 0.0187 };
+    const bare = v2Model(ctx);
+    const oneTile = new Array<bigint>(TILES_COUNT).fill(0n);
+    oneTile[0] = usdToBase(1);
+    const blanket = new Array<bigint>(TILES_COUNT).fill(usdToBase(1));
+    expect(bare.ev(oneTile)).toBeLessThan(0);
+    expect(bare.ev(blanket)).toBeLessThan(0);
+    const tollPerTile = -bare.ev(blanket) / TILES_COUNT;
+
+    // One round-level credit worth the whole blanket's toll: the selector takes it with the cheapest leg.
+    const single = v2Model({ ...ctx, presenceCreditBase: tollPerTile * TILES_COUNT * 1.5 });
+    const selSingle = selectAllocation(single, cfg({ maxPerRound: usdToBase(21), minEdgeBps: 0 }));
+    expect(selSingle.kind).toBe("deploy");
+    if (selSingle.kind === "deploy") expect(selSingle.tiles.length).toBeLessThan(TILES_COUNT);
+
+    // The same value spread per covered tile: every wallet's leg is in.
+    const perTile = v2Model({ ...ctx, presenceCreditPerTileBase: new Array<number>(TILES_COUNT).fill(tollPerTile * 1.5) });
+    expect(perTile.ev(oneTile)).toBeGreaterThan(0);
+    expect(perTile.ev(blanket)).toBeCloseTo(bare.ev(blanket) + tollPerTile * 1.5 * TILES_COUNT, 0);
+    const selPerTile = selectAllocation(perTile, cfg({ maxPerRound: usdToBase(21), minEdgeBps: 0 }));
+    expect(selPerTile.kind).toBe("deploy");
+    if (selPerTile.kind === "deploy") {
+      expect(selPerTile.tiles.length).toBe(TILES_COUNT);
+      expect(selPerTile.totalGross).toBe(usdToBase(21));
+    }
+    // A credit on an uncovered tile is not earned.
+    const onlyTile3 = new Array<number>(TILES_COUNT).fill(0);
+    onlyTile3[3] = 1e6;
+    const m3 = v2Model({ ...ctx, presenceCreditPerTileBase: onlyTile3 });
+    expect(m3.ev(oneTile)).toBeCloseTo(bare.ev(oneTile), 3);
+  });
+});

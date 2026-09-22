@@ -72,6 +72,24 @@ describe("reconcileRoundOutcome — settlement tripwire", () => {
 });
 
 describe("reconcileWalletDrift — coarse drain tripwire", () => {
+  it("fleet aggregate: $400 of top-ups moved between our own wallets nets to zero and does not trip", () => {
+    // 2026-09-21 halt: the primary alone dropped 399,998,900 base ($400 of
+    // top-ups to 20 sub-wallets) against an expected 0 and tripped. Summed
+    // across the fleet the same moves are a zero delta.
+    const primaryOnly = reconcileWalletDrift({
+      expectedDeltaBase: 0n,
+      actualDeltaBase: -399_998_900n,
+      toleranceBase: usdToBase(5),
+    });
+    expect(primaryOnly.ok).toBe(false);
+    const fleet = reconcileWalletDrift({
+      expectedDeltaBase: 0n,
+      actualDeltaBase: 0n, // −399,998,900 on the primary, +399,998,900 across the sub-wallets
+      toleranceBase: usdToBase(5),
+    });
+    expect(fleet.ok).toBe(true);
+  });
+
   it("passes when actual outflow ≤ expected worst case + tolerance", () => {
     // expected worst case: lose everything deployed ($100). actual dropped $100.
     const r = reconcileWalletDrift({

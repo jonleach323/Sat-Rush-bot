@@ -5,12 +5,15 @@
  * alerts once per window, not once per check.
  */
 
+import type { LoopSnapshot } from "./loop-lag.js";
+
 export type HealthIssueKey =
   | "ingest_stale"
   | "slot_lag"
   | "sol_low"
   | "usdc_low"
-  | "db_write_error";
+  | "db_write_error"
+  | "event_loop_blocked";
 
 export interface HealthIssue {
   key: HealthIssueKey;
@@ -27,6 +30,10 @@ export interface HealthDeps {
   usdcBalanceBaseUnits?: (() => Promise<bigint>) | undefined;
   dbLastWriteError(): string | null;
   alert(message: string): void | Promise<void>;
+  /** Event-loop window since the last check (reads and resets the window). */
+  loop?: (() => LoopSnapshot) | undefined;
+  /** Slowest timed job in the same window, for naming the block. */
+  slowestJob?: (() => { name: string; ms: number } | null) | undefined;
 }
 
 export interface HealthMonitorOptions {
@@ -38,6 +45,8 @@ export interface HealthMonitorOptions {
   slotLagThreshold?: number | undefined;
   /** Re-alert window per issue key (default 5 min). */
   debounceMs?: number | undefined;
+  /** Alert when the event loop was blocked longer than this in one check window (default 1 s). */
+  loopBlockThresholdMs?: number | undefined;
   now?: (() => number) | undefined;
 }
 
@@ -51,6 +60,12 @@ export class HealthMonitor {
   private readonly lastAlerted = new Map<HealthIssueKey, number>();
   private timer: NodeJS.Timeout | null = null;
   private slotLag: SlotLagSample | null = null;
+  private lastLoop: LoopSnapshot | null = null;
+
+  /** The last event-loop window read by check(), for the status surface. */
+  lastLoopSnapshot(): LoopSnapshot | null {
+    return this.lastLoop;
+  }
 
   constructor(
     private readonly deps: HealthDeps,
@@ -124,6 +139,21 @@ export class HealthMonitor {
     const dbError = this.deps.dbLastWriteError();
     if (dbError !== null) {
       issues.push({ key: "db_write_error", message: `DB write failure: ${dbError}` });
+    }
+
+    // A blocked loop is the one failure every other signal misreads (silent
+    // stream, frozen Telegram, late fire). Name the job that did it.
+    if (this.deps.loop) {
+      const loop = this.deps.loop();
+      this.lastLoop = loop;
+      const threshold = this.opts.loopBlockThresholdMs ?? 1_000;
+      if (loop.worstBlockMs > threshold) {
+        const job = this.deps.slowestJob?.() ?? null;
+        issues.push({
+          key: "event_loop_blocked",
+          message: `event loop blocked ${loop.worstBlockMs} ms (${loop.blocks} block(s) > ${threshold} ms this window)${job ? ` — slowest job: ${job.name} ${job.ms} ms` : ""}`,
+        });
+      }
     }
 
     const debounce = this.opts.debounceMs ?? 5 * 60_000;

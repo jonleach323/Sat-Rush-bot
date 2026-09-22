@@ -36,7 +36,7 @@ const setKey = (k: string, v: string) => {
 };
 setKey("FLEET_SIZE", process.env["FLEET_SIZE"] ?? "21");
 if (mainnet) { setKey("EXECUTION_MODE", "mainnet"); setKey("MAINNET_CONFIRM", "yes"); }
-writeFileSync(".env", env);
+writeFileSync(".env", env.replace(/\n*$/, "\n"));
 for (const [k, v] of env.split("\n").filter((l) => /^[A-Z_]+=/.test(l)).map((l) => l.split(/=(.*)/s))) if (v !== undefined && v !== "") process.env[k!] ??= v;
 const cfg = loadConfig();
 

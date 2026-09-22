@@ -309,3 +309,123 @@ describe("absolute EV floor (fees + opportunity)", () => {
   });
 });
 
+
+describe("blanket seed (coverage non-convexity)", () => {
+  /** Synthetic model: EV per base unit depends only on how many tiles are covered. */
+  const coverageModel = (perBaseAt: (covered: number) => number) => {
+    const total = (a: bigint[]) => a.reduce((x, y) => x + y, 0n);
+    const covered = (a: bigint[]) => a.filter((x) => x > 0n).length;
+    const ev = (a: bigint[]) => Number(total(a)) * perBaseAt(covered(a));
+    return {
+      predictedStakes: zeroStakes(),
+      ev,
+      marginal: (a: bigint[], t: number, inc: bigint) => {
+        const after = [...a];
+        after[t] = (after[t] ?? 0n) + inc;
+        return ev(after) - ev(a);
+      },
+      returns: (a: bigint[]) => new Array<number>(TILES_COUNT).fill(ev(a)),
+    };
+  };
+  const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(3) };
+
+  it("reaches a positive 21-tile blanket when every lone tile is negative", () => {
+    // Lone tiles −5%/$, full coverage +2%/$: the empty seed stalls at zero.
+    const model = coverageModel((c) => (c === TILES_COUNT ? 0.02 : -0.05));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.tiles.length).toBe(TILES_COUNT);
+    expect(sel.totalGross).toBe(usdToBase(50)); // keeps filling at +2%/$ up to the cap
+    expect(sel.ev).toBeCloseTo(Number(usdToBase(50)) * 0.02, 0);
+    expect(sel.capBound).toBe(true);
+  });
+
+  it("still skips when the blanket is unaffordable under the cap", () => {
+    const model = coverageModel((c) => (c === TILES_COUNT ? 0.02 : -0.05));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(10) });
+    expect(sel).toMatchObject({ kind: "skip", reason: "no_positive_marginal_ev" });
+  });
+
+  it("keeps the empty-seed result when it has the higher EV", () => {
+    // Single tile +5%/$, anything wider −1%/$.
+    const model = coverageModel((c) => (c === 1 ? 0.05 : -0.01));
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.tiles.length).toBe(1);
+    expect(sel.totalGross).toBe(usdToBase(50));
+  });
+
+  it("skips when both seeds end non-positive", () => {
+    const model = coverageModel(() => -0.01);
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(50) });
+    expect(sel).toMatchObject({ kind: "skip", reason: "no_positive_marginal_ev" });
+  });
+});
+
+describe("coarse-to-fine fill: uncapped runs are cheap and land where the $1 greedy would", () => {
+  const flat = (evPerBase: number) => ({
+    predictedStakes: zeroStakes(),
+    ev: (alloc: bigint[]) => Number(alloc.reduce((a, b) => a + b, 0n)) * evPerBase,
+    marginal: (_a: bigint[], _t: number, inc: bigint) => Number(inc) * evPerBase,
+    returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(evPerBase * Number(alloc.reduce((a, b) => a + b, 0n))),
+  });
+  const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(5) };
+
+  it("a marginal that never turns negative fills a $1M cap in milliseconds, not a million steps", () => {
+    const t0 = performance.now();
+    const sel = selectAllocation(flat(0.01), { ...base, maxPerRound: usdToBase(1_000_000) });
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.totalGross).toBe(usdToBase(1_000_000));
+    expect(sel.capBound).toBe(true);
+  });
+
+  it("stops within one quantum of the concave optimum on every tile (no overshoot from big steps)", () => {
+    // Per-tile concave: the k-th dollar on a tile is worth (40 − k) cents, so
+    // the optimum is exactly $39 per tile; the $1 greedy stops there too.
+    const perTile = (a: bigint) => { const n = Number(a) / 1e6; return (40 * n - (n * (n + 1)) / 2) * 1e4; };
+    const model = {
+      predictedStakes: zeroStakes(),
+      ev: (alloc: bigint[]) => alloc.reduce((s, a) => s + perTile(a), 0),
+      marginal: (alloc: bigint[], t: number, inc: bigint) => perTile((alloc[t] ?? 0n) + inc) - perTile(alloc[t] ?? 0n),
+      returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(alloc.reduce((s, a) => s + perTile(a), 0)),
+    };
+    const sel = selectAllocation(model, { ...base, maxPerRound: usdToBase(100_000) });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    for (const a of sel.allocation) expect(a).toBe(usdToBase(39));
+    expect(sel.capBound).toBe(false);
+  });
+
+  it("excludeTiles keeps those tiles empty even when they are the best", () => {
+    const sel = selectAllocation(flat(0.01), { ...base, maxPerRound: usdToBase(50), excludeTiles: [0, 1, 2] });
+    expect(sel.kind).toBe("deploy");
+    if (sel.kind !== "deploy") return;
+    expect(sel.allocation[0]).toBe(0n);
+    expect(sel.allocation[1]).toBe(0n);
+    expect(sel.allocation[2]).toBe(0n);
+    expect(sel.totalGross).toBe(usdToBase(50));
+  });
+});
+
+describe("hurdle scales with the stake actually deployed", () => {
+  it("a small selection is charged the opportunity yield on ITS total, not on the cap", () => {
+    const flat = (evPerBase: number) => ({
+      predictedStakes: zeroStakes(),
+      ev: (alloc: bigint[]) => Number(alloc.reduce((a, b) => a + b, 0n)) * evPerBase,
+      marginal: (_a: bigint[], _t: number, inc: bigint) => Number(inc) * evPerBase,
+      returns: (alloc: bigint[]) => new Array<number>(TILES_COUNT).fill(evPerBase * Number(alloc.reduce((a, b) => a + b, 0n))),
+    });
+    const base = { ladder: [usdToBase(1)], minDeploy: usdToBase(1), kEmptiest: 3, strategy: "water_filling" as const, rng: seededRng(9), maxPerRound: usdToBase(35_000) };
+    // +0.5%/$ on a cap-bound $35k fill = $175 of EV; per-unit hurdle 0.4%/$ = $140 → clears.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004 }).kind).toBe("deploy");
+    // Per-unit hurdle above the edge → skip, however large the cap.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.006 })).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+    // Fixed fees add on top of the scaled part.
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004, minEvBase: usdToBase(40) })).toMatchObject({ kind: "skip", reason: "below_min_edge" });
+    expect(selectAllocation(flat(0.005), { ...base, minEvPerUnit: 0.004, minEvBase: usdToBase(30) }).kind).toBe("deploy");
+  });
+});

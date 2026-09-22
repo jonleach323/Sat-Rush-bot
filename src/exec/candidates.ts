@@ -172,11 +172,17 @@ export function computeCandidateSelections(
   const out: DeploySelection[] = [];
   const seenMasks = new Set<number>();
   let stakes = src.predictedStakes;
+  // V2 variants exclude tiles outright (SelectorConfig.excludeTiles); the V1
+  // sentinel stake is kept for the V1 context, where a heavy tile is merely
+  // unattractive. Under V2 a heavy rival tile is a jackpot for every other
+  // tile (5% of the board swaps to the winner), so the sentinel made the
+  // fill run to the cap — minutes inside the event loop at an uncapped run.
+  const excludeTiles: number[] = [...(cfg.excludeTiles ?? [])];
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const selection = selectAllocation(
       isModelSource(src) ? src.model(stakes) : { ...src, predictedStakes: stakes },
-      cfg,
+      isModelSource(src) ? { ...cfg, excludeTiles } : cfg,
     );
     if (selection.kind !== "deploy") {
       if (attempt === 0) onSkip?.(selection.reason);
@@ -193,9 +199,13 @@ export function computeCandidateSelections(
         heaviest = tile;
       }
     }
-    const next = [...stakes];
-    next[heaviest] = EXCLUDE_STAKE;
-    stakes = next;
+    if (isModelSource(src)) {
+      excludeTiles.push(heaviest);
+    } else {
+      const next = [...stakes];
+      next[heaviest] = EXCLUDE_STAKE;
+      stakes = next;
+    }
   }
   return out;
 }

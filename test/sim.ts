@@ -270,14 +270,14 @@ export const STRATEGIES: StrategySpec[] = [
   },
   {
     name: "single_emptiest",
-    makeFire: (rng) => (visible) => ({
+    makeFire: (_rng) => (visible) => ({
       tiles: [emptiestTiles(visible, 1, null)],
       totalGrossUsd: MAX_PER_ROUND_USD,
     }),
   },
   {
     name: "random_tile",
-    makeFire: (rng) => (visible) => ({
+    makeFire: (rng) => (_visible) => ({
       tiles: [Math.floor(rng() * TILES_COUNT)],
       totalGrossUsd: MAX_PER_ROUND_USD,
     }),

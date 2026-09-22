@@ -251,12 +251,28 @@ describe("computeCandidateSelections with a V2 model factory", () => {
     const picks = computeCandidateSelections(spied, selCfg());
     expect(picks.length).toBeGreaterThan(0);
     expect(new Set(picks.map((p) => p.mask)).size).toBe(picks.length);
-    // first build sees the raw prediction; later ones carry the exclusion sentinel
-    expect(built[0]).toEqual(src.predictedStakes);
-    if (built.length > 1) expect(built[1]!.some((s) => s >= 10n ** 15n)).toBe(true);
+    // Every build sees the raw prediction: V2 variants exclude tiles through
+    // the selector (excludeTiles), never through a sentinel stake — under V2
+    // a heavy rival tile is a jackpot for the rest, not a deterrent.
+    for (const b of built) expect(b).toEqual(src.predictedStakes);
+    if (picks.length > 1) {
+      const heaviest0 = picks[0]!.tiles.reduce((h, t) => ((picks[0]!.allocation[t] ?? 0n) > (picks[0]!.allocation[h] ?? 0n) ? t : h), picks[0]!.tiles[0]!);
+      expect(picks[1]!.tiles).not.toContain(heaviest0);
+    }
     // the V2 chase and the V1 chase agree on the emptiest tiles
     const v1 = computeCandidateSelections(chaseCtx(), selCfg());
     expect(picks[0]!.tiles.every((t) => t < 3)).toBe(true);
     expect(v1[0]!.tiles.every((t) => t < 3)).toBe(true);
+  });
+});
+
+describe("uncapped V2 variants stay cheap (the event-loop block behind the silent ingest)", () => {
+  it("three variants at a $1M cap finish in well under a second", () => {
+    const src = chaseV2Source();
+    const t0 = performance.now();
+    const picks = computeCandidateSelections(src, { ...selCfg(), maxPerRound: usdToBase(1_000_000) });
+    const ms = performance.now() - t0;
+    expect(picks.length).toBeGreaterThan(0);
+    expect(ms).toBeLessThan(1_000);
   });
 });

@@ -169,7 +169,6 @@ console.log(`  daily cap ${pct(toll)} of the stake, and pnl must mark BTC and RU
 console.log(`  winning day reads as a losing one and the cap trips on phantom losses.`);
 
 // ── 3. is presence +EV? the token yield decides ─────────────────────────────
-const rushBack = (TOKEN_SPLIT_WINNERS_BPS.value + TOKEN_SPLIT_LOSERS_BPS.value) / BPS;
 const beLayer = breakEvenTokenYield(econ.feeLayerBps);
 // The protocol leg alone is what leaves the player pool (E-accounting: 1.42%
 // of the 8% layer). Scaled to the announced 6% layer if the split is unknown.
