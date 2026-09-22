@@ -205,3 +205,20 @@ describe("fleet presence credits", () => {
     expect(per!.every((c) => c >= 0)).toBe(true);
   });
 });
+
+describe("settle on reveal, whatever the state machine is doing", () => {
+  it("a reveal for a round we fired in triggers a self-settle even after roundId moved on", async () => {
+    h = await bootHarness({ env: { EXECUTION_MODE: "dry" } });
+    // Book a landed leg for round 99 (a previous round) and reveal it while the bot sits in round 100.
+    h.db.recordMyDeploy({ roundId: 99, mask: 1, amount: 1_000_000n, evExpected: 0, firedSlot: 900, sig: "leg99", status: "landed", wallet: h.wallets.primary().keypair.publicKey.toBase58() });
+    const settle = vi.spyOn(h.orch as unknown as { selfSettle: (r: number) => Promise<void> }, "selfSettle").mockResolvedValue();
+    h.slotsTo(1_001);
+    await h.settle();
+    (h.orch as unknown as { onRevealed: (r: Record<string, unknown>) => void }).onRevealed({
+      round_id: 99, winning_tile: 3, is_strike_triggered: false,
+      strike_bonus_usd: 0n, strike_bonus_btc: 0n, strike_bonus_token: 0n,
+      epoch_fee_usd_amount: 0n, one_btc_fee_usd_amount: 0n, protocol_fee_usd_amount: 0n,
+    } as never);
+    expect(settle).toHaveBeenCalledWith(99);
+  });
+});

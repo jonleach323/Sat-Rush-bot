@@ -57,6 +57,7 @@ import {
   minerPda,
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
+  publicDeploymentPda,
   satrushConfigPda,
   satsVaultPda,
   tokenVaultPda,
@@ -700,12 +701,18 @@ export class Orchestrator {
             net: string;
             fees_paid: string;
           }>("SELECT deployed, returned, net, fees_paid FROM pnl_daily WHERE date = ?", date);
+          const unsettled = this.db.unsettledToday(date);
+          const net = BigInt(row?.net ?? "0");
+          const marked = this.pnl.markedNetToday(date);
           return {
             date,
             deployed: BigInt(row?.deployed ?? "0"),
             returned: BigInt(row?.returned ?? "0"),
-            net: BigInt(row?.net ?? "0"),
+            net,
             feesPaid: BigInt(row?.fees_paid ?? "0"),
+            unsettled: { legs: unsettled.legs, grossUsd: Number(unsettled.grossBase) / 1e6, rounds: unsettled.rounds },
+            sharesMarkedUsd: Number(marked - net) / 1e6,
+            markedNet: marked,
           };
         },
         pause: () => {
@@ -2913,6 +2920,7 @@ export class Orchestrator {
     try {
       // A boot under the KILL file skipped the tag; retry once the switch clears.
       if (!this.affiliateTagDone) await this.ensureAffiliateTag();
+      await this.settleSweep();
       await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
       const p = this.wallets.primary();
       const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
@@ -2955,6 +2963,69 @@ export class Orchestrator {
       this.log.warn({ err: String(err).slice(0, 160) }, "fleet treasury cycle failed");
     } finally {
       this.fleetCycleInFlight = false;
+    }
+  }
+
+  /** Per-(round, wallet) settle attempts by the sweep, to back off a leg the program keeps refusing. */
+  private readonly sweepAttempts = new Map<string, number>();
+
+  /**
+   * Settle sweep: every landed leg with no settlement on record, rounds
+   * older than the current one. Belt and braces under the reveal-time
+   * settle — a settle that failed (missing affiliate account, RPC hiccup)
+   * or a reveal that raced the next Board write left legs parked in their
+   * deployment accounts with the refund, the won shares and the rent. A
+   * deployment account that no longer exists was settled by someone else:
+   * the sweep records nothing (the settle event, if we missed it, is not
+   * ours to invent) and stops retrying it.
+   */
+  private async settleSweep(): Promise<void> {
+    if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    if (this.roundId === null) return;
+    const legs = this.db.unsettledLegs(this.roundId, 40);
+    if (legs.length === 0) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    let settled = 0, gone = 0, failed = 0;
+    for (const leg of legs) {
+      const key = `${leg.roundId}:${leg.wallet ?? "primary"}`;
+      const attempts = this.sweepAttempts.get(key) ?? 0;
+      if (attempts >= 5) continue;
+      const deployer = leg.wallet ? new PublicKey(leg.wallet) : this.payer.publicKey;
+      try {
+        const info = await this.connection.getAccountInfo(publicDeploymentPda(deployer, leg.roundId, programId), "confirmed");
+        if (!info) {
+          this.sweepAttempts.set(key, 99);
+          gone++;
+          continue;
+        }
+        const fee = this.feeEstimator.currentMicroLamportsPerCu();
+        assertFeeBearingInvariants({ kind: "settle", priorityFeeMicroLamports: fee, maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS, killSwitchEngaged: this.bankroll.killSwitchEngaged() });
+        const ix = buildSettleDeployPublic(this.ixCtx, {
+          authority: this.payer.publicKey,
+          deploymentAuthority: deployer,
+          roundId: leg.roundId,
+          affiliate: this.state.minerAt(minerPda(deployer, programId))?.affiliate,
+        });
+        const { tx, lastValidBlockHeight } = await assembleTx(this.connection, { payer: this.payer, instructions: [ix], computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT, priorityFeeMicroLamports: fee });
+        const result = await this.sender.fire(
+          { signature: bs58.encode(tx.signatures[0]!), serialized: Buffer.from(tx.serialize()), lastValidBlockHeight, meta: { kind: "settle_sweep", roundId: leg.roundId, wallet: deployer.toBase58() } },
+          { timeoutMs: 15_000 },
+        );
+        this.sweepAttempts.set(key, attempts + 1);
+        if (result.outcome === "landed") settled++;
+        else {
+          failed++;
+          this.log.warn({ roundId: leg.roundId, wallet: deployer.toBase58(), outcome: result.outcome, detail: result.detail, attempt: attempts + 1 }, "settle sweep: leg not settled");
+        }
+      } catch (err) {
+        this.sweepAttempts.set(key, attempts + 1);
+        failed++;
+        this.log.warn({ roundId: leg.roundId, wallet: deployer.toBase58(), err: String(err).slice(0, 200), attempt: attempts + 1 }, "settle sweep failed");
+      }
+    }
+    if (settled + gone + failed > 0) {
+      this.log.info({ candidates: legs.length, settled, gone, failed }, "settle sweep");
+      if (failed > 0 && settled === 0) this.alert(`⚠ settle sweep: ${failed} landed leg(s) could not be settled (${legs.length} unsettled on record) — refunds are parked in deployment accounts; see the journal's "settle sweep" lines`);
     }
   }
 
@@ -3519,6 +3590,13 @@ export class Orchestrator {
       }),
     });
 
+    // A round we fired in is settled on its reveal whatever the state machine
+    // is doing: the next Board write can arrive before this event and move
+    // roundId on, and a leg left unsettled is money parked in a deployment
+    // account until the owner's crank (often offline) gets to it.
+    if (reveal.round_id !== this.roundId && this.db.landedWallets(reveal.round_id).length > 0) {
+      void this.selfSettle(reveal.round_id);
+    }
     if (reveal.round_id === this.roundId) {
       if (this.botState === "SETTLING" || this.botState === "CONFIRMING") {
         void this.selfSettle(reveal.round_id).then(() => {

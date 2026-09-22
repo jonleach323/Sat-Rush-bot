@@ -64,9 +64,17 @@ export interface DeployRow {
 export interface PnlSummary {
   date: string;
   deployed: bigint;
+  /** Settled USD back (the 89% refund on losing legs plus USD winnings). */
   returned: bigint;
+  /** returned − deployed: cash only, before shares and before unsettled legs. */
   net: bigint;
   feesPaid: bigint;
+  /** Landed legs from today with no settlement on record: money still inside deployment accounts. */
+  unsettled?: { legs: number; grossUsd: number; rounds: number } | undefined;
+  /** USD value of the day's won BTC and RUSH shares at the vault rate and live prices. */
+  sharesMarkedUsd?: number | undefined;
+  /** net + shares marked: the day's economic result, excluding the unsettled legs above. */
+  markedNet?: bigint | undefined;
 }
 
 export interface RoundRow {
@@ -232,15 +240,19 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
   bot.command("pnl", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
     const p = await opts.deps.getPnl();
-    await ctx.reply(
-      [
-        `pnl ${p.date}`,
-        `deployed: ${usd(p.deployed)}`,
-        `returned: ${usd(p.returned)}`,
-        `net: ${usd(p.net)}`,
-        `fees (deploy legs): ${usd(p.feesPaid)}`,
-      ].join("\n"),
-    );
+    const lines = [
+      `pnl ${p.date}`,
+      `deployed: ${usd(p.deployed)}`,
+      `returned (settled USD): ${usd(p.returned)}`,
+      `net cash: ${usd(p.net)}`,
+      `fees (deploy legs): ${usd(p.feesPaid)}`,
+    ];
+    if (p.unsettled && p.unsettled.legs > 0) {
+      lines.push(`UNSETTLED: ${p.unsettled.legs} legs / $${p.unsettled.grossUsd.toFixed(2)} across ${p.unsettled.rounds} rounds — still inside deployment accounts (89% comes back at settle); the sweep settles them`);
+    }
+    if (p.sharesMarkedUsd !== undefined) lines.push(`shares won today, marked: $${p.sharesMarkedUsd.toFixed(2)} (BTC + RUSH vault shares at live prices)`);
+    if (p.markedNet !== undefined) lines.push(`marked net (cash + shares, excl. unsettled): ${usd(p.markedNet)}`);
+    await ctx.reply(lines.join("\n"));
   });
 
   bot.command("pause", async (ctx) => {

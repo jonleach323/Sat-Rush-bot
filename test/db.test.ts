@@ -316,3 +316,19 @@ describe("pruneObservations — history is bounded, the ledger is not", () => {
     db.close();
   });
 });
+
+describe("unsettled legs — the ledger's blind spot under V2", () => {
+  it("lists landed legs with no settlement for (round, wallet), oldest first, and counts today's", () => {
+    const db = freshDb();
+    const leg = (roundId: number, wallet: string, sig: string) =>
+      db.recordMyDeploy({ roundId, mask: 1, amount: usdToBase(1), evExpected: 0, firedSlot: 1, sig, status: "landed", wallet });
+    leg(10, "A", "a10"); leg(10, "B", "b10"); leg(11, "A", "a11"); leg(12, "A", "a12");
+    db.recordSettlement({ roundId: 10, winningStake: 0n, wonUsd: usdToBase(0.89), wonShares: 0n, hashrateEarned: 0n, wonTokenAmount: 0n, wonTokenShares: 0n, wallet: "A", sig: "s-a10" });
+    const legs = db.unsettledLegs(12); // strictly before round 12
+    expect(legs.map((l) => `${l.roundId}:${l.wallet}`)).toEqual(["10:B", "11:A"]);
+    expect(legs[0]!.amount).toBe(usdToBase(1));
+    const today = db.unsettledToday(new Date().toISOString().slice(0, 10));
+    expect(today).toEqual({ legs: 3, grossBase: usdToBase(3), rounds: 3 });
+    db.close();
+  });
+});

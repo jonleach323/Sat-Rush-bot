@@ -352,6 +352,45 @@ export class StateDb {
   }
 
   /** Wallets whose deploy landed in `roundId` (null entries = the primary). */
+  /**
+   * Landed legs with no settlement on record for (round, wallet), oldest
+   * first, rounds strictly before `beforeRoundId`. Under V2 a landed leg is
+   * money in a deployment account until it is settled — the 89% refund, the
+   * won shares and the rent all come back at settle — so an unsettled leg
+   * is the ledger's largest blind spot.
+   */
+  unsettledLegs(beforeRoundId: number, limit = 200): { roundId: number; wallet: string | null; amount: bigint }[] {
+    return this.query<{ round_id: number; wallet: string | null; amount: string }>(
+      `SELECT d.round_id, d.wallet, SUM(CAST(d.amount AS INTEGER)) AS amount
+       FROM my_deploys d
+       WHERE d.status = 'landed' AND d.round_id < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM settlements s
+           WHERE s.round_id = d.round_id AND COALESCE(s.wallet, '') = COALESCE(d.wallet, '')
+         )
+       GROUP BY d.round_id, d.wallet
+       ORDER BY d.round_id ASC
+       LIMIT ?`,
+      beforeRoundId,
+      limit,
+    ).map((r) => ({ roundId: r.round_id, wallet: r.wallet, amount: BigInt(r.amount) }));
+  }
+
+  /** Landed legs from `date` still unsettled: count and gross, for the P&L view. */
+  unsettledToday(date: string): { legs: number; grossBase: bigint; rounds: number } {
+    const row = this.queryOne<{ legs: number; gross: string | null; rounds: number }>(
+      `SELECT COUNT(*) AS legs, COALESCE(SUM(CAST(d.amount AS INTEGER)), 0) AS gross, COUNT(DISTINCT d.round_id) AS rounds
+       FROM my_deploys d
+       WHERE d.status = 'landed' AND date(d.created_at) = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM settlements s
+           WHERE s.round_id = d.round_id AND COALESCE(s.wallet, '') = COALESCE(d.wallet, '')
+         )`,
+      date,
+    );
+    return { legs: row?.legs ?? 0, grossBase: BigInt(row?.gross ?? "0"), rounds: row?.rounds ?? 0 };
+  }
+
   landedWallets(roundId: number): (string | null)[] {
     return this.query<{ wallet: string | null }>(
       `SELECT DISTINCT wallet FROM my_deploys WHERE round_id = ? AND status = 'landed'`,
