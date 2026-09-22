@@ -110,6 +110,8 @@ const REFRESH_MIN_INTERVAL_MS = 750;
  * final ~40 s before cutoff, so pricing 3 slots earlier loses nothing.
  */
 const PRE_ARM_SLOTS = 3;
+/** Ramp credit above the minimum blanket's toll, so a ramp is never at the knife edge of the edge floor. */
+const RAMP_FLOOR_HEADROOM = 1.5;
 /** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
 const SNAPSHOT_MIN_SLOTS = 5;
 /** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
@@ -1304,7 +1306,12 @@ export class Orchestrator {
     const legacyFloor = (minDeploy * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000;
     const edge = (minDeploy * this.cfg.MIN_EDGE_BPS) / 10_000;
     const fees = Number(this.edgeHurdleBase(0n) ?? 0n) / tiles;
-    return Math.max(legacyFloor, tollBase / tiles) + edge + fees;
+    // Headroom: sized to the floor exactly, round-to-round board noise put
+    // the $21 ramp under the edge floor every other round (rounds 70481+,
+    // 2026-09-22) and the streaks climbed at half speed. The toll is priced
+    // on the previous pre-arm's board; 1.5× covers the drift, and a doubled
+    // edge keeps the ramp clear of MIN_EDGE_BPS.
+    return Math.max(legacyFloor, (tollBase / tiles) * RAMP_FLOOR_HEADROOM) + 2 * edge + fees;
   }
 
   /** Per-tile presence credits for the fleet's tile mode (wallet i → tile i), or null outside it. */
