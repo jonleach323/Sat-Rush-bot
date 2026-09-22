@@ -418,6 +418,13 @@ export class StateDb {
     };
   }
 
+  /** All-time cash: gross deployed (fired/landed) and settled USD returned, base units. */
+  lifetimeCash(): { deployedBase: bigint; returnedBase: bigint } {
+    const d = this.queryOne<{ v: string | null }>(`SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS v FROM my_deploys WHERE status IN ('fired','landed')`);
+    const r = this.queryOne<{ v: string | null }>(`SELECT COALESCE(SUM(CAST(won_usd AS INTEGER)), 0) AS v FROM settlements`);
+    return { deployedBase: BigInt(d?.v ?? "0"), returnedBase: BigInt(r?.v ?? "0") };
+  }
+
   landedWallets(roundId: number): (string | null)[] {
     return this.query<{ wallet: string | null }>(
       `SELECT DISTINCT wallet FROM my_deploys WHERE round_id = ? AND status = 'landed'`,

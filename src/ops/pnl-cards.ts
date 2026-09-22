@@ -95,6 +95,12 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         [`gain in ${p.days}d`, signed(p.gainUsd)],
         ["  BTC", `+${num(p.btc - pos.btc, 6)}`],
         ["  RUSH", `+${num(p.rush - pos.rush, 3)}`],
+        ["", ""],
+        ["cash in, all time", money(pos.breakeven.lifetimeDeployedUsd, 0)],
+        ["cash back, all time", money(pos.breakeven.lifetimeReturnedUsd, 0)],
+        ["cost basis (net)", money(pos.breakeven.costBasisUsd)],
+        ["holdings now", money(pos.breakeven.holdingsUsd)],
+        ["break-even", breakevenText(pos.breakeven)],
       ];
       return `<b>📈 Unclaimed, bot stopped</b> · what the holdings earn on their own\n${t}${table(rows)}` +
         `<i>vault carry ${pctd(pos.carry.sats)} BTC · ${pctd(pos.carry.token)} RUSH (${pos.carrySource}): the exit fees of those who claim, paid to those who stay; prices held. While the bot runs it adds +${num(r.btcPerDay, 6)} BTC · +${num(r.rushPerDay, 3)} RUSH a day at the last ${r.sampleHours.toFixed(0)} h rate.</i>`;
@@ -120,6 +126,13 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
     default:
       return "";
   }
+}
+
+function breakevenText(b: PositionReport["breakeven"]): string {
+  if (b.alreadyAhead) return `ahead by ${money(-b.shortfallUsd)}`;
+  if (b.days === null) return "never on carry alone";
+  const when = new Date(Date.now() + b.days * 86_400_000).toISOString().slice(0, 10);
+  return `${b.days} d (${when}) at ${(b.blendedCarryDaily * 100).toFixed(2)}%/d`;
 }
 
 export function pnlKeyboard(active: PnlTab): InlineKeyboard {

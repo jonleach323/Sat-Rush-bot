@@ -141,7 +141,7 @@ import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, ty
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
 import { SATS_VAULT_CARRY_DAILY, STAKING_YIELD_DAILY, STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "./strategy/facts.js";
-import { fleetPosition, holdVsClaim, projectHolding } from "./state/position.js";
+import { breakevenOnCarry, fleetPosition, holdVsClaim, projectHolding } from "./state/position.js";
 import type { PositionReport } from "./ops/telegram.js";
 import { selectAllocation } from "./strategy/selector.js";
 import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
@@ -3603,6 +3603,13 @@ export class Orchestrator {
       totalUnclaimedUsd: pos.totalUnclaimedUsd,
       btcPrice: btcUsd, rushPrice: rushUsd,
       rate, carry, carrySource, vaults,
+      breakeven: (() => {
+        const life = this.db.lifetimeCash();
+        const unsettled = this.db.unsettledLegs(Number.MAX_SAFE_INTEGER, 100_000).reduce((a, l) => a + l.amount, 0n);
+        // Cost basis: cash out all time, net of what unsettled legs will refund (89%).
+        const cost = Number(life.deployedBase - life.returnedBase) / 1e6 - (Number(unsettled) / 1e6) * (V2_LOSING_TILE_REFUND_BPS.value / 10_000);
+        return { ...breakevenOnCarry({ costBasisUsd: cost, btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6, carry }), lifetimeDeployedUsd: Number(life.deployedBase) / 1e6, lifetimeReturnedUsd: Number(life.returnedBase) / 1e6 };
+      })(),
       apr: { sats: carry.sats * 365, token: carry.token * 365, satsCompounded: Math.pow(1 + carry.sats, 365) - 1, tokenCompounded: Math.pow(1 + carry.token, 365) - 1 },
       verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value },
       projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },

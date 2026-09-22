@@ -136,6 +136,8 @@ export interface PositionReport {
   carry: { sats: number; token: number };
   /** Where the carry rates came from: the live vault APRs from the API, or the measured facts. */
   carrySource: "live" | "measured";
+  /** Break-even on the carry alone: net cash put in vs the holdings today. */
+  breakeven: { costBasisUsd: number; holdingsUsd: number; shortfallUsd: number; blendedCarryDaily: number; days: number | null; alreadyAhead: boolean; lifetimeDeployedUsd: number; lifetimeReturnedUsd: number };
   /** The carry as a yearly rate: simple (daily × 365) and compounded. */
   apr: { sats: number; token: number; satsCompounded: number; tokenCompounded: number };
   /** Tickets we hold in the open draws (from the vault manager's last poll), or null when it is not running. */

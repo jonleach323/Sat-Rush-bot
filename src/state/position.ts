@@ -190,3 +190,31 @@ export function holdVsClaim(input: {
     holdWins: btc.holdEdgeUsd + rush.holdEdgeUsd >= 0,
   };
 }
+
+/**
+ * Break-even on the carry alone: net cash put in (deployed − returned,
+ * all time) against the holdings' value today, growing at the blended
+ * daily carry of the legs. Days until value ≥ cost; 0 when already ahead;
+ * null when the carry cannot get there (no holdings, or no carry).
+ */
+export interface Breakeven {
+  costBasisUsd: number;
+  holdingsUsd: number;
+  shortfallUsd: number;
+  blendedCarryDaily: number;
+  days: number | null;
+  alreadyAhead: boolean;
+}
+
+export function breakevenOnCarry(input: { costBasisUsd: number; btcUsd: number; rushUsd: number; usdcUnclaimed: number; carry: { sats: number; token: number } }): Breakeven {
+  const holdings = input.btcUsd + input.rushUsd + input.usdcUnclaimed;
+  const growing = input.btcUsd + input.rushUsd;
+  const blended = growing > 0 ? (input.btcUsd * input.carry.sats + input.rushUsd * input.carry.token) / growing : 0;
+  const cost = input.costBasisUsd;
+  const shortfall = cost - holdings;
+  if (shortfall <= 0) return { costBasisUsd: cost, holdingsUsd: holdings, shortfallUsd: shortfall, blendedCarryDaily: blended, days: 0, alreadyAhead: true };
+  if (growing <= 0 || blended <= 0 || cost - input.usdcUnclaimed <= 0) return { costBasisUsd: cost, holdingsUsd: holdings, shortfallUsd: shortfall, blendedCarryDaily: blended, days: null, alreadyAhead: false };
+  // growing·(1+b)^t + usdc = cost  ⇒  t = ln((cost − usdc)/growing) / ln(1+b)
+  const days = Math.log((cost - input.usdcUnclaimed) / growing) / Math.log(1 + blended);
+  return { costBasisUsd: cost, holdingsUsd: holdings, shortfallUsd: shortfall, blendedCarryDaily: blended, days: Math.ceil(days), alreadyAhead: false };
+}

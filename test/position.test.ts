@@ -79,3 +79,18 @@ describe("holdVsClaim — the exit fee is paid once, the carry every day", () =>
     expect(collapsed.btc.holdEdgeUsd).toBeGreaterThan(0);
   });
 });
+
+describe("breakevenOnCarry — days until the carry grows the holdings back to the cash put in", () => {
+  it("solves the blended-carry growth, reports ahead, and never when nothing can grow", async () => {
+    const { breakevenOnCarry } = await import("../src/state/position.js");
+    // $1,000 BTC at 0.3%/d + $1,000 RUSH at 0.24%/d + $50 USDC against $2,600 in.
+    const b = breakevenOnCarry({ costBasisUsd: 2_600, btcUsd: 1_000, rushUsd: 1_000, usdcUnclaimed: 50, carry: { sats: 0.003, token: 0.0024 } });
+    expect(b.blendedCarryDaily).toBeCloseTo(0.0027, 9);
+    expect(b.shortfallUsd).toBeCloseTo(550, 9);
+    const t = Math.log(2_550 / 2_000) / Math.log(1.0027);
+    expect(b.days).toBe(Math.ceil(t)); // ≈ 90 days
+    expect(b.alreadyAhead).toBe(false);
+    expect(breakevenOnCarry({ costBasisUsd: 1_500, btcUsd: 1_000, rushUsd: 1_000, usdcUnclaimed: 0, carry: { sats: 0.003, token: 0.0024 } })).toMatchObject({ alreadyAhead: true, days: 0 });
+    expect(breakevenOnCarry({ costBasisUsd: 500, btcUsd: 0, rushUsd: 0, usdcUnclaimed: 10, carry: { sats: 0.003, token: 0.0024 } }).days).toBeNull();
+  });
+});

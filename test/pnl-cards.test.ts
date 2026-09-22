@@ -14,6 +14,7 @@ const pos: PositionReport = {
   rate: { sampleHours: 22.3, settlements: 480, btcPerDay: 0.00041, rushPerDay: 0.82, hashratePerDay: 410, usdNetPerDay: -0.9, grossPerDay: 640 },
   carry: { sats: 0.003, token: 0.0024 }, carrySource: "live",
   apr: { sats: 1.095, token: 0.876, satsCompounded: 1.99, tokenCompounded: 1.4 },
+  breakeven: { costBasisUsd: 2_600, holdingsUsd: 2_129.3, shortfallUsd: 470.7, blendedCarryDaily: 0.0027, days: 75, alreadyAhead: false, lifetimeDeployedUsd: 4_100, lifetimeReturnedUsd: 1_500 },
   vaults: { epoch: { iterationId: 16, myTickets: 1_234, totalTickets: 900_000, shareBps: 13.7, poolUsd: 9_583, slotsToClose: 120_000 }, oneBtc: { iterationId: 3, totalTickets: 231_393, prizeUsd: 85_500, fillBps: 1274 } },
   verdict: { days: 30, btc: { heldUsd: 1_154, claimedUsd: 949.5, holdEdgeUsd: 204.5, breakevenCarryDaily: -0.0035 }, rush: { heldUsd: 1_141, claimedUsd: 1_022, holdEdgeUsd: 119, breakevenCarryDaily: -0.0013 }, breakevenCarryDailyYear: { btc: -0.0003, rush: 0.002 }, holdWins: true, stakingYieldDaily: 0.00224 },
   projection: { days: 30, btc: 0.0257, rush: 52.1, tickets: 12_455, btcUsd: 2_197, rushUsd: 2_258, usdNet: -27, gainUsd: 2_311, carryUsd: 95 },
@@ -51,6 +52,8 @@ describe("/pnl cards", () => {
     expect(h).toMatch(/BTC\s+0\.012340\s+0\.025700/);
     expect(h).toMatch(/APR on BTC shares\s+109\.5% \(199\.0% comp\.\)/);
     expect(h).toMatch(/gain in 30d\s+\+\$2,311\.00/);
+    expect(h).toMatch(/cost basis \(net\)\s+\$2,600\.00/);
+    expect(h).toMatch(/break-even\s+75 d \(\d{4}-\d{2}-\d{2}\) at 0\.27%\/d/);
     const v = renderPnlCard("verdict", pnl, pos);
     expect(v).toContain("HOLD wins");
     expect(v).toMatch(/RUSH\s+HOLD \$119\.00/);
