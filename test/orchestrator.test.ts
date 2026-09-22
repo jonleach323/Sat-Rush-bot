@@ -193,3 +193,15 @@ describe("on-chain config retune", () => {
     expect(alerts.filter((a) => /config changed/.test(a))).toHaveLength(1);
   });
 });
+
+describe("fleet presence credits", () => {
+  it("tile mode prices presence per wallet: 21 entries, one per tile, none negative", async () => {
+    h = await bootHarness({ env: { GAME_VERSION: "v2" } });
+    h.slotsTo(1_001);
+    await h.settle();
+    const per = (h.orch as unknown as { presenceCreditPerTile: () => number[] | null }).presenceCreditPerTile();
+    expect(per).not.toBeNull();
+    expect(per).toHaveLength(21);
+    expect(per!.every((c) => c >= 0)).toBe(true);
+  });
+});

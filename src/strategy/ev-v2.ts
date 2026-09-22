@@ -239,6 +239,15 @@ export interface V2EvContext {
   /** Fixed presence credit (base units), as under V1 (see streak.ts). */
   presenceCreditBase?: number | undefined;
   /**
+   * Presence credit PER COVERED TILE (base units, length 21): the fleet's
+   * tile mode sends tile i from wallet i, and every wallet has its own
+   * streak — so "deploying at all" is worth something once per wallet that
+   * deploys, not once per round. A single fixed credit was claimed by the
+   * selector with $1 on one tile, one wallet advancing while twenty stood
+   * still (2026-09-22). Added on top of `presenceCreditBase`.
+   */
+  presenceCreditPerTileBase?: readonly number[] | undefined;
+  /**
    * Value BTC and RUSH legs net of the vault exit fee, i.e. as if we will
    * claim them. Default false: the carry makes holding at least as good as
    * claiming, and the bot holds.
@@ -269,6 +278,7 @@ function validateContext(ctx: V2EvContext): void {
     ["tokenYieldPerVolume", ctx.tokenYieldPerVolume],
     ["strikeExpectedPot", ctx.strikeExpectedPot],
     ["presenceCreditBase", ctx.presenceCreditBase],
+    ...(ctx.presenceCreditPerTileBase ?? []).map((v, i) => [`presenceCreditPerTileBase[${i}]`, v] as const),
     ["shareCarry.sats", ctx.shareCarry?.sats],
     ["shareCarry.token", ctx.shareCarry?.token],
   ] as const) {
@@ -318,9 +328,13 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
   const othersGross = ctx.predictedStakes.map((sNet) => Number(sNet) / (1 - f));
   let cost = 0;
   let tilesCovered = 0;
-  for (const a of mine) {
+  let perTileCredit = 0;
+  for (const [i, a] of mine.entries()) {
     cost += a;
-    if (a > 0) tilesCovered++;
+    if (a > 0) {
+      tilesCovered++;
+      perTileCredit += ctx.presenceCreditPerTileBase?.[i] ?? 0;
+    }
   }
   let volume = cost;
   for (const w of othersGross) volume += w;
@@ -356,7 +370,7 @@ function outcomes(ctx: V2EvContext, allocGross: bigint[]): Outcomes {
     payouts[j] = payout;
   }
 
-  let fixed = ctx.presenceCreditBase ?? 0;
+  let fixed = (ctx.presenceCreditBase ?? 0) + perTileCredit;
   if (ctx.hashrate) {
     // Same units dance as V1: cost is base units, the valuation wants USD.
     fixed += hashrateRebateUsd(ctx.hashrate, tilesCovered, cost / 1e6) * 1e6;

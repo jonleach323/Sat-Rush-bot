@@ -1174,7 +1174,7 @@ export class Orchestrator {
         if (!("model" in src) || !base?.hashrate) return null;
         // Presence credit excluded: the auto-ramp floors it off THIS signal,
         // so including it would make the signal confirm itself.
-        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0 });
+        return v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate, streak: REWARD_MAX_STREAK }, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
       })();
       const atCap = capped ? bps(capped.ev(single), cap) : null;
       // The blanket at the cap is the "flip" signal: a blanket is parimutuel
@@ -1254,7 +1254,7 @@ export class Orchestrator {
       tokenYieldPerVolume,
       strikeExpectedPot: this.strikeExpectedPotBase(),
       ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
-      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...this.presenceTerms(ctx.presenceCreditBase ?? 0),
       ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
     };
   }
@@ -1281,7 +1281,7 @@ export class Orchestrator {
       tokenYieldPerVolume,
       strikeExpectedPot: this.strikeExpectedPotBase(),
       ...(ctx.hashrate ? { hashrate: ctx.hashrate } : {}),
-      presenceCreditBase: ctx.presenceCreditBase ?? 0,
+      ...this.presenceTerms(ctx.presenceCreditBase ?? 0),
       ...(this.shareCarry() ? { shareCarry: this.shareCarry()! } : {}),
     };
     return {
@@ -1300,6 +1300,69 @@ export class Orchestrator {
    * priced sink, so this can never conjure a credit out of an unpriceable
    * asset.
    */
+  /**
+   * How the presence credit enters the V2 model. Tile mode: one credit per
+   * covered tile, priced on that tile's WALLET (its own streak, its own
+   * grace window, its own ramp), and no round-level credit. Otherwise the
+   * single credit as before.
+   */
+  private presenceTerms(single: number): { presenceCreditBase: number; presenceCreditPerTileBase?: number[] } {
+    const perTile = this.presenceCreditPerTile();
+    return perTile ? { presenceCreditBase: 0, presenceCreditPerTileBase: perTile } : { presenceCreditBase: single };
+  }
+
+  /**
+   * The ramp floor for ONE wallet-round: what makes the selector keep this
+   * wallet's minimum leg in the blanket while its streak climbs — the
+   * minimum blanket's per-tile toll at today's streak, plus the edge floor
+   * and this leg's share of the fee hurdle, so the whole 21-leg blanket
+   * clears both. Zero unless the cycle signal says the cap pays.
+   */
+  private rampFloorPerTileBase(): number {
+    if (!this.cfg.AUTO_RAMP || this.cfg.GAME_VERSION !== "v2") return 0;
+    if (this.lastBlanketAtCapBps === null || this.lastBlanketAtCapBps < this.cfg.RAMP_ALERT_MIN_BPS) return 0;
+    const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
+    const tiles = TILES_COUNT;
+    const tollBase = (this.cycleMemo?.minBlanketTollUsd ?? 0) * 1e6;
+    const legacyFloor = (minDeploy * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000;
+    const edge = (minDeploy * this.cfg.MIN_EDGE_BPS) / 10_000;
+    const fees = Number(this.edgeHurdleBase(0n) ?? 0n) / tiles;
+    return Math.max(legacyFloor, tollBase / tiles) + edge + fees;
+  }
+
+  /** Per-tile presence credits for the fleet's tile mode (wallet i → tile i), or null outside it. */
+  private presenceCreditPerTile(): number[] | null {
+    if (!(this.cfg.FLEET_TILE_MODE && this.wallets.size > 1)) return null;
+    const out = new Array<number>(TILES_COUNT).fill(0);
+    if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return out;
+    const floor = this.rampFloorPerTileBase();
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const liquidFraction = 1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000;
+    const valueUsdPerRawUnit = this.hashrateValueUsdPerRawUnit();
+    const cycle = this.cycleMemo;
+    const perWalletDeployUsd = cycle
+      ? boostWeightedDeployUsd({ pBoosted: cycle.pBoosted, unboostedDeployUsd: cycle.unboostedDeployUsd, boostedDeployUsd: cycle.boostedDeployUsd, boostMultiplier: this.cfg.STRIKE_HASHRATE_MULTIPLIER }) / TILES_COUNT
+      : Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000) / 1e6;
+    this.wallets.all().forEach((w, i) => {
+      if (i >= TILES_COUNT) return;
+      const miner = this.state.minerAt(minerPda(w.keypair.publicKey, programId));
+      const streak = miner?.current_streak_count ?? 1;
+      const option = streakOptionValueUsd({
+        streak,
+        deployPerRoundUsd: perWalletDeployUsd,
+        valueUsdPerRawUnit,
+        liquidFraction,
+        discount: this.cfg.STREAK_OPTION_DISCOUNT,
+        ...(miner && this.roundId !== null ? { roundId: this.roundId, lastMinedRoundId: miner.last_mined_round_id, graceRounds: STREAK_GRACE_ROUNDS.value } : {}),
+      });
+      let credit = option > 0 ? option * 1e6 : 0;
+      // The ramp: every play advances this wallet's counter, grace or not.
+      if (streak < REWARD_MAX_STREAK) credit = Math.max(credit, floor);
+      out[i] = credit;
+    });
+    return out;
+  }
+
   private presenceCreditBase(): number {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return 0;
     const miner = this.state.miner;
@@ -1340,9 +1403,7 @@ export class Orchestrator {
       this.lastBlanketAtCapBps !== null &&
       this.lastBlanketAtCapBps >= this.cfg.RAMP_ALERT_MIN_BPS
     ) {
-      const minDeploy = Number(this.state.satrushConfig?.min_deploy_usd_amount?.toString() ?? 1_000_000);
-      const tiles = this.cfg.FLEET_TILE_MODE && this.wallets.size > 1 ? Math.min(this.wallets.size, TILES_COUNT) : 1;
-      credit = Math.max(credit, (minDeploy * tiles * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000);
+      credit = Math.max(credit, this.rampFloorPerTileBase() * TILES_COUNT);
     }
     return credit;
   }
@@ -3328,6 +3389,8 @@ export class Orchestrator {
     boostedDeployUsd: number;
     boostedEvUsd: number;
     cycleEvBps: number | null;
+    /** −EV of the minimum blanket at TODAY's streak with no presence credit (USD, ≥ 0): the ramp's per-round toll. */
+    minBlanketTollUsd: number;
   } | null = null;
 
   /**
@@ -3345,7 +3408,10 @@ export class Orchestrator {
       const modulus = this.state.satrushConfig?.strike_trigger_modulus ?? STRIKE_TRIGGER_MODULUS.value;
       const pBoosted = Math.min(1, STRIKE_BOOST_WINDOW_ROUNDS.value / Math.max(1, modulus));
       const at = (multiplier: number) =>
-        v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate!, streak: REWARD_MAX_STREAK, multiplier }, presenceCreditBase: 0 });
+        v2Model({ ...base, predictedStakes: src.predictedStakes, hashrate: { ...base.hashrate!, streak: REWARD_MAX_STREAK, multiplier }, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
+      // The ramp's own toll: the minimum blanket at today's streak, no credit.
+      const today = v2Model({ ...base, predictedStakes: src.predictedStakes, presenceCreditBase: 0, presenceCreditPerTileBase: undefined });
+      const minBlanketTollUsd = rampTotal > 0n ? Math.max(0, -today.ev(rampBlanket) / 1e6) : 0;
       const argmax = (model: ReturnType<typeof v2Model>) => {
         const sel = selectAllocation(model, { ...this.selectorConfig(), maxPerRound: cap, kellyFraction: 0, bankrollBase: undefined, minEdgeBps: 0, minEvBase: undefined, minEvPerUnit: undefined });
         return sel.kind === "deploy" ? { usd: Number(sel.totalGross) / 1e6, evUsd: sel.ev / 1e6 } : { usd: 0, evUsd: 0 };
@@ -3363,6 +3429,7 @@ export class Orchestrator {
         unboostedDeployUsd: uStake,
         boostedDeployUsd: b.usd,
         boostedEvUsd: b.evUsd,
+        minBlanketTollUsd,
         cycleEvBps: cycleEvBps({ pBoosted, unboostedEvUsd: uEv, unboostedStakeUsd: uStake, boostedEvUsd: b.evUsd, boostedStakeUsd: b.usd > 0 ? b.usd : uStake }),
       };
     }
