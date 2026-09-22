@@ -36,6 +36,9 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.PRICE_MAX_STALE_SLOTS < 400) {
     warn("price_stale_gate", `PRICE_MAX_STALE_SLOTS=${cfg.PRICE_MAX_STALE_SLOTS}: the sponsored oracle feeds heartbeat every ~150 slots, so quotes are rejected at the heartbeat edge; 400 is the intended value`);
   }
+  if (cfg.FIRE_OFFSET_CEILING < 10) {
+    warn("fire_offset_ceiling", `FIRE_OFFSET_CEILING=${cfg.FIRE_OFFSET_CEILING}: at mainnet's ~267 ms slots the adaptive offset cannot open past ${(cfg.FIRE_OFFSET_CEILING * 0.267).toFixed(1)} s before cutoff; a 21-leg send needs room to widen after a miss — 12 is the intended value`);
+  }
   if (cfg.MAX_PER_ROUND_USD > 0) {
     const usdc = ctx.fleetUsdcBase !== undefined ? Number(ctx.fleetUsdcBase) / 1e6 : null;
     const wide = usdc !== null && usdc > 10 * cfg.MAX_PER_ROUND_USD;

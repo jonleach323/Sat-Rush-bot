@@ -263,10 +263,14 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(0).default(2),
     ),
-    /** Hard max offset — never fire earlier than this. */
+    /** Hard max offset — never fire earlier than this. Calibrated on 400 ms
+     * slots; mainnet runs ~267 ms slots (2026-09), so 6 slots is 1.6 s against
+     * a measured 0.8 s send→land for a 21-leg fleet send — too little room
+     * for the adaptive offset to open when a round is missed. 12 slots ≈ 3.2 s
+     * on a board that is final ~40 s before cutoff costs nothing. */
     FIRE_OFFSET_CEILING: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(1).default(6),
+      z.coerce.number().int().min(1).default(12),
     ),
     /** Landed-deploy samples required before the adaptive offset engages. */
     FIRE_OFFSET_MIN_SAMPLES: z.preprocess(

@@ -113,6 +113,10 @@ const REFRESH_MIN_INTERVAL_MS = 750;
 const PRE_ARM_SLOTS = 3;
 /** Ramp credit above the minimum blanket's toll, so a ramp is never at the knife edge of the edge floor. */
 const RAMP_FLOOR_HEADROOM = 1.5;
+/** The settle sweep runs only while the round has at least this many slots to its cutoff (~24 s at 267 ms). */
+const SWEEP_MIN_CUTOFF_SLOTS = 90;
+/** Settle legs per treasury cycle: the sweep is a background repair, not a burst. */
+const SWEEP_LEGS_PER_CYCLE = 6;
 /** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
 const SNAPSHOT_MIN_SLOTS = 5;
 /** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
@@ -2982,7 +2986,13 @@ export class Orchestrator {
   private async settleSweep(): Promise<void> {
     if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
     if (this.roundId === null) return;
-    const legs = this.db.unsettledLegs(this.roundId, 40);
+    // Never inside the fire window: a settle burst (send + confirmation
+    // polling per leg) shares the RPC plan with the 21 deploy sends, and
+    // round 70533 missed 21/21 right after the sweep shipped. Early in the
+    // round only, a few legs per cycle, paced.
+    const cutoff = this.state.slotsToCutoff();
+    if (this.botState !== "ROUND_OPEN" || cutoff === null || cutoff < SWEEP_MIN_CUTOFF_SLOTS) return;
+    const legs = this.db.unsettledLegs(this.roundId, SWEEP_LEGS_PER_CYCLE);
     if (legs.length === 0) return;
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
     let settled = 0, gone = 0, failed = 0;
@@ -2990,6 +3000,9 @@ export class Orchestrator {
       const key = `${leg.roundId}:${leg.wallet ?? "primary"}`;
       const attempts = this.sweepAttempts.get(key) ?? 0;
       if (attempts >= 5) continue;
+      // Stop the moment the round approaches its fire window.
+      const now = this.state.slotsToCutoff();
+      if (this.botState !== "ROUND_OPEN" || now === null || now < SWEEP_MIN_CUTOFF_SLOTS) break;
       const deployer = leg.wallet ? new PublicKey(leg.wallet) : this.payer.publicKey;
       try {
         const info = await this.connection.getAccountInfo(publicDeploymentPda(deployer, leg.roundId, programId), "confirmed");
