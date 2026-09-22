@@ -15,13 +15,16 @@ describe("config lint — the 2026-09-21 env, one finding per lesson", () => {
     expect(byKey["hand_cap"]?.message).toMatch(/canary/);
     expect(byKey["kill_file"]?.severity).toBe("warn");
     expect(byKey["stale_build"]?.severity).toBe("warn");
-    expect(byKey["vault_carry_not_credited"]?.severity).toBe("info");
+    // Holding is the stated intent: the carry is credited by default, and a 0 is called out as a deliberate override.
+    expect(byKey["vault_carry_not_credited"]).toBeUndefined();
+    const off = lintConfig(loadConfig({ ...base, VAULT_CARRY_HORIZON_DAYS: "0" } as NodeJS.ProcessEnv), {});
+    expect(off.find((x) => x.key === "vault_carry_not_credited")?.severity).toBe("info");
   });
 
   it("the intended env is clean apart from the stated-intent infos", () => {
     const cfg = loadConfig({ ...base } as NodeJS.ProcessEnv);
     const f = lintConfig(cfg, { fleetUsdcBase: 35_409_000_000n, killFilePresent: false, distStale: false });
     expect(f.filter((x) => x.severity === "warn")).toEqual([]);
-    expect(f.map((x) => x.key)).toContain("vault_carry_not_credited");
+    expect(f.map((x) => x.key)).not.toContain("vault_carry_not_credited");
   });
 });
