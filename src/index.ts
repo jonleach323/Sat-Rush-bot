@@ -95,6 +95,8 @@ import { createAssociatedTokenAccountIdempotentInstruction, createTransferChecke
 import { writeFileSync } from "node:fs";
 import { HaltError } from "./ingest/decode.js";
 import { buildInfo } from "./ops/build-info.js";
+import { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
+export { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
 import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
 import { lintConfig } from "./ops/config-lint.js";
 
@@ -161,31 +163,6 @@ export type BotState =
   | "LOGGED";
 
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
-
-/**
- * The risk limits in auto mode. Per round: the fleet's deployable USDC (cash
- * is the only cap; the selector and Kelly size below it). Daily: a fraction
- * of the day's opening USDC, never below $5. A configured positive value is a
- * hard figure instead. Exported for tests.
- */
-export function deriveLimits(
-  cfg: { MAX_PER_ROUND_USD: number; DAILY_LOSS_CAP_USD: number; AUTO_DAILY_LOSS_FRACTION: number },
-  fleetUsdcBase: bigint,
-  dayOpenUsdcBase: bigint | null,
-): { maxPerRound: bigint; dailyLossCap: bigint } {
-  const floor = usdToBase(1);
-  const maxPerRound = cfg.MAX_PER_ROUND_USD > 0 ? usdToBase(cfg.MAX_PER_ROUND_USD) : fleetUsdcBase > floor ? fleetUsdcBase : floor;
-  const base = dayOpenUsdcBase ?? fleetUsdcBase;
-  const autoDaily = BigInt(Math.round(Number(base) * cfg.AUTO_DAILY_LOSS_FRACTION));
-  const dailyFloor = usdToBase(5);
-  const dailyLossCap = cfg.DAILY_LOSS_CAP_USD > 0 ? usdToBase(cfg.DAILY_LOSS_CAP_USD) : autoDaily > dailyFloor ? autoDaily : dailyFloor;
-  return { maxPerRound, dailyLossCap };
-}
-
-/** Affiliate tag derived from the primary's public key when none is configured: `sr` + the first 10 alphanumerics, lower-cased. */
-export function autoAffiliateTag(primary: PublicKey): string {
-  return ("sr" + primary.toBase58().toLowerCase().replace(/[^a-z0-9]/g, "")).slice(0, 12);
-}
 
 export class Orchestrator {
   botState: BotState = "BOOT";
