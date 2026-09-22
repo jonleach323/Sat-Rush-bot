@@ -5,6 +5,7 @@
  * identically in dry mode and offline tests (handleUpdate + api transformer).
  */
 import { Bot, InputFile, type Api } from "grammy";
+import { pnlKeyboard, renderPnlCard, type PnlTab } from "./pnl-cards.js";
 import type { UserFromGetMe } from "grammy/types";
 import type { Logger } from "pino";
 import { baseToUsd } from "../units.js";
@@ -277,64 +278,32 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(formatStatus(await opts.deps.getStatus()));
   });
 
-  const renderPnl = async (): Promise<string> => {
+  // /pnl is a card with four tabs switched by inline buttons (ops/pnl-cards.ts).
+  const pnlCard = async (tab: PnlTab): Promise<{ text: string; extra: { parse_mode: "HTML"; reply_markup: ReturnType<typeof pnlKeyboard> } }> => {
     const p = await opts.deps.getPnl();
-    const lines = [
-      `📊 pnl ${p.date} (UTC day)`,
-      `deployed ${usd(p.deployed)} · returned (settled) ${usd(p.returned)} · net cash ${usd(p.net)} · fees ${usd(p.feesPaid)}`,
-    ];
-    if (p.unsettled && p.unsettled.legs > 0) {
-      lines.push(`unsettled: ${p.unsettled.legs} legs / $${p.unsettled.grossUsd.toFixed(2)} in ${p.unsettled.rounds} round(s) — inside deployment accounts until settled (89% comes back)`);
-    }
-    if (p.sharesMarkedUsd !== undefined) lines.push(`shares won today ≈ $${p.sharesMarkedUsd.toFixed(2)} · marked net ${p.markedNet !== undefined ? usd(p.markedNet) : "?"}`);
     const pos = opts.deps.getPosition ? await opts.deps.getPosition() : null;
-    if (pos) {
-      const f = (x: number, d = 2) => x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-      lines.push(
-        "",
-        `💰 position · ${pos.wallets} wallets · BTC $${f(pos.btcPrice, 0)} · RUSH $${f(pos.rushPrice)}`,
-        `USDC: $${f(pos.fleetUsdc)} in wallets · $${f(pos.usdcUnclaimed)} unclaimed · ${f(pos.fleetSol, 3)} SOL`,
-        `BTC shares: ${pos.satsShares} → ${f(pos.btc, 6)} BTC ≈ $${f(pos.btcUsd)}`,
-        `RUSH shares: ${pos.tokenShares} → ${f(pos.rush, 3)} RUSH ≈ $${f(pos.rushUsd)}`,
-        `hashrate: ${f(pos.hashrateLiquid, 0)} liquid + ${f(pos.hashrateDeferred, 0)} deferred (35% held back until a sats claim) → ${f(pos.tickets, 1)} tickets' worth`,
-      );
-      if (pos.vaults?.epoch) {
-        const e = pos.vaults.epoch;
-        lines.push(`epoch draw #${e.iterationId}: ${f(e.myTickets, 0)} of ${f(e.totalTickets, 0)} tickets (${(e.shareBps / 100).toFixed(2)}%) · pool $${f(e.poolUsd, 0)} · closes in ${f(e.slotsToClose, 0)} slots`);
-      }
-      if (pos.vaults?.oneBtc) {
-        const o = pos.vaults.oneBtc;
-        lines.push(`1-BTC draw #${o.iterationId}: ${f(o.totalTickets, 0)} tickets in the field · prize $${f(o.prizeUsd, 0)} · ${(o.fillBps / 100).toFixed(1)}% filled`);
-      }
-      lines.push(`unclaimed total ≈ $${f(pos.totalUnclaimedUsd)}`);
-      const v = pos.verdict;
-      const pct = (x: number) => `${(x * 100).toFixed(3)}%/d`;
-      lines.push(
-        "",
-        `⚖️ hold vs claim over ${v.days} d (exit fee 10%, staking ${pct(v.stakingYieldDaily)}, carry ${pct(pos.carry.sats)} BTC / ${pct(pos.carry.token)} RUSH, ${pos.carrySource})`,
-        `BTC: hold $${f(v.btc.heldUsd)} vs claim $${f(v.btc.claimedUsd)} → ${v.btc.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM"} by $${f(Math.abs(v.btc.holdEdgeUsd))}; claim only if carry < ${pct(v.btc.breakevenCarryDaily)} (${pct(v.breakevenCarryDailyYear.btc)} over a year)`,
-        `RUSH: hold $${f(v.rush.heldUsd)} vs claim+stake $${f(v.rush.claimedUsd)} → ${v.rush.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM+STAKE"} by $${f(Math.abs(v.rush.holdEdgeUsd))}; claim+stake only if carry < ${pct(v.rush.breakevenCarryDaily)} (${pct(v.breakevenCarryDailyYear.rush)} over a year)`,
-      );
-      const r = pos.rate, pr = pos.projection;
-      lines.push(
-        "",
-        `📈 ${pr.days}-day hold projection · run rate from the last ${f(r.sampleHours, 1)} h (${r.settlements} settlements) · carry ${(pos.carry.sats * 100).toFixed(2)}%/d BTC, ${(pos.carry.token * 100).toFixed(2)}%/d RUSH`,
-        `per day: ${r.btcPerDay >= 0 ? "+" : ""}${f(r.btcPerDay, 6)} BTC · +${f(r.rushPerDay, 3)} RUSH · +${f(r.hashratePerDay, 0)} hashrate · net USD ${r.usdNetPerDay >= 0 ? "+" : ""}$${f(r.usdNetPerDay)} on $${f(r.grossPerDay, 0)} gross`,
-        `BTC: ${f(pos.btc, 6)} → ${f(pr.btc, 6)} (≈ $${f(pr.btcUsd)})`,
-        `RUSH: ${f(pos.rush, 3)} → ${f(pr.rush, 3)} (≈ $${f(pr.rushUsd)})`,
-        `tickets: ${f(pos.tickets, 1)} → ${f(pr.tickets, 1)}`,
-        `USD change vs today ≈ ${pr.gainUsd >= 0 ? "+" : ""}$${f(pr.gainUsd)} (of which carry $${f(pr.carryUsd)}); prices held; boost windows and strikes at their average`,
-      );
-    }
-    return lines.join("\n");
+    return { text: renderPnlCard(tab, p, pos), extra: { parse_mode: "HTML", reply_markup: pnlKeyboard(tab) } };
   };
   bot.command("pnl", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
-    await ctx.reply(await renderPnl());
+    const c = await pnlCard("today");
+    await ctx.reply(c.text, c.extra);
   });
   bot.command("position", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
-    await ctx.reply(await renderPnl());
+    const c = await pnlCard("position");
+    await ctx.reply(c.text, c.extra);
+  });
+  bot.callbackQuery(/^pnl:(today|position|hold|verdict)$/, async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    const tab = ctx.match[1] as PnlTab;
+    const c = await pnlCard(tab);
+    try {
+      await ctx.editMessageText(c.text, c.extra);
+    } catch {
+      /* unchanged content: Telegram rejects identical edits */
+    }
+    await ctx.answerCallbackQuery();
   });
 
   bot.command("pause", async (ctx) => {

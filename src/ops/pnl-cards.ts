@@ -1,0 +1,134 @@
+/**
+ * The /pnl cards: four tabs (today · position · 30-day hold · hold vs
+ * claim) rendered as Telegram HTML — a bold title, one aligned monospace
+ * table per card, one footnote — switched with an inline keyboard instead
+ * of one long message. Pure: the orchestrator's reports in, HTML out.
+ */
+import { InlineKeyboard } from "grammy";
+import type { PnlSummary, PositionReport } from "./telegram.js";
+
+export type PnlTab = "today" | "position" | "hold" | "verdict";
+export const PNL_TABS: readonly PnlTab[] = ["today", "position", "hold", "verdict"];
+
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const money = (n: number, d = 2) => `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
+const num = (n: number, d = 0) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const signed = (n: number, d = 2) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
+const pctd = (x: number) => `${(x * 100).toFixed(2)}%/d`;
+const base = (v: bigint) => Number(v) / 1e6;
+
+/** Two-column table: labels left, values right, padded to one width. */
+function table(rows: (readonly [string, string])[], width = 30): string {
+  const lines = rows.map(([l, v]) => {
+    const pad = Math.max(1, width - l.length - v.length);
+    return `${l}${" ".repeat(pad)}${v}`;
+  });
+  return `<pre>${esc(lines.join("\n"))}</pre>`;
+}
+
+/** Three-column table for now/later comparisons. */
+function table3(head: readonly [string, string, string], rows: (readonly [string, string, string])[], w: readonly [number, number, number] = [10, 10, 10]): string {
+  const row = (r: readonly [string, string, string]) => r[0].padEnd(w[0]) + r[1].padStart(w[1]) + r[2].padStart(w[2]);
+  return `<pre>${esc([row(head), ...rows.map(row)].join("\n"))}</pre>`;
+}
+
+export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport | null): string {
+  switch (tab) {
+    case "today": {
+      const rows: (readonly [string, string])[] = [
+        ["deployed", money(base(pnl.deployed))],
+        ["returned (settled)", money(base(pnl.returned))],
+        ["net cash", money(base(pnl.net))],
+        ["fees", money(base(pnl.feesPaid))],
+      ];
+      if (pnl.unsettled && pnl.unsettled.legs > 0) rows.push(["unsettled legs", `${pnl.unsettled.legs} · ${money(pnl.unsettled.grossUsd)}`]);
+      if (pnl.sharesMarkedUsd !== undefined) rows.push(["shares won", signed(pnl.sharesMarkedUsd)]);
+      if (pnl.markedNet !== undefined) rows.push(["marked net", money(base(pnl.markedNet))]);
+      return `<b>📊 Today</b> · ${esc(pnl.date)} UTC\n${table(rows)}` +
+        (pnl.unsettled && pnl.unsettled.legs > 0 ? `<i>unsettled legs sit in their deployment accounts until settled; 89% comes back</i>` : "");
+    }
+    case "position": {
+      if (!pos) return "<b>💰 Position</b>\n<i>not available yet</i>";
+      const rows: (readonly [string, string])[] = [
+        ["USDC in wallets", money(pos.fleetUsdc)],
+        ["USDC unclaimed", money(pos.usdcUnclaimed)],
+        ["SOL", num(pos.fleetSol, 3)],
+        ["", ""],
+        ["BTC shares", num(Number(pos.satsShares))],
+        ["  = BTC", num(pos.btc, 6)],
+        ["  ≈ USD", money(pos.btcUsd)],
+        ["RUSH shares", num(Number(pos.tokenShares))],
+        ["  = RUSH", num(pos.rush, 3)],
+        ["  ≈ USD", money(pos.rushUsd)],
+        ["", ""],
+        ["hashrate", num(pos.hashrateLiquid)],
+        ["  deferred", num(pos.hashrateDeferred)],
+        ["  ≈ tickets", num(pos.tickets, 1)],
+      ];
+      if (pos.vaults?.epoch) {
+        const e = pos.vaults.epoch;
+        rows.push([`epoch #${e.iterationId}`, `${num(e.myTickets)} / ${num(e.totalTickets)} (${(e.shareBps / 100).toFixed(2)}%)`]);
+        rows.push(["  pool · closes", `${money(e.poolUsd, 0)} · ${num(e.slotsToClose)} slots`]);
+      }
+      if (pos.vaults?.oneBtc) {
+        const o = pos.vaults.oneBtc;
+        rows.push([`1-BTC #${o.iterationId}`, `${num(o.totalTickets)} tix · ${(o.fillBps / 100).toFixed(1)}% full`]);
+      }
+      rows.push(["", ""], ["unclaimed ≈", money(pos.totalUnclaimedUsd)]);
+      return `<b>💰 Position</b> · ${pos.wallets} wallets · BTC ${money(pos.btcPrice, 0)} · RUSH ${money(pos.rushPrice)}\n${table(rows)}` +
+        `<i>deferred hashrate (35%) is released by a sats claim; held, not claimed</i>`;
+    }
+    case "hold": {
+      if (!pos) return "<b>📈 30-day hold</b>\n<i>not available yet</i>";
+      const p = pos.projection, r = pos.rate;
+      const t = table3(["", "now", `+${p.days}d`], [
+        ["BTC", num(pos.btc, 6), num(p.btc, 6)],
+        ["RUSH", num(pos.rush, 3), num(p.rush, 3)],
+        ["tickets", num(pos.tickets, 1), num(p.tickets, 1)],
+        ["BTC $", money(pos.btcUsd, 0), money(p.btcUsd, 0)],
+        ["RUSH $", money(pos.rushUsd, 0), money(p.rushUsd, 0)],
+      ], [8, 11, 11]);
+      const rows: (readonly [string, string])[] = [
+        ["per day: BTC", `+${num(r.btcPerDay, 6)}`],
+        ["  RUSH", `+${num(r.rushPerDay, 3)}`],
+        ["  hashrate", `+${num(r.hashratePerDay)}`],
+        ["  net USD", `${signed(r.usdNetPerDay)} on ${money(r.grossPerDay, 0)}`],
+        ["", ""],
+        [`USD change +${p.days}d`, signed(p.gainUsd)],
+        ["  of which carry", signed(p.carryUsd)],
+      ];
+      return `<b>📈 ${p.days}-day hold</b> · run rate of the last ${r.sampleHours.toFixed(1)} h (${r.settlements} settlements)\n${t}${table(rows)}` +
+        `<i>carry ${pctd(pos.carry.sats)} BTC · ${pctd(pos.carry.token)} RUSH (${pos.carrySource}); prices held</i>`;
+    }
+    case "verdict": {
+      if (!pos) return "<b>⚖️ Hold vs claim</b>\n<i>not available yet</i>";
+      const v = pos.verdict;
+      const t = table3(["", "hold", "claim"], [
+        ["BTC", money(v.btc.heldUsd, 0), money(v.btc.claimedUsd, 0)],
+        ["RUSH", money(v.rush.heldUsd, 0), money(v.rush.claimedUsd, 0)],
+      ], [8, 11, 11]);
+      const rows: (readonly [string, string])[] = [
+        ["BTC", `${v.btc.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM"} ${signed(Math.abs(v.btc.holdEdgeUsd)).replace("+", "")}`],
+        ["RUSH", `${v.rush.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM+STAKE"} ${signed(Math.abs(v.rush.holdEdgeUsd)).replace("+", "")}`],
+        ["", ""],
+        ["carry now", `${pctd(pos.carry.sats)} · ${pctd(pos.carry.token)}`],
+        [`claim wins if <  (${v.days}d)`, `${pctd(v.btc.breakevenCarryDaily)} · ${pctd(v.rush.breakevenCarryDaily)}`],
+        ["claim wins if <  (1y)", `${pctd(v.breakevenCarryDailyYear.btc)} · ${pctd(v.breakevenCarryDailyYear.rush)}`],
+      ];
+      return `<b>⚖️ Hold vs claim</b> · ${v.days} days · ${v.holdWins ? "HOLD wins" : "CLAIMING wins"}\n${t}${table(rows)}` +
+        `<i>claim pays the 10% exit fee once; RUSH then stakes at ${pctd(v.stakingYieldDaily)}; the bot never claims by itself</i>`;
+    }
+    default:
+      return "";
+  }
+}
+
+export function pnlKeyboard(active: PnlTab): InlineKeyboard {
+  const label = (t: PnlTab, text: string) => (t === active ? `• ${text}` : text);
+  return new InlineKeyboard()
+    .text(label("today", "Today"), "pnl:today")
+    .text(label("position", "Position"), "pnl:position")
+    .row()
+    .text(label("hold", "30-day"), "pnl:hold")
+    .text(label("verdict", "Hold vs claim"), "pnl:verdict");
+}
