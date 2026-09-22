@@ -135,3 +135,58 @@ export function projectHolding(input: {
     carryUsd,
   };
 }
+
+/**
+ * Hold the shares, or claim and stake? Claiming pays the vault exit fee
+ * (10%) once; RUSH can then be staked at the staking yield (paid in BTC),
+ * claimed BTC earns nothing. Holding earns the vault carry (the exit fees
+ * of everyone who leaves). Per leg, over `days`: value if held vs value
+ * if claimed now, and the carry rate below which claiming would win.
+ */
+export interface HoldVerdictLeg {
+  heldUsd: number;
+  claimedUsd: number;
+  /** heldUsd − claimedUsd: positive = holding wins. */
+  holdEdgeUsd: number;
+  /** Daily carry at which the two tie over `days`; holding wins while the live carry is above it. */
+  breakevenCarryDaily: number;
+}
+export interface HoldVerdict {
+  days: number;
+  btc: HoldVerdictLeg;
+  rush: HoldVerdictLeg;
+  /** Break-even carry over a full year, where the exit fee has amortised most. */
+  breakevenCarryDailyYear: { btc: number; rush: number };
+  holdWins: boolean;
+}
+
+export function holdVsClaim(input: {
+  btcUsd: number;
+  rushUsd: number;
+  carry: { sats: number; token: number };
+  stakingYieldDaily: number;
+  exitFeeBps: number;
+  days: number;
+}): HoldVerdict {
+  const d = input.days;
+  const keep = 1 - input.exitFeeBps / 10_000;
+  const leg = (usd: number, carry: number, afterClaimDaily: number): HoldVerdictLeg => {
+    const heldUsd = usd * Math.pow(1 + carry, d);
+    const claimedUsd = usd * keep * Math.pow(1 + afterClaimDaily, d);
+    // (1+c)^d = keep·(1+y)^d  ⇒  c = keep^(1/d)·(1+y) − 1
+    const breakevenCarryDaily = Math.pow(keep, 1 / d) * (1 + afterClaimDaily) - 1;
+    return { heldUsd, claimedUsd, holdEdgeUsd: heldUsd - claimedUsd, breakevenCarryDaily };
+  };
+  const btc = leg(input.btcUsd, input.carry.sats, 0);
+  const rush = leg(input.rushUsd, input.carry.token, input.stakingYieldDaily);
+  return {
+    days: d,
+    btc,
+    rush,
+    breakevenCarryDailyYear: {
+      btc: Math.pow(keep, 1 / 365) - 1,
+      rush: Math.pow(keep, 1 / 365) * (1 + input.stakingYieldDaily) - 1,
+    },
+    holdWins: btc.holdEdgeUsd + rush.holdEdgeUsd >= 0,
+  };
+}

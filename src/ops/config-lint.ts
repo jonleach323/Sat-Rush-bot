@@ -52,7 +52,7 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.VAULT_MAX_SHARE < 1) info("vault_share_brake", `VAULT_MAX_SHARE=${cfg.VAULT_MAX_SHARE} caps hashrate by a hard share instead of the dilution curve`);
   if (cfg.STREAK_OPTION_DISCOUNT < 1) info("streak_option_discount", `STREAK_OPTION_DISCOUNT=${cfg.STREAK_OPTION_DISCOUNT} discounts the streak option`);
   if (cfg.VAULT_CARRY_HORIZON_DAYS === 0) {
-    info("vault_carry_not_credited", "VAULT_CARRY_HORIZON_DAYS=0: the vault carry earned by holding shares (exit fees of those who claim) is not credited; set a horizon if holding is the intent (pnpm vault-carry for the rate)");
+    info("vault_carry_not_credited", "VAULT_CARRY_HORIZON_DAYS=0: the vault carry earned by holding shares is not credited; the operator's stated intent is to hold (default 30 d) — a 0 here is a deliberate override");
   }
   if (cfg.EXECUTION_MODE === "mainnet" && cfg.MIN_EDGE_BPS <= 0) warn("no_edge_floor", "MIN_EDGE_BPS=0 on mainnet: the selector fires on any positive EV, inside model noise; 25 is the intended floor");
   if (cfg.EXECUTION_MODE === "mainnet" && !cfg.EDGE_HURDLE_ENABLED) warn("no_edge_hurdle", "EDGE_HURDLE_ENABLED=false on mainnet: fees and the opportunity yield are not charged against a fire");

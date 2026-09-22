@@ -133,6 +133,22 @@ export interface PositionReport {
   rushPrice: number;
   rate: { sampleHours: number; settlements: number; btcPerDay: number; rushPerDay: number; hashratePerDay: number; usdNetPerDay: number; grossPerDay: number };
   carry: { sats: number; token: number };
+  /** Where the carry rates came from: the live vault APRs from the API, or the measured facts. */
+  carrySource: "live" | "measured";
+  /** Tickets we hold in the open draws (from the vault manager's last poll), or null when it is not running. */
+  vaults: {
+    epoch: { iterationId: number; myTickets: number; totalTickets: number; shareBps: number; poolUsd: number; slotsToClose: number } | null;
+    oneBtc: { iterationId: number; totalTickets: number; prizeUsd: number; fillBps: number } | null;
+  } | null;
+  /** Hold vs claim(+stake), per leg, over the projection horizon. */
+  verdict: {
+    days: number;
+    btc: { heldUsd: number; claimedUsd: number; holdEdgeUsd: number; breakevenCarryDaily: number };
+    rush: { heldUsd: number; claimedUsd: number; holdEdgeUsd: number; breakevenCarryDaily: number };
+    breakevenCarryDailyYear: { btc: number; rush: number };
+    holdWins: boolean;
+    stakingYieldDaily: number;
+  };
   projection: { days: number; btc: number; rush: number; tickets: number; btcUsd: number; rushUsd: number; usdNet: number; gainUsd: number; carryUsd: number };
 }
 
@@ -280,8 +296,24 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
         `USDC: $${f(pos.fleetUsdc)} in wallets · $${f(pos.usdcUnclaimed)} unclaimed · ${f(pos.fleetSol, 3)} SOL`,
         `BTC shares: ${pos.satsShares} → ${f(pos.btc, 6)} BTC ≈ $${f(pos.btcUsd)}`,
         `RUSH shares: ${pos.tokenShares} → ${f(pos.rush, 3)} RUSH ≈ $${f(pos.rushUsd)}`,
-        `hashrate: ${f(pos.hashrateLiquid, 0)} liquid + ${f(pos.hashrateDeferred, 0)} deferred → ${f(pos.tickets, 1)} tickets`,
-        `unclaimed total ≈ $${f(pos.totalUnclaimedUsd)} (held, not claimed: claiming pays the 10% exit fee)`,
+        `hashrate: ${f(pos.hashrateLiquid, 0)} liquid + ${f(pos.hashrateDeferred, 0)} deferred (35% held back until a sats claim) → ${f(pos.tickets, 1)} tickets' worth`,
+      );
+      if (pos.vaults?.epoch) {
+        const e = pos.vaults.epoch;
+        lines.push(`epoch draw #${e.iterationId}: ${f(e.myTickets, 0)} of ${f(e.totalTickets, 0)} tickets (${(e.shareBps / 100).toFixed(2)}%) · pool $${f(e.poolUsd, 0)} · closes in ${f(e.slotsToClose, 0)} slots`);
+      }
+      if (pos.vaults?.oneBtc) {
+        const o = pos.vaults.oneBtc;
+        lines.push(`1-BTC draw #${o.iterationId}: ${f(o.totalTickets, 0)} tickets in the field · prize $${f(o.prizeUsd, 0)} · ${(o.fillBps / 100).toFixed(1)}% filled`);
+      }
+      lines.push(`unclaimed total ≈ $${f(pos.totalUnclaimedUsd)}`);
+      const v = pos.verdict;
+      const pct = (x: number) => `${(x * 100).toFixed(3)}%/d`;
+      lines.push(
+        "",
+        `⚖️ hold vs claim over ${v.days} d (exit fee 10%, staking ${pct(v.stakingYieldDaily)}, carry ${pct(pos.carry.sats)} BTC / ${pct(pos.carry.token)} RUSH, ${pos.carrySource})`,
+        `BTC: hold $${f(v.btc.heldUsd)} vs claim $${f(v.btc.claimedUsd)} → ${v.btc.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM"} by $${f(Math.abs(v.btc.holdEdgeUsd))}; claim only if carry < ${pct(v.btc.breakevenCarryDaily)} (${pct(v.breakevenCarryDailyYear.btc)} over a year)`,
+        `RUSH: hold $${f(v.rush.heldUsd)} vs claim+stake $${f(v.rush.claimedUsd)} → ${v.rush.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM+STAKE"} by $${f(Math.abs(v.rush.holdEdgeUsd))}; claim+stake only if carry < ${pct(v.rush.breakevenCarryDaily)} (${pct(v.breakevenCarryDailyYear.rush)} over a year)`,
       );
       const r = pos.rate, pr = pos.projection;
       lines.push(

@@ -171,12 +171,15 @@ const schema = z
      * exit fee of everyone who claims. This is the holding horizon, in days,
      * the credit is computed over (carry = daily rate × days). 0 (default) =
      * not credited: the carry is a transfer from leavers that decays, and it
-     * only accrues to a wallet that never claims — set this only if you mean
-     * to hold, and re-run `pnpm vault-carry` before believing the rate.
+     * only accrues to a wallet that never claims. The operator stated the
+     * intent on 2026-09-22 ("I don't plan on claiming for a long time unless
+     * claiming and staking outperforms"), so the default is a 30-day horizon;
+     * /pnl compares hold vs claim every time and alerts if it flips. 0 = not
+     * credited. Re-run `pnpm vault-carry` before believing the rate.
      */
     VAULT_CARRY_HORIZON_DAYS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().min(0).max(365).default(0),
+      z.coerce.number().finite().min(0).max(365).default(30),
     ),
     /**
      * Cap on the daily carry rate credited, as a simple APR fraction (1.2 =

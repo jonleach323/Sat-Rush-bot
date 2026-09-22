@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BN } from "../src/adapter/idl.js";
 import type { Miner, SatsVault, TokenVault } from "../src/adapter/generated-types.js";
 import { Keypair } from "@solana/web3.js";
-import { fleetPosition, projectHolding } from "../src/state/position.js";
+import { fleetPosition, holdVsClaim, projectHolding } from "../src/state/position.js";
 
 function miner(over: Partial<Miner>): Miner {
   return {
@@ -55,5 +55,27 @@ describe("projectHolding — carry on what is held, accrual compounding from the
     const lin = projectHolding({ position: pos, rate, days: 30, carry: { sats: 0, token: 0 }, btcUsd: 100_000, rushUsd: 40, rawPerTicket: 100 });
     expect(lin.btc).toBeCloseTo(0.01 + 0.003, 9);
     expect(lin.carryUsd).toBe(0);
+  });
+});
+
+describe("holdVsClaim — the exit fee is paid once, the carry every day", () => {
+  it("holding wins over 30 days at the measured rates, and the break-even carry is where the two tie", () => {
+    const v = holdVsClaim({ btcUsd: 1_000, rushUsd: 1_000, carry: { sats: 0.003, token: 0.0024 }, stakingYieldDaily: 0.00224, exitFeeBps: 1000, days: 30 });
+    expect(v.holdWins).toBe(true);
+    expect(v.btc.heldUsd).toBeCloseTo(1_000 * Math.pow(1.003, 30), 6);
+    expect(v.btc.claimedUsd).toBeCloseTo(900, 6); // claimed BTC earns nothing
+    expect(v.rush.claimedUsd).toBeCloseTo(900 * Math.pow(1.00224, 30), 6);
+    // At the break-even carry the legs tie.
+    const tie = holdVsClaim({ btcUsd: 1_000, rushUsd: 1_000, carry: { sats: v.btc.breakevenCarryDaily, token: v.rush.breakevenCarryDaily }, stakingYieldDaily: 0.00224, exitFeeBps: 1000, days: 30 });
+    expect(tie.btc.holdEdgeUsd).toBeCloseTo(0, 6);
+    expect(tie.rush.holdEdgeUsd).toBeCloseTo(0, 6);
+    // Over 30 days claiming can only win with a NEGATIVE carry; over a year the bar is ~0.2%/d for RUSH.
+    expect(v.rush.breakevenCarryDaily).toBeLessThan(0);
+    expect(v.breakevenCarryDailyYear.rush).toBeGreaterThan(0.0019);
+    expect(v.breakevenCarryDailyYear.rush).toBeLessThan(0.0021);
+    // A carry collapse flips the RUSH leg over a year-long view but not the 30-day one.
+    const collapsed = holdVsClaim({ btcUsd: 1_000, rushUsd: 1_000, carry: { sats: 0.0005, token: 0.0005 }, stakingYieldDaily: 0.00224, exitFeeBps: 1000, days: 365 });
+    expect(collapsed.rush.holdEdgeUsd).toBeLessThan(0);
+    expect(collapsed.btc.holdEdgeUsd).toBeGreaterThan(0);
   });
 });

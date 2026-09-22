@@ -140,8 +140,8 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { SATS_VAULT_CARRY_DAILY, STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "./strategy/facts.js";
-import { fleetPosition, projectHolding } from "./state/position.js";
+import { SATS_VAULT_CARRY_DAILY, STAKING_YIELD_DAILY, STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "./strategy/facts.js";
+import { fleetPosition, holdVsClaim, projectHolding } from "./state/position.js";
 import type { PositionReport } from "./ops/telegram.js";
 import { selectAllocation } from "./strategy/selector.js";
 import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
@@ -3531,6 +3531,24 @@ export class Orchestrator {
     return this.slotSecondsEma ?? SLOT_SECONDS;
   }
 
+  /** Latched: alert once when claiming (+staking) starts to beat holding; re-arm when holding wins again. */
+  private holdVerdictAlerted = false;
+  private checkHoldVerdict(): void {
+    try {
+      const r = this.positionReport();
+      if (r.totalUnclaimedUsd < 1) return;
+      if (!r.verdict.holdWins && !this.holdVerdictAlerted) {
+        this.holdVerdictAlerted = true;
+        this.alert(`⚖️ hold no longer wins over ${r.verdict.days} d: BTC edge $${r.verdict.btc.holdEdgeUsd.toFixed(2)}, RUSH edge $${r.verdict.rush.holdEdgeUsd.toFixed(2)} (carry ${(r.carry.sats * 100).toFixed(3)}%/d, ${(r.carry.token * 100).toFixed(3)}%/d, ${r.carrySource}). /pnl for the legs — the bot does not claim on its own.`);
+      } else if (r.verdict.holdWins && this.holdVerdictAlerted) {
+        this.holdVerdictAlerted = false;
+        this.alert("⚖️ holding wins again over the projection horizon");
+      }
+    } catch {
+      /* position unavailable this tick */
+    }
+  }
+
   /** The fleet's unclaimed position and a 30-day hold projection at the current run rate (Telegram /pnl, /position). */
   positionReport(): PositionReport {
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
@@ -3554,8 +3572,21 @@ export class Orchestrator {
       usdNetPerDay: (Number(acc.wonUsdBase - acc.grossBase) / 1e6) * perDay,
       grossPerDay: (Number(acc.grossBase) / 1e6) * perDay,
     };
-    const carry = { sats: SATS_VAULT_CARRY_DAILY.value, token: TOKEN_VAULT_CARRY_DAILY.value };
+    // Carry: the API's live vault APRs when the feed has them (what the app
+    // shows holders), else the measured facts.
+    const liveSats = feed?.live && feed.satsVaultApr !== null && feed.satsVaultApr > 0 ? feed.satsVaultApr / 365 : null;
+    const liveToken = feed?.live && feed.tokenVaultApr !== null && feed.tokenVaultApr > 0 ? feed.tokenVaultApr / 365 : null;
+    const carry = liveSats !== null && liveToken !== null ? { sats: liveSats, token: liveToken } : { sats: SATS_VAULT_CARRY_DAILY.value, token: TOKEN_VAULT_CARRY_DAILY.value };
+    const carrySource: "live" | "measured" = liveSats !== null && liveToken !== null ? "live" : "measured";
     const projection = projectHolding({ position: pos, rate, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
+    const verdict = holdVsClaim({ btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, carry, stakingYieldDaily: STAKING_YIELD_DAILY.value, exitFeeBps: this.state.satrushConfig?.vault_exit_fee_bps ?? 1000, days: 30 });
+    const vp = this.vaultPoolCache;
+    const vaults = vp
+      ? {
+          epoch: vp.epoch ? { iterationId: vp.epoch.iterationId, myTickets: vp.epoch.myTickets, totalTickets: vp.epoch.totalTickets, shareBps: vp.epoch.totalTickets > 0 ? (vp.epoch.myTickets / vp.epoch.totalTickets) * 10_000 : 0, poolUsd: vp.epoch.poolUsd, slotsToClose: vp.epoch.slotsToClose } : null,
+          oneBtc: vp.oneBtc ? { iterationId: vp.oneBtc.iterationId, totalTickets: vp.oneBtc.totalTickets, prizeUsd: vp.oneBtc.prizeUsd, fillBps: vp.oneBtc.fillBps } : null,
+        }
+      : null;
     const totals = this.wallets.totals();
     return {
       wallets: this.wallets.size,
@@ -3569,7 +3600,8 @@ export class Orchestrator {
       hashrateLiquid: pos.hashrateLiquid, hashrateDeferred: pos.hashrateDeferred, tickets: pos.tickets,
       totalUnclaimedUsd: pos.totalUnclaimedUsd,
       btcPrice: btcUsd, rushPrice: rushUsd,
-      rate, carry,
+      rate, carry, carrySource, vaults,
+      verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value },
       projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },
     };
   }
@@ -3815,6 +3847,7 @@ export class Orchestrator {
       // limits from that read rather than reading all 21 wallets twice.
       void this.jobs.timed("wallet_drift", () => this.checkWalletDrift(), 5_000).then(() => this.refreshLimits());
       this.jobs.timedSync("tick30s_queries", () => {
+        this.checkHoldVerdict();
         this.validateHashrateFormula();
         this.refreshFireOffset();
         this.refreshRivalProfiles();
