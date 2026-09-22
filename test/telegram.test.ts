@@ -165,8 +165,8 @@ describe("telegram ops (offline)", () => {
   it("/pnl summarizes the day", async () => {
     const { ops, sent } = offlineOps();
     await ops.bot.handleUpdate(commandUpdate("/pnl", Number(CHAT_ID), 5));
-    expect(sent[0]!.text).toContain("deployed: $35.00");
-    expect(sent[0]!.text).toContain("net cash: $-26.90");
+    expect(sent[0]!.text).toContain("deployed $35.00");
+    expect(sent[0]!.text).toContain("net cash $-26.90");
   });
 
   it("/board shows the tiles and my positions", async () => {

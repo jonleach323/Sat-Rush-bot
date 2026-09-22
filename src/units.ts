@@ -18,4 +18,4 @@ export function baseToUsd(base: bigint): number {
  * longer under load and skipped slots stretch wall-clock further, so treat any
  * slots→seconds conversion as an estimate and never as a deadline.
  */
-export const SLOT_SECONDS = 0.4;
+export const SLOT_SECONDS = 0.267; // live mainnet 2026-09-22 (board API slot_duration_ms); the orchestrator measures it from the slot stream

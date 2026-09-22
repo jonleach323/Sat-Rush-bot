@@ -391,6 +391,33 @@ export class StateDb {
     return { legs: row?.legs ?? 0, grossBase: BigInt(row?.gross ?? "0"), rounds: row?.rounds ?? 0 };
   }
 
+  /**
+   * What landed since `sinceIso` (UTC 'YYYY-MM-DD HH:MM:SS'): settled shares,
+   * hashrate and USD back, gross deployed, and the wall-clock span covered —
+   * the run rate behind the /pnl projection.
+   */
+  accrualSince(sinceIso: string): {
+    wonShares: bigint; wonTokenShares: bigint; hashrateEarned: number; wonUsdBase: bigint; grossBase: bigint;
+    settlements: number; firstAt: string | null; lastAt: string | null;
+  } {
+    const s = this.queryOne<{ shares: string | null; token: string | null; hr: number | null; usd: string | null; n: number; first: string | null; last: string | null }>(
+      `SELECT COALESCE(SUM(CAST(won_shares AS INTEGER)), 0) AS shares, COALESCE(SUM(CAST(won_token_shares AS INTEGER)), 0) AS token,
+              COALESCE(SUM(CAST(hashrate_earned AS INTEGER)), 0) AS hr, COALESCE(SUM(CAST(won_usd AS INTEGER)), 0) AS usd,
+              COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last
+       FROM settlements WHERE created_at >= ?`,
+      sinceIso,
+    );
+    const d = this.queryOne<{ gross: string | null }>(
+      `SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS gross FROM my_deploys WHERE created_at >= ? AND status IN ('fired','landed')`,
+      sinceIso,
+    );
+    return {
+      wonShares: BigInt(s?.shares ?? "0"), wonTokenShares: BigInt(s?.token ?? "0"), hashrateEarned: s?.hr ?? 0,
+      wonUsdBase: BigInt(s?.usd ?? "0"), grossBase: BigInt(d?.gross ?? "0"),
+      settlements: s?.n ?? 0, firstAt: s?.first ?? null, lastAt: s?.last ?? null,
+    };
+  }
+
   landedWallets(roundId: number): (string | null)[] {
     return this.query<{ wallet: string | null }>(
       `SELECT DISTINCT wallet FROM my_deploys WHERE round_id = ? AND status = 'landed'`,

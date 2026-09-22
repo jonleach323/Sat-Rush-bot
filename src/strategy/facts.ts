@@ -593,13 +593,13 @@ export const EPOCH_WINNER_SLOTS = fact(21, "winners", {
 });
 
 /** Mainnet slot time, for turning slot counts into wall clock. */
-export const SLOT_SECONDS = fact(0.4, "seconds", {
+export const SLOT_SECONDS = fact(0.267, "seconds", {
   kind: "measured",
-  source: "Solana mainnet target slot time",
-  at: "2026-08-01",
+  source: "board API slot_duration_ms 266.7 (2026-09-22); 230-slot rounds observed at ~62 s wall clock. The 0.4 s written on 2026-08-01 was the protocol target, not the network — every slots→seconds conversion (fire offset, hurdle rounds/day, epoch length) was 50% long. The orchestrator measures it live from the slot stream and uses that.",
+  at: "2026-09-22",
   n: 1,
-  halfLifeDays: null,
-  recheck: "compare block times over a few hundred slots",
+  halfLifeDays: 30,
+  recheck: "curl https://api.satrush.io/api/v1/board | jq .data.slot_duration_ms",
 });
 
 /** Everything above, for the staleness sweep and the provenance test. */

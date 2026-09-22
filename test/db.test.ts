@@ -332,3 +332,22 @@ describe("unsettled legs — the ledger's blind spot under V2", () => {
     db.close();
   });
 });
+
+describe("accrualSince — the run rate behind the projection", () => {
+  it("sums settled shares, hashrate and USD, and gross deployed, since a timestamp", () => {
+    const db = freshDb();
+    db.recordMyDeploy({ roundId: 1, mask: 1, amount: usdToBase(21), evExpected: 0, firedSlot: 1, sig: "d1", status: "landed", wallet: "A" });
+    db.recordSettlement({ roundId: 1, winningStake: 0n, wonUsd: usdToBase(18.69), wonShares: 1_234n, hashrateEarned: 2_541n, wonTokenAmount: 0n, wonTokenShares: 99n, wallet: "A", sig: "s1" });
+    db.recordSettlement({ roundId: 1, winningStake: 0n, wonUsd: usdToBase(0.89), wonShares: 0n, hashrateEarned: 121n, wonTokenAmount: 0n, wonTokenShares: 1n, wallet: "B", sig: "s2" });
+    const a = db.accrualSince("2000-01-01 00:00:00");
+    expect(a.settlements).toBe(2);
+    expect(a.wonShares).toBe(1_234n);
+    expect(a.wonTokenShares).toBe(100n);
+    expect(a.hashrateEarned).toBe(2_662);
+    expect(a.wonUsdBase).toBe(usdToBase(19.58));
+    expect(a.grossBase).toBe(usdToBase(21));
+    expect(a.firstAt).not.toBeNull();
+    expect(db.accrualSince("2999-01-01 00:00:00").settlements).toBe(0);
+    db.close();
+  });
+});

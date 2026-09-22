@@ -140,7 +140,9 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { SATS_VAULT_CARRY_DAILY, STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "./strategy/facts.js";
+import { fleetPosition, projectHolding } from "./state/position.js";
+import type { PositionReport } from "./ops/telegram.js";
 import { selectAllocation } from "./strategy/selector.js";
 import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
 import { TokenFeed } from "./ingest/token-feed.js";
@@ -697,6 +699,7 @@ export class Orchestrator {
       logger: this.log,
       deps: {
         getStatus: () => this.statusReport(),
+        getPosition: () => this.positionReport(),
         getPnl: () => {
           const date = utcDate();
           const row = this.db.queryOne<{
@@ -1718,7 +1721,7 @@ export class Orchestrator {
       if (lastTrigger > 0 && duration > 0) {
         roundsSinceStrike = board.round_id - lastTrigger;
         windowRounds = STRIKE_BOOST_WINDOW_ROUNDS.value;
-        windowMs = windowRounds * duration * SLOT_SECONDS * 1000;
+        windowMs = windowRounds * duration * this.slotSeconds() * 1000;
       }
     }
     return strikeBonusMultiplier({
@@ -1883,7 +1886,7 @@ export class Orchestrator {
    */
   private opportunityPerUnit(): number | undefined {
     if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
-    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * this.slotSeconds();
     const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
     return this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay;
   }
@@ -1895,7 +1898,7 @@ export class Orchestrator {
     const lamportsPerTx = 5_000 + (feeMicro * this.cfg.DEPLOY_CU_LIMIT) / 1e6;
     const solUsd = this.prices.solUsd();
     const feesUsd = solUsd > 0 ? (legs * 2 * lamportsPerTx * solUsd) / 1e9 : 0;
-    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * this.slotSeconds();
     const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
     const opportunityUsd = (Number(stakeBase) / 1e6) * (this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay);
     return BigInt(Math.ceil((feesUsd + opportunityUsd) * 1e6));
@@ -3511,6 +3514,66 @@ export class Orchestrator {
     };
   }
 
+  /** Live slot time from the stream: (wall ms) / (slots) over a rolling window; the 0.4 s constant was 50% long. */
+  private slotTiming: { slot: number; atMs: number } | null = null;
+  private slotSecondsEma: number | null = null;
+  private noteSlotTiming(slot: number): void {
+    const now = Date.now();
+    const prev = this.slotTiming;
+    if (prev && slot > prev.slot && slot - prev.slot <= 50) {
+      const sec = (now - prev.atMs) / 1000 / (slot - prev.slot);
+      if (sec > 0.05 && sec < 2) this.slotSecondsEma = this.slotSecondsEma === null ? sec : this.slotSecondsEma * 0.95 + sec * 0.05;
+    }
+    if (!prev || slot > prev.slot) this.slotTiming = { slot, atMs: now };
+  }
+  /** Seconds per slot: measured when the stream has run long enough, else the fact. */
+  slotSeconds(): number {
+    return this.slotSecondsEma ?? SLOT_SECONDS;
+  }
+
+  /** The fleet's unclaimed position and a 30-day hold projection at the current run rate (Telegram /pnl, /position). */
+  positionReport(): PositionReport {
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const miners = this.wallets.all().map((w) => this.state.minerAt(minerPda(w.keypair.publicKey, programId))).filter((m): m is Miner => m !== null);
+    const btcUsd = this.prices.btcUsd();
+    const feed = this.tokenFeed?.status();
+    const rushUsd = feed?.live ? feed.tokenUsd : this.cfg.RUSH_USD_ESTIMATE;
+    const rawPerTicket = VAULT_HASHRATE_PER_TICKET.value;
+    const pos = fleetPosition({ miners, satsVault: this.state.satsVault, tokenVault: this.state.tokenVault, btcUsd, rushUsd, rawPerTicket });
+    // Run rate: the last 24 h of settlements (or whatever shorter span exists), per day.
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+    const acc = this.db.accrualSince(since);
+    const spanH = acc.firstAt && acc.lastAt ? Math.max(1, (Date.parse(acc.lastAt + "Z") - Date.parse(acc.firstAt + "Z")) / 3_600_000) : 24;
+    const perDay = 24 / spanH;
+    const rate = {
+      sampleHours: spanH,
+      settlements: acc.settlements,
+      btcPerDay: Number(acc.wonShares) * pos.btcPerShare * perDay,
+      rushPerDay: Number(acc.wonTokenShares) * pos.rushPerShare * perDay,
+      hashratePerDay: acc.hashrateEarned * perDay,
+      usdNetPerDay: (Number(acc.wonUsdBase - acc.grossBase) / 1e6) * perDay,
+      grossPerDay: (Number(acc.grossBase) / 1e6) * perDay,
+    };
+    const carry = { sats: SATS_VAULT_CARRY_DAILY.value, token: TOKEN_VAULT_CARRY_DAILY.value };
+    const projection = projectHolding({ position: pos, rate, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
+    const totals = this.wallets.totals();
+    return {
+      wallets: this.wallets.size,
+      fleetUsdc: Number(totals.usdcBase) / 1e6,
+      fleetSol: totals.lamports / 1e9,
+      usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6,
+      satsShares: pos.satsShares.toString(),
+      btc: pos.btc, btcUsd: pos.btcUsd,
+      tokenShares: pos.tokenShares.toString(),
+      rush: pos.rush, rushUsd: pos.rushUsd,
+      hashrateLiquid: pos.hashrateLiquid, hashrateDeferred: pos.hashrateDeferred, tickets: pos.tickets,
+      totalUnclaimedUsd: pos.totalUnclaimedUsd,
+      btcPrice: btcUsd, rushPrice: rushUsd,
+      rate, carry,
+      projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },
+    };
+  }
+
   /** Snapshot throttle: last slot a row was written, per round. */
   private lastSnapshot: { roundId: number; slot: number } | null = null;
   private shouldSnapshot(roundId: number, slot: number): boolean {
@@ -3633,6 +3696,7 @@ export class Orchestrator {
 
     this.source.on("slot", (u) => {
       this.state.applySlot(u.slot);
+      this.noteSlotTiming(u.slot);
       this.onSlotTick();
     });
 

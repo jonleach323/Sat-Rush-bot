@@ -90,10 +90,13 @@ describe("staleness is an error, not a note", () => {
     expect(names).toContain("EPOCH_DEDUP_UPLIFT");
   });
 
-  it("does not flag structural facts that cannot drift", () => {
+  it("does not flag structural facts that cannot drift — and slot time is not one of them", () => {
     const far = new Date("2027-01-01");
-    expect(staleFacts(far).map((s) => s.name)).not.toContain("SLOT_SECONDS");
     expect(staleFacts(far).map((s) => s.name)).not.toContain("TILES");
+    // The slot time DID drift: 0.4 s (protocol target, written 2026-08-01) to
+    // 0.267 s live (2026-09-22), and every slots→seconds conversion was 50%
+    // long. It carries a half-life now and must go stale like any measurement.
+    expect(staleFacts(far).map((s) => s.name)).toContain("SLOT_SECONDS");
   });
 
   it("nothing is stale on the day it was measured", () => {

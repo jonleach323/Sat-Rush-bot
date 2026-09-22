@@ -113,9 +113,33 @@ export interface HealthReport {
   jobs?: Record<string, { lastMs: number; maxMs: number; meanMs: number; count: number }> | undefined;
 }
 
+/** The fleet's unclaimed position and a hold projection (see state/position.ts). */
+export interface PositionReport {
+  wallets: number;
+  fleetUsdc: number;
+  fleetSol: number;
+  usdcUnclaimed: number;
+  satsShares: string;
+  btc: number;
+  btcUsd: number;
+  tokenShares: string;
+  rush: number;
+  rushUsd: number;
+  hashrateLiquid: number;
+  hashrateDeferred: number;
+  tickets: number;
+  totalUnclaimedUsd: number;
+  btcPrice: number;
+  rushPrice: number;
+  rate: { sampleHours: number; settlements: number; btcPerDay: number; rushPerDay: number; hashratePerDay: number; usdNetPerDay: number; grossPerDay: number };
+  carry: { sats: number; token: number };
+  projection: { days: number; btc: number; rush: number; tickets: number; btcUsd: number; rushUsd: number; usdNet: number; gainUsd: number; carryUsd: number };
+}
+
 export interface TelegramDeps {
   getStatus(): StatusReport | Promise<StatusReport>;
   getPnl(): PnlSummary | Promise<PnlSummary>;
+  getPosition?(): PositionReport | Promise<PositionReport>;
   pause(): void;
   resume(): void;
   kill(reason: string): void;
@@ -237,22 +261,48 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(formatStatus(await opts.deps.getStatus()));
   });
 
-  bot.command("pnl", async (ctx) => {
-    if (!authorized(ctx.chat?.id)) return;
+  const renderPnl = async (): Promise<string> => {
     const p = await opts.deps.getPnl();
     const lines = [
-      `pnl ${p.date}`,
-      `deployed: ${usd(p.deployed)}`,
-      `returned (settled USD): ${usd(p.returned)}`,
-      `net cash: ${usd(p.net)}`,
-      `fees (deploy legs): ${usd(p.feesPaid)}`,
+      `📊 pnl ${p.date} (UTC day)`,
+      `deployed ${usd(p.deployed)} · returned (settled) ${usd(p.returned)} · net cash ${usd(p.net)} · fees ${usd(p.feesPaid)}`,
     ];
     if (p.unsettled && p.unsettled.legs > 0) {
-      lines.push(`UNSETTLED: ${p.unsettled.legs} legs / $${p.unsettled.grossUsd.toFixed(2)} across ${p.unsettled.rounds} rounds — still inside deployment accounts (89% comes back at settle); the sweep settles them`);
+      lines.push(`unsettled: ${p.unsettled.legs} legs / $${p.unsettled.grossUsd.toFixed(2)} in ${p.unsettled.rounds} round(s) — inside deployment accounts until settled (89% comes back)`);
     }
-    if (p.sharesMarkedUsd !== undefined) lines.push(`shares won today, marked: $${p.sharesMarkedUsd.toFixed(2)} (BTC + RUSH vault shares at live prices)`);
-    if (p.markedNet !== undefined) lines.push(`marked net (cash + shares, excl. unsettled): ${usd(p.markedNet)}`);
-    await ctx.reply(lines.join("\n"));
+    if (p.sharesMarkedUsd !== undefined) lines.push(`shares won today ≈ $${p.sharesMarkedUsd.toFixed(2)} · marked net ${p.markedNet !== undefined ? usd(p.markedNet) : "?"}`);
+    const pos = opts.deps.getPosition ? await opts.deps.getPosition() : null;
+    if (pos) {
+      const f = (x: number, d = 2) => x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      lines.push(
+        "",
+        `💰 position · ${pos.wallets} wallets · BTC $${f(pos.btcPrice, 0)} · RUSH $${f(pos.rushPrice)}`,
+        `USDC: $${f(pos.fleetUsdc)} in wallets · $${f(pos.usdcUnclaimed)} unclaimed · ${f(pos.fleetSol, 3)} SOL`,
+        `BTC shares: ${pos.satsShares} → ${f(pos.btc, 6)} BTC ≈ $${f(pos.btcUsd)}`,
+        `RUSH shares: ${pos.tokenShares} → ${f(pos.rush, 3)} RUSH ≈ $${f(pos.rushUsd)}`,
+        `hashrate: ${f(pos.hashrateLiquid, 0)} liquid + ${f(pos.hashrateDeferred, 0)} deferred → ${f(pos.tickets, 1)} tickets`,
+        `unclaimed total ≈ $${f(pos.totalUnclaimedUsd)} (held, not claimed: claiming pays the 10% exit fee)`,
+      );
+      const r = pos.rate, pr = pos.projection;
+      lines.push(
+        "",
+        `📈 ${pr.days}-day hold projection · run rate from the last ${f(r.sampleHours, 1)} h (${r.settlements} settlements) · carry ${(pos.carry.sats * 100).toFixed(2)}%/d BTC, ${(pos.carry.token * 100).toFixed(2)}%/d RUSH`,
+        `per day: ${r.btcPerDay >= 0 ? "+" : ""}${f(r.btcPerDay, 6)} BTC · +${f(r.rushPerDay, 3)} RUSH · +${f(r.hashratePerDay, 0)} hashrate · net USD ${r.usdNetPerDay >= 0 ? "+" : ""}$${f(r.usdNetPerDay)} on $${f(r.grossPerDay, 0)} gross`,
+        `BTC: ${f(pos.btc, 6)} → ${f(pr.btc, 6)} (≈ $${f(pr.btcUsd)})`,
+        `RUSH: ${f(pos.rush, 3)} → ${f(pr.rush, 3)} (≈ $${f(pr.rushUsd)})`,
+        `tickets: ${f(pos.tickets, 1)} → ${f(pr.tickets, 1)}`,
+        `USD change vs today ≈ ${pr.gainUsd >= 0 ? "+" : ""}$${f(pr.gainUsd)} (of which carry $${f(pr.carryUsd)}); prices held; boost windows and strikes at their average`,
+      );
+    }
+    return lines.join("\n");
+  };
+  bot.command("pnl", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    await ctx.reply(await renderPnl());
+  });
+  bot.command("position", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    await ctx.reply(await renderPnl());
   });
 
   bot.command("pause", async (ctx) => {
@@ -448,7 +498,7 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(
       [
         "⛏ SAT RUSH commands (V2)",
-        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /fleet /deposit /health",
+        "view: /status /board /me /pnl /position /rounds /competitors /vault /wallets /fleet /deposit /health",
         "control: /pause /resume /kill",
         "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),
