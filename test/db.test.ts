@@ -316,3 +316,38 @@ describe("pruneObservations — history is bounded, the ledger is not", () => {
     db.close();
   });
 });
+
+describe("unsettled legs — the ledger's blind spot under V2", () => {
+  it("lists landed legs with no settlement for (round, wallet), oldest first, and counts today's", () => {
+    const db = freshDb();
+    const leg = (roundId: number, wallet: string, sig: string) =>
+      db.recordMyDeploy({ roundId, mask: 1, amount: usdToBase(1), evExpected: 0, firedSlot: 1, sig, status: "landed", wallet });
+    leg(10, "A", "a10"); leg(10, "B", "b10"); leg(11, "A", "a11"); leg(12, "A", "a12");
+    db.recordSettlement({ roundId: 10, winningStake: 0n, wonUsd: usdToBase(0.89), wonShares: 0n, hashrateEarned: 0n, wonTokenAmount: 0n, wonTokenShares: 0n, wallet: "A", sig: "s-a10" });
+    const legs = db.unsettledLegs(12); // strictly before round 12
+    expect(legs.map((l) => `${l.roundId}:${l.wallet}`)).toEqual(["10:B", "11:A"]);
+    expect(legs[0]!.amount).toBe(usdToBase(1));
+    const today = db.unsettledToday(new Date().toISOString().slice(0, 10));
+    expect(today).toEqual({ legs: 3, grossBase: usdToBase(3), rounds: 3 });
+    db.close();
+  });
+});
+
+describe("accrualSince — the run rate behind the projection", () => {
+  it("sums settled shares, hashrate and USD, and gross deployed, since a timestamp", () => {
+    const db = freshDb();
+    db.recordMyDeploy({ roundId: 1, mask: 1, amount: usdToBase(21), evExpected: 0, firedSlot: 1, sig: "d1", status: "landed", wallet: "A" });
+    db.recordSettlement({ roundId: 1, winningStake: 0n, wonUsd: usdToBase(18.69), wonShares: 1_234n, hashrateEarned: 2_541n, wonTokenAmount: 0n, wonTokenShares: 99n, wallet: "A", sig: "s1" });
+    db.recordSettlement({ roundId: 1, winningStake: 0n, wonUsd: usdToBase(0.89), wonShares: 0n, hashrateEarned: 121n, wonTokenAmount: 0n, wonTokenShares: 1n, wallet: "B", sig: "s2" });
+    const a = db.accrualSince("2000-01-01 00:00:00");
+    expect(a.settlements).toBe(2);
+    expect(a.wonShares).toBe(1_234n);
+    expect(a.wonTokenShares).toBe(100n);
+    expect(a.hashrateEarned).toBe(2_662);
+    expect(a.wonUsdBase).toBe(usdToBase(19.58));
+    expect(a.grossBase).toBe(usdToBase(21));
+    expect(a.firstAt).not.toBeNull();
+    expect(db.accrualSince("2999-01-01 00:00:00").settlements).toBe(0);
+    db.close();
+  });
+});

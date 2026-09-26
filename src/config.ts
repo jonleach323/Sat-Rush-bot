@@ -171,12 +171,15 @@ const schema = z
      * exit fee of everyone who claims. This is the holding horizon, in days,
      * the credit is computed over (carry = daily rate × days). 0 (default) =
      * not credited: the carry is a transfer from leavers that decays, and it
-     * only accrues to a wallet that never claims — set this only if you mean
-     * to hold, and re-run `pnpm vault-carry` before believing the rate.
+     * only accrues to a wallet that never claims. The operator stated the
+     * intent on 2026-09-22 ("I don't plan on claiming for a long time unless
+     * claiming and staking outperforms"), so the default is a 30-day horizon;
+     * /pnl compares hold vs claim every time and alerts if it flips. 0 = not
+     * credited. Re-run `pnpm vault-carry` before believing the rate.
      */
     VAULT_CARRY_HORIZON_DAYS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().finite().min(0).max(365).default(0),
+      z.coerce.number().finite().min(0).max(365).default(30),
     ),
     /**
      * Cap on the daily carry rate credited, as a simple APR fraction (1.2 =
@@ -251,7 +254,8 @@ const schema = z
      * quantile of land latency at this probability (higher = more cushion). */
     FIRE_OFFSET_TARGET_LAND_PROB: z.preprocess(
       emptyToUndef,
-      z.coerce.number().gt(0).max(1).default(0.95),
+      // Per LEG: a 21-leg fleet round at 0.95 expects one miss a round by design.
+      z.coerce.number().gt(0).max(1).default(0.99),
     ),
     /** Extra slots added to the latency quantile (program-cutoff safety). */
     FIRE_OFFSET_CUSHION_SLOTS: z.preprocess(
@@ -263,10 +267,14 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().min(0).default(2),
     ),
-    /** Hard max offset — never fire earlier than this. */
+    /** Hard max offset — never fire earlier than this. Calibrated on 400 ms
+     * slots; mainnet runs ~267 ms slots (2026-09), so 6 slots is 1.6 s against
+     * a measured 0.8 s send→land for a 21-leg fleet send — too little room
+     * for the adaptive offset to open when a round is missed. 12 slots ≈ 3.2 s
+     * on a board that is final ~40 s before cutoff costs nothing. */
     FIRE_OFFSET_CEILING: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().min(1).default(6),
+      z.coerce.number().int().min(1).default(12),
     ),
     /** Landed-deploy samples required before the adaptive offset engages. */
     FIRE_OFFSET_MIN_SAMPLES: z.preprocess(
@@ -397,9 +405,13 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().positive().default(1_000_000),
     ),
+    /** Compute-unit limit on deploy/settle/claim transactions. The priority fee
+     * is paid on the LIMIT, not on usage. Measured on mainnet 2026-09-26:
+     * deploys 54,772–66,766 CU, settle 71,188 CU (getTransaction on the
+     * fleet's own signatures). 150,000 is 2.2× the heaviest. */
     DEPLOY_CU_LIMIT: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(400_000),
+      z.coerce.number().int().positive().default(150_000),
     ),
     JITO_TIP_ACCOUNT: optionalPubkey,
     /** Jito tip accounts (comma list). One is picked at random per fire to avoid
@@ -835,6 +847,13 @@ const schema = z
      */
     AUTO_RAMP: boolFromEnv(true),
     RAMP_PRESENCE_TOLL_BPS: z.preprocess(emptyToUndef, z.coerce.number().int().min(0).max(10_000).default(300)),
+    /** Hours between Telegram digests of routine events (fleet leg outcomes,
+     * compound claims, ticket buys, cap-bound rounds). 0 = no scheduled digest
+     * (still on demand with /digest). Incidents push immediately regardless. */
+    ALERT_DIGEST_HOURS: z.preprocess(emptyToUndef, z.coerce.number().min(0).max(168).default(6)),
+    /** Escalate to one push when the fleet's landed-leg fraction over the last
+     * 10 fleet rounds falls below this. */
+    FLEET_LANDED_ALERT_FRACTION: z.preprocess(emptyToUndef, z.coerce.number().min(0).max(1).default(0.8)),
     RAMP_ALERT_MIN_BPS: z.preprocess(
       emptyToUndef,
       z.coerce.number().min(0).default(5),

@@ -11,6 +11,7 @@
  * config load.
  */
 import type { Connection } from "@solana/web3.js";
+import { SignatureStatusBatcher, withBatchedStatuses } from "./status-batcher.js";
 import type { Logger } from "pino";
 import { confirmSignature, type ConfirmOutcome } from "./confirm.js";
 
@@ -43,6 +44,9 @@ export interface FireResult {
     resolvedAtMs: number;
     sendAttempts: number;
     perEndpointSends: number;
+    /** sendRawTransaction calls that errored (rate limits, rejections): they used to be swallowed. */
+    sendErrors?: number | undefined;
+    lastSendError?: string | undefined;
   };
 }
 
@@ -53,6 +57,8 @@ export interface RaceSenderOptions {
   logger?: Logger | undefined;
   /** Required true to construct in mainnet mode (MAINNET_CONFIRM=yes). */
   mainnetConfirmed?: boolean | undefined;
+  /** Status-poll coalescing window (ms); 0 = same-tick only. The live bot uses 20. */
+  statusBatchWindowMs?: number | undefined;
 }
 
 const RESEND_INTERVAL_MS = 400;
@@ -60,7 +66,14 @@ const FIRE_TIMEOUT_MS = 10_000;
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export class RaceSender {
+  /** Confirmation reads go through one batched status poller for every in-flight signature. */
+  readonly statusBatcher: SignatureStatusBatcher | null;
+  private readonly confirmConnection: Connection | null;
+
   constructor(private readonly opts: RaceSenderOptions) {
+    const primary = opts.connections[0];
+    this.statusBatcher = primary ? new SignatureStatusBatcher(primary, opts.statusBatchWindowMs ?? 0) : null;
+    this.confirmConnection = primary && this.statusBatcher ? withBatchedStatuses(primary, this.statusBatcher) : null;
     if (opts.mode !== "dry" && opts.connections.length === 0) {
       throw new Error("RaceSender needs at least one connection outside dry mode");
     }
@@ -90,15 +103,22 @@ export class RaceSender {
     }
 
     const bytes = Buffer.from(candidate.serialized);
-    const primary = this.opts.connections[0]!;
+    const primary = this.confirmConnection ?? this.opts.connections[0]!;
     let sendAttempts = 0;
+    let sendErrors = 0;
+    let lastSendError: string | undefined;
 
     const blastOnce = () => {
       sendAttempts++;
       for (const connection of this.opts.connections) {
         connection
           .sendRawTransaction(bytes, { skipPreflight: true, maxRetries: 0 })
-          .catch(() => undefined); // duplicates/transient errors are harmless
+          .catch((err: unknown) => {
+            // Duplicates are harmless, but a rate limit on the FIRST send is a
+            // lost leg: count them so the journal says why a leg missed.
+            sendErrors++;
+            lastSendError = String(err).slice(0, 160);
+          });
       }
       if (this.opts.jitoUrl) void this.sendJitoBundle(bytes);
     };
@@ -138,6 +158,8 @@ export class RaceSender {
         resolvedAtMs: now(),
         sendAttempts,
         perEndpointSends: sendAttempts * this.opts.connections.length,
+        sendErrors,
+        lastSendError,
       },
     };
     this.opts.logger?.info(

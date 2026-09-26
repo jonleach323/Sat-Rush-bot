@@ -36,6 +36,15 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.PRICE_MAX_STALE_SLOTS < 400) {
     warn("price_stale_gate", `PRICE_MAX_STALE_SLOTS=${cfg.PRICE_MAX_STALE_SLOTS}: the sponsored oracle feeds heartbeat every ~150 slots, so quotes are rejected at the heartbeat edge; 400 is the intended value`);
   }
+  if (cfg.DEPLOY_CU_LIMIT > 250_000) {
+    warn("cu_limit", `DEPLOY_CU_LIMIT=${cfg.DEPLOY_CU_LIMIT}: deploys use ~55–67k CU and a settle ~71k (measured); the priority fee is paid on the limit, so this multiplies the fee on every leg — 150000 is the intended value`);
+  }
+  if (cfg.FIRE_OFFSET_TARGET_LAND_PROB < 0.98 && cfg.FLEET_SIZE > 1) {
+    warn("land_target", `FIRE_OFFSET_TARGET_LAND_PROB=${cfg.FIRE_OFFSET_TARGET_LAND_PROB} is per leg: a ${Math.min(cfg.FLEET_SIZE, 21)}-leg round then expects ${((1 - cfg.FIRE_OFFSET_TARGET_LAND_PROB) * Math.min(cfg.FLEET_SIZE, 21)).toFixed(1)} missed legs every round — 0.99 is the intended value`);
+  }
+  if (cfg.FIRE_OFFSET_CEILING < 10) {
+    warn("fire_offset_ceiling", `FIRE_OFFSET_CEILING=${cfg.FIRE_OFFSET_CEILING}: at mainnet's ~267 ms slots the adaptive offset cannot open past ${(cfg.FIRE_OFFSET_CEILING * 0.267).toFixed(1)} s before cutoff; a 21-leg send needs room to widen after a miss — 12 is the intended value`);
+  }
   if (cfg.MAX_PER_ROUND_USD > 0) {
     const usdc = ctx.fleetUsdcBase !== undefined ? Number(ctx.fleetUsdcBase) / 1e6 : null;
     const wide = usdc !== null && usdc > 10 * cfg.MAX_PER_ROUND_USD;
@@ -49,7 +58,7 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.VAULT_MAX_SHARE < 1) info("vault_share_brake", `VAULT_MAX_SHARE=${cfg.VAULT_MAX_SHARE} caps hashrate by a hard share instead of the dilution curve`);
   if (cfg.STREAK_OPTION_DISCOUNT < 1) info("streak_option_discount", `STREAK_OPTION_DISCOUNT=${cfg.STREAK_OPTION_DISCOUNT} discounts the streak option`);
   if (cfg.VAULT_CARRY_HORIZON_DAYS === 0) {
-    info("vault_carry_not_credited", "VAULT_CARRY_HORIZON_DAYS=0: the vault carry earned by holding shares (exit fees of those who claim) is not credited; set a horizon if holding is the intent (pnpm vault-carry for the rate)");
+    info("vault_carry_not_credited", "VAULT_CARRY_HORIZON_DAYS=0: the vault carry earned by holding shares is not credited; the operator's stated intent is to hold (default 30 d) — a 0 here is a deliberate override");
   }
   if (cfg.EXECUTION_MODE === "mainnet" && cfg.MIN_EDGE_BPS <= 0) warn("no_edge_floor", "MIN_EDGE_BPS=0 on mainnet: the selector fires on any positive EV, inside model noise; 25 is the intended floor");
   if (cfg.EXECUTION_MODE === "mainnet" && !cfg.EDGE_HURDLE_ENABLED) warn("no_edge_hurdle", "EDGE_HURDLE_ENABLED=false on mainnet: fees and the opportunity yield are not charged against a fire");

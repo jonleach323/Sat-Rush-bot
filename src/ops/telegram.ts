@@ -5,6 +5,7 @@
  * identically in dry mode and offline tests (handleUpdate + api transformer).
  */
 import { Bot, InputFile, type Api } from "grammy";
+import { pnlKeyboard, renderPnlCard, type PnlTab } from "./pnl-cards.js";
 import type { UserFromGetMe } from "grammy/types";
 import type { Logger } from "pino";
 import { baseToUsd } from "../units.js";
@@ -64,9 +65,17 @@ export interface DeployRow {
 export interface PnlSummary {
   date: string;
   deployed: bigint;
+  /** Settled USD back (the 89% refund on losing legs plus USD winnings). */
   returned: bigint;
+  /** returned − deployed: cash only, before shares and before unsettled legs. */
   net: bigint;
   feesPaid: bigint;
+  /** Landed legs from today with no settlement on record: money still inside deployment accounts. */
+  unsettled?: { legs: number; grossUsd: number; rounds: number } | undefined;
+  /** USD value of the day's won BTC and RUSH shares at the vault rate and live prices. */
+  sharesMarkedUsd?: number | undefined;
+  /** net + shares marked: the day's economic result, excluding the unsettled legs above. */
+  markedNet?: bigint | undefined;
 }
 
 export interface RoundRow {
@@ -105,9 +114,55 @@ export interface HealthReport {
   jobs?: Record<string, { lastMs: number; maxMs: number; meanMs: number; count: number }> | undefined;
 }
 
+/** The fleet's unclaimed position and a hold projection (see state/position.ts). */
+export interface PositionReport {
+  wallets: number;
+  fleetUsdc: number;
+  fleetSol: number;
+  usdcUnclaimed: number;
+  satsShares: string;
+  btc: number;
+  btcUsd: number;
+  tokenShares: string;
+  rush: number;
+  rushUsd: number;
+  hashrateLiquid: number;
+  hashrateDeferred: number;
+  tickets: number;
+  totalUnclaimedUsd: number;
+  btcPrice: number;
+  rushPrice: number;
+  rate: { sampleHours: number; settlements: number; btcPerDay: number; rushPerDay: number; hashratePerDay: number; usdNetPerDay: number; grossPerDay: number };
+  carry: { sats: number; token: number };
+  /** Where the carry rates came from: the live vault APRs from the API, or the measured facts. */
+  carrySource: "live" | "measured";
+  /** Break-even on the carry alone: net cash put in vs the holdings today. */
+  breakeven: { costBasisUsd: number; holdingsUsd: number; shortfallUsd: number; blendedCarryDaily: number; days: number | null; alreadyAhead: boolean; lifetimeDeployedUsd: number; lifetimeReturnedUsd: number };
+  /** The carry as a yearly rate: simple (daily × 365) and compounded. */
+  apr: { sats: number; token: number; satsCompounded: number; tokenCompounded: number };
+  /** Tickets we hold in the open draws (from the vault manager's last poll), or null when it is not running. */
+  vaults: {
+    epoch: { iterationId: number; myTickets: number; totalTickets: number; shareBps: number; poolUsd: number; slotsToClose: number } | null;
+    oneBtc: { iterationId: number; totalTickets: number; prizeUsd: number; fillBps: number } | null;
+  } | null;
+  /** Hold vs claim(+stake), per leg, over the projection horizon. */
+  verdict: {
+    days: number;
+    btc: { heldUsd: number; claimedUsd: number; holdEdgeUsd: number; breakevenCarryDaily: number };
+    rush: { heldUsd: number; claimedUsd: number; holdEdgeUsd: number; breakevenCarryDaily: number };
+    breakevenCarryDailyYear: { btc: number; rush: number };
+    holdWins: boolean;
+    stakingYieldDaily: number;
+  };
+  projection: { days: number; btc: number; rush: number; tickets: number; btcUsd: number; rushUsd: number; usdNet: number; gainUsd: number; carryUsd: number };
+}
+
 export interface TelegramDeps {
   getStatus(): StatusReport | Promise<StatusReport>;
   getPnl(): PnlSummary | Promise<PnlSummary>;
+  getPosition?(): PositionReport | Promise<PositionReport>;
+  /** Flush the routine-event digest now; returns its text (also pushed). */
+  digest?(): string;
   pause(): void;
   resume(): void;
   kill(reason: string): void;
@@ -229,18 +284,38 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(formatStatus(await opts.deps.getStatus()));
   });
 
+  // /pnl is a card with four tabs switched by inline buttons (ops/pnl-cards.ts).
+  const pnlCard = async (tab: PnlTab): Promise<{ text: string; extra: { parse_mode: "HTML"; reply_markup: ReturnType<typeof pnlKeyboard> } }> => {
+    const p = await opts.deps.getPnl();
+    const pos = opts.deps.getPosition ? await opts.deps.getPosition() : null;
+    return { text: renderPnlCard(tab, p, pos), extra: { parse_mode: "HTML", reply_markup: pnlKeyboard(tab) } };
+  };
   bot.command("pnl", async (ctx) => {
     if (!authorized(ctx.chat?.id)) return;
-    const p = await opts.deps.getPnl();
-    await ctx.reply(
-      [
-        `pnl ${p.date}`,
-        `deployed: ${usd(p.deployed)}`,
-        `returned: ${usd(p.returned)}`,
-        `net: ${usd(p.net)}`,
-        `fees (deploy legs): ${usd(p.feesPaid)}`,
-      ].join("\n"),
-    );
+    const c = await pnlCard("today");
+    await ctx.reply(c.text, c.extra);
+  });
+  bot.command("digest", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    if (!opts.deps.digest) return void ctx.reply("digest unavailable");
+    const text = opts.deps.digest();
+    if (text.startsWith("nothing")) await ctx.reply(text);
+  });
+  bot.command("position", async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    const c = await pnlCard("position");
+    await ctx.reply(c.text, c.extra);
+  });
+  bot.callbackQuery(/^pnl:(today|position|hold|verdict)$/, async (ctx) => {
+    if (!authorized(ctx.chat?.id)) return;
+    const tab = ctx.match[1] as PnlTab;
+    const c = await pnlCard(tab);
+    try {
+      await ctx.editMessageText(c.text, c.extra);
+    } catch {
+      /* unchanged content: Telegram rejects identical edits */
+    }
+    await ctx.answerCallbackQuery();
   });
 
   bot.command("pause", async (ctx) => {
@@ -436,7 +511,7 @@ export function createTelegramOps(opts: TelegramOpsOptions): TelegramOps {
     await ctx.reply(
       [
         "⛏ SAT RUSH commands (V2)",
-        "view: /status /board /me /pnl /rounds /competitors /vault /wallets /fleet /deposit /health",
+        "view: /status /board /me /pnl /position /digest /rounds /competitors /vault /wallets /fleet /deposit /health",
         "control: /pause /resume /kill",
         "/status shows the marked net (BTC+RUSH shares valued), the token yield and the vault carry",
       ].join("\n"),

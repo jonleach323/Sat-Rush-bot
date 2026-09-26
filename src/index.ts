@@ -57,6 +57,9 @@ import {
   minerPda,
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
+  boardPda,
+  publicDeploymentPda,
+  roundPda,
   satrushConfigPda,
   satsVaultPda,
   tokenVaultPda,
@@ -98,6 +101,7 @@ import { buildInfo } from "./ops/build-info.js";
 import { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
 export { autoAffiliateTag, deriveLimits } from "./exec/limits.js";
 import { EventLoopMonitor, JobTimer } from "./ops/loop-lag.js";
+import { AlertThrottle, Digest, type NoteKind } from "./ops/digest.js";
 import { lintConfig } from "./ops/config-lint.js";
 
 /** Occupancy-driven candidate refreshes are coalesced to one per this interval (the board is final ~40 s before cutoff). */
@@ -110,6 +114,12 @@ const REFRESH_MIN_INTERVAL_MS = 750;
  * final ~40 s before cutoff, so pricing 3 slots earlier loses nothing.
  */
 const PRE_ARM_SLOTS = 3;
+/** Ramp credit above the minimum blanket's toll, so a ramp is never at the knife edge of the edge floor. */
+const RAMP_FLOOR_HEADROOM = 1.5;
+/** The settle sweep runs only while the round has at least this many slots to its cutoff (~24 s at 267 ms). */
+const SWEEP_MIN_CUTOFF_SLOTS = 90;
+/** Settle legs per treasury cycle: the sweep is a background repair, not a burst. */
+const SWEEP_LEGS_PER_CYCLE = 6;
 /** One occupancy snapshot row per round per this many slots (~2 s), not one per Round write. */
 const SNAPSHOT_MIN_SLOTS = 5;
 /** Observation history kept (snapshots, competitor deploys, skips): ~6 days; the widest reader (FLEET_FLOAT_WINDOW_ROUNDS) is 3000. */
@@ -133,7 +143,9 @@ import { Bankroll, strikeSizeMultiplier } from "./strategy/bankroll.js";
 import { feeModelFromConfig, netFactor, TILES_COUNT, v1Model, type EvContext, type FeeModel } from "./strategy/ev.js";
 import { tollAtRiskFraction, v2EconomicsFromConfig, v2Model, type V2EvContext } from "./strategy/ev-v2.js";
 import { EPOCH_EQUAL_CURVE_BPS } from "./strategy/vault.js";
-import { STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, V2_LOSING_TILE_REFUND_BPS } from "./strategy/facts.js";
+import { SATS_VAULT_CARRY_DAILY, STAKING_YIELD_DAILY, STREAK_GRACE_ROUNDS, STRIKE_BOOST_WINDOW_ROUNDS, STRIKE_TRIGGER_MODULUS, TOKEN_VAULT_CARRY_DAILY, V2_LOSING_TILE_REFUND_BPS, VAULT_HASHRATE_PER_TICKET } from "./strategy/facts.js";
+import { breakevenOnCarry, fleetPosition, holdVsClaim, projectHolding } from "./state/position.js";
+import type { PositionReport } from "./ops/telegram.js";
 import { selectAllocation } from "./strategy/selector.js";
 import { boostWeightedDeployUsd, cycleEvBps } from "./strategy/streak.js";
 import { TokenFeed } from "./ingest/token-feed.js";
@@ -594,6 +606,7 @@ export class Orchestrator {
       jitoUrl: cfg.JITO_BLOCK_ENGINE_URL,
       logger,
       mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
+      statusBatchWindowMs: 20,
     });
 
     const watch = [
@@ -644,6 +657,29 @@ export class Orchestrator {
     void this.telegram?.alert(message);
   }
 
+  /** Routine events: logged, and summarised in the digest instead of pushed. */
+  private readonly digest = new Digest();
+  private readonly throttle = new AlertThrottle();
+  private digestTimer: NodeJS.Timeout | null = null;
+  note(kind: NoteKind, message: string, usd = 0): void {
+    this.log.info({ note: kind }, message);
+    this.digest.note(kind, message, usd);
+  }
+  /** Push at most once per `cooldownMs` for this key; otherwise note it. */
+  alertThrottled(key: string, cooldownMs: number, kind: NoteKind, message: string): void {
+    if (this.throttle.allow(key, cooldownMs)) this.alert(message);
+    else this.note(kind, message);
+  }
+  /** Render and send the digest (scheduled, or /digest). */
+  sendDigest(title?: string): string | null {
+    const text = this.digest.flush(title);
+    if (text) {
+      this.log.info({ digest: true }, text);
+      void this.telegram?.alert(text);
+    }
+    return text;
+  }
+
   /**
    * Engage the kill switch for an INTEGRITY violation (invariant, reconcile
    * tripwire, HaltError, unhandled error). Trips the in-memory switch AND
@@ -690,6 +726,8 @@ export class Orchestrator {
       logger: this.log,
       deps: {
         getStatus: () => this.statusReport(),
+        getPosition: () => this.positionReport(),
+        digest: () => this.sendDigest("🗒 digest (on demand)") ?? "nothing to report since the last digest",
         getPnl: () => {
           const date = utcDate();
           const row = this.db.queryOne<{
@@ -698,12 +736,18 @@ export class Orchestrator {
             net: string;
             fees_paid: string;
           }>("SELECT deployed, returned, net, fees_paid FROM pnl_daily WHERE date = ?", date);
+          const unsettled = this.db.unsettledToday(date);
+          const net = BigInt(row?.net ?? "0");
+          const marked = this.pnl.markedNetToday(date);
           return {
             date,
             deployed: BigInt(row?.deployed ?? "0"),
             returned: BigInt(row?.returned ?? "0"),
-            net: BigInt(row?.net ?? "0"),
+            net,
             feesPaid: BigInt(row?.fees_paid ?? "0"),
+            unsettled: { legs: unsettled.legs, grossUsd: Number(unsettled.grossBase) / 1e6, rounds: unsettled.rounds },
+            sharesMarkedUsd: Number(marked - net) / 1e6,
+            markedNet: marked,
           };
         },
         pause: () => {
@@ -865,6 +909,15 @@ export class Orchestrator {
    */
   private async preArm(cutoff: number): Promise<void> {
     this.log.debug({ roundId: this.roundId, cutoff }, "pre-arm: final re-pricing");
+    // Price the round's write locks: every deploy locks the Board and this
+    // Round, and at cutoff the fee decides who lands in the slot. Without
+    // the locked accounts the estimate read the global market and sat at
+    // the 1,000 µL/CU floor, losing legs to the next slot.
+    if (this.roundId !== null) {
+      const programId = new PublicKey(this.cfg.PROGRAM_ID);
+      await this.jobs.timed("fee_refresh", () => this.feeEstimator.refreshFromRpc(this.connection, [boardPda(programId), roundPda(this.roundId!, programId)]), 1_500);
+      this.log.info({ roundId: this.roundId, feeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu() }, "priority fee priced on the round's write locks");
+    }
     if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
     await this.refreshNow("pre_arm", true);
   }
@@ -1198,7 +1251,8 @@ export class Orchestrator {
     if (blanketAtCapBps === null || !(min > 0)) return;
     if (this.rampAlertArmed && blanketAtCapBps >= min) {
       this.rampAlertArmed = false;
-      this.alert(
+      this.note(
+        "ramp",
         `ramp pays: holding the streak cap across the boost cycle is ${blanketAtCapBps > 0 ? "+" : ""}${blanketAtCapBps} bps of gross ` +
         `(≥ ${min} bps) — mining RUSH is now cheaper than buying it; price the ramp with pnpm streak-ramp / pnpm buy-vs-mine`,
       );
@@ -1304,7 +1358,12 @@ export class Orchestrator {
     const legacyFloor = (minDeploy * this.cfg.RAMP_PRESENCE_TOLL_BPS) / 10_000;
     const edge = (minDeploy * this.cfg.MIN_EDGE_BPS) / 10_000;
     const fees = Number(this.edgeHurdleBase(0n) ?? 0n) / tiles;
-    return Math.max(legacyFloor, tollBase / tiles) + edge + fees;
+    // Headroom: sized to the floor exactly, round-to-round board noise put
+    // the $21 ramp under the edge floor every other round (rounds 70481+,
+    // 2026-09-22) and the streaks climbed at half speed. The toll is priced
+    // on the previous pre-arm's board; 1.5× covers the drift, and a doubled
+    // edge keeps the ramp clear of MIN_EDGE_BPS.
+    return Math.max(legacyFloor, (tollBase / tiles) * RAMP_FLOOR_HEADROOM) + 2 * edge + fees;
   }
 
   /** Per-tile presence credits for the fleet's tile mode (wallet i → tile i), or null outside it. */
@@ -1700,7 +1759,7 @@ export class Orchestrator {
       if (lastTrigger > 0 && duration > 0) {
         roundsSinceStrike = board.round_id - lastTrigger;
         windowRounds = STRIKE_BOOST_WINDOW_ROUNDS.value;
-        windowMs = windowRounds * duration * SLOT_SECONDS * 1000;
+        windowMs = windowRounds * duration * this.slotSeconds() * 1000;
       }
     }
     return strikeBonusMultiplier({
@@ -1865,7 +1924,7 @@ export class Orchestrator {
    */
   private opportunityPerUnit(): number | undefined {
     if (!this.cfg.EDGE_HURDLE_ENABLED) return undefined;
-    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * this.slotSeconds();
     const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
     return this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay;
   }
@@ -1877,7 +1936,7 @@ export class Orchestrator {
     const lamportsPerTx = 5_000 + (feeMicro * this.cfg.DEPLOY_CU_LIMIT) / 1e6;
     const solUsd = this.prices.solUsd();
     const feesUsd = solUsd > 0 ? (legs * 2 * lamportsPerTx * solUsd) / 1e9 : 0;
-    const roundSeconds = (this.state.board?.round_duration ?? 230) * SLOT_SECONDS;
+    const roundSeconds = (this.state.board?.round_duration ?? 230) * this.slotSeconds();
     const roundsPerDay = 86_400 / Math.max(1, roundSeconds);
     const opportunityUsd = (Number(stakeBase) / 1e6) * (this.cfg.OPPORTUNITY_YIELD_DAILY / roundsPerDay);
     return BigInt(Math.ceil((feesUsd + opportunityUsd) * 1e6));
@@ -2055,7 +2114,8 @@ export class Orchestrator {
       const key = `${this.roundId}:cap_bound`;
       if (!this.skipLogged.has(key)) {
         this.skipLogged.add(key);
-        this.alert(
+        this.note(
+          "cap_bound",
           `cap-bound round ${this.roundId}: fired $${(Number(selection.totalGross) / 1e6).toFixed(2)} at MAX_PER_ROUND with next-quantum marginal EV still +$${(selection.marginalEvAtStop / 1e6).toFixed(3)} — raising the cap/float would extract more`,
         );
       }
@@ -2130,12 +2190,17 @@ export class Orchestrator {
       else if (r.outcome !== "dry") this.db.updateMyDeployStatus(leg.signature, "failed");
     });
     const landedLegs = results.filter((r) => r.outcome === "landed");
-    if (candidate.legs.length > 1 && landedLegs.length !== results.length) {
-      this.alert(
-        `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (${results
-          .map((r, i) => `${candidate.legs[i]!.wallet.slice(0, 6)}:${r.outcome}`)
-          .join(" ")})`,
-      );
+    if (candidate.legs.length > 1 && results.some((r) => r.outcome !== "dry")) {
+      const missed = results.flatMap((r, i) => (r.outcome === "landed" ? [] : [candidate.legs[i]!.wallet.slice(0, 6)]));
+      const recent = this.digest.fleetRound(results.length, landedLegs.length, missed);
+      if (missed.length > 0) {
+        this.note("fleet_partial", `fleet round ${roundAtFire}: ${landedLegs.length}/${results.length} legs landed (missed ${missed.join(" ")})`);
+      }
+      // Escalate on a rate, not per round: a sustained landing problem pushes once an hour.
+      if (this.digest.recentFleetRounds() >= 5 && recent < this.cfg.FLEET_LANDED_ALERT_FRACTION) {
+        this.alertThrottled("fleet_landing_rate", 3_600_000, "fleet_partial",
+          `⚠ fleet landing rate ${(recent * 100).toFixed(0)}% over the last ${this.digest.recentFleetRounds()} fleet rounds (below ${(this.cfg.FLEET_LANDED_ALERT_FRACTION * 100).toFixed(0)}%) — the fire offset or the RPC is losing legs; /health and the journal's "fire resolved" lines`);
+      }
     }
     const result =
       landedLegs[0] ??
@@ -2155,10 +2220,10 @@ export class Orchestrator {
     } else if (result.outcome === "dry") {
       this.transition("SETTLING", { dry: true });
     } else if (result.outcome === "missed_round") {
-      this.alert(`missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
+      this.alertThrottled("missed_round", 3_600_000, "missed_round", `missed round ${this.roundId}: ${result.detail ?? ""} — standing down`);
       this.transition("LOGGED", { missed: true });
     } else {
-      this.alert(`deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
+      this.alertThrottled(`deploy_${result.outcome}`, 3_600_000, "deploy_failed", `deploy ${result.outcome} on round ${this.roundId}: ${result.detail ?? ""}`);
       this.transition("LOGGED", { failed: true });
     }
     this.pnl.refreshDaily();
@@ -2867,7 +2932,7 @@ export class Orchestrator {
       this.db.recordVaultTicket({ kind, iterationId, tickets, ticketPubkey, wallet, sig: signature });
     }
     if (result.outcome === "landed") {
-      this.alert(`⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
+      this.note("vault_buy", `⛏ vault: bought ${tickets} ${kind} tickets (iteration ${iterationId})`);
     }
     return signature;
   }
@@ -2906,6 +2971,7 @@ export class Orchestrator {
     try {
       // A boot under the KILL file skipped the tag; retry once the switch clears.
       if (!this.affiliateTagDone) await this.ensureAffiliateTag();
+      await this.settleSweep();
       await this.wallets.refreshBalances(this.connection, this.ixCtx.usdMint);
       const p = this.wallets.primary();
       const funded = p.usdcBase >= usdToBase(1) && p.lamports >= 10_000_000;
@@ -2948,6 +3014,78 @@ export class Orchestrator {
       this.log.warn({ err: String(err).slice(0, 160) }, "fleet treasury cycle failed");
     } finally {
       this.fleetCycleInFlight = false;
+    }
+  }
+
+  /** Per-(round, wallet) settle attempts by the sweep, to back off a leg the program keeps refusing. */
+  private readonly sweepAttempts = new Map<string, number>();
+
+  /**
+   * Settle sweep: every landed leg with no settlement on record, rounds
+   * older than the current one. Belt and braces under the reveal-time
+   * settle — a settle that failed (missing affiliate account, RPC hiccup)
+   * or a reveal that raced the next Board write left legs parked in their
+   * deployment accounts with the refund, the won shares and the rent. A
+   * deployment account that no longer exists was settled by someone else:
+   * the sweep records nothing (the settle event, if we missed it, is not
+   * ours to invent) and stops retrying it.
+   */
+  private async settleSweep(): Promise<void> {
+    if (!this.cfg.SELF_SETTLE || this.cfg.EXECUTION_MODE === "dry" || this.bankroll.killSwitchEngaged()) return;
+    if (this.roundId === null) return;
+    // Never inside the fire window: a settle burst (send + confirmation
+    // polling per leg) shares the RPC plan with the 21 deploy sends, and
+    // round 70533 missed 21/21 right after the sweep shipped. Early in the
+    // round only, a few legs per cycle, paced.
+    const cutoff = this.state.slotsToCutoff();
+    if (this.botState !== "ROUND_OPEN" || cutoff === null || cutoff < SWEEP_MIN_CUTOFF_SLOTS) return;
+    const legs = this.db.unsettledLegs(this.roundId, SWEEP_LEGS_PER_CYCLE);
+    if (legs.length === 0) return;
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    let settled = 0, gone = 0, failed = 0;
+    for (const leg of legs) {
+      const key = `${leg.roundId}:${leg.wallet ?? "primary"}`;
+      const attempts = this.sweepAttempts.get(key) ?? 0;
+      if (attempts >= 5) continue;
+      // Stop the moment the round approaches its fire window.
+      const now = this.state.slotsToCutoff();
+      if (this.botState !== "ROUND_OPEN" || now === null || now < SWEEP_MIN_CUTOFF_SLOTS) break;
+      const deployer = leg.wallet ? new PublicKey(leg.wallet) : this.payer.publicKey;
+      try {
+        const info = await this.connection.getAccountInfo(publicDeploymentPda(deployer, leg.roundId, programId), "confirmed");
+        if (!info) {
+          this.sweepAttempts.set(key, 99);
+          gone++;
+          continue;
+        }
+        const fee = this.feeEstimator.currentMicroLamportsPerCu();
+        assertFeeBearingInvariants({ kind: "settle", priorityFeeMicroLamports: fee, maxPriorityFeeMicroLamports: this.cfg.PRIORITY_FEE_MAX_MICROLAMPORTS, killSwitchEngaged: this.bankroll.killSwitchEngaged() });
+        const ix = buildSettleDeployPublic(this.ixCtx, {
+          authority: this.payer.publicKey,
+          deploymentAuthority: deployer,
+          roundId: leg.roundId,
+          affiliate: this.state.minerAt(minerPda(deployer, programId))?.affiliate,
+        });
+        const { tx, lastValidBlockHeight } = await assembleTx(this.connection, { payer: this.payer, instructions: [ix], computeUnitLimit: this.cfg.DEPLOY_CU_LIMIT, priorityFeeMicroLamports: fee });
+        const result = await this.sender.fire(
+          { signature: bs58.encode(tx.signatures[0]!), serialized: Buffer.from(tx.serialize()), lastValidBlockHeight, meta: { kind: "settle_sweep", roundId: leg.roundId, wallet: deployer.toBase58() } },
+          { timeoutMs: 15_000 },
+        );
+        this.sweepAttempts.set(key, attempts + 1);
+        if (result.outcome === "landed") settled++;
+        else {
+          failed++;
+          this.log.warn({ roundId: leg.roundId, wallet: deployer.toBase58(), outcome: result.outcome, detail: result.detail, attempt: attempts + 1 }, "settle sweep: leg not settled");
+        }
+      } catch (err) {
+        this.sweepAttempts.set(key, attempts + 1);
+        failed++;
+        this.log.warn({ roundId: leg.roundId, wallet: deployer.toBase58(), err: String(err).slice(0, 200), attempt: attempts + 1 }, "settle sweep failed");
+      }
+    }
+    if (settled + gone + failed > 0) {
+      this.log.info({ candidates: legs.length, settled, gone, failed }, "settle sweep");
+      if (failed > 0 && settled === 0) this.alertThrottled("settle_sweep", 6 * 3_600_000, "settle_sweep_failed", `⚠ settle sweep: ${failed} landed leg(s) could not be settled (${legs.length} unsettled on record) — refunds are parked in deployment accounts; see the journal's "settle sweep" lines`);
     }
   }
 
@@ -3263,7 +3401,7 @@ export class Orchestrator {
     );
     this.log.info({ amount: amount.toString(), wallet: authority.toBase58(), outcome }, "usd compound claim resolved");
     if (outcome === "landed") {
-      this.alert(`compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`);
+      this.note("compound_claim", `compounded $${(Number(amount) / 1e6).toFixed(2)} USDC back to wallet ${authority.toBase58().slice(0, 6)}…`, Number(amount) / 1e6);
     }
   }
 
@@ -3420,6 +3558,108 @@ export class Orchestrator {
     };
   }
 
+  /** Live slot time from the stream: (wall ms) / (slots) over a rolling window; the 0.4 s constant was 50% long. */
+  private slotTiming: { slot: number; atMs: number } | null = null;
+  private slotSecondsEma: number | null = null;
+  private noteSlotTiming(slot: number): void {
+    const now = Date.now();
+    const prev = this.slotTiming;
+    if (prev && slot > prev.slot && slot - prev.slot <= 50) {
+      const sec = (now - prev.atMs) / 1000 / (slot - prev.slot);
+      if (sec > 0.05 && sec < 2) this.slotSecondsEma = this.slotSecondsEma === null ? sec : this.slotSecondsEma * 0.95 + sec * 0.05;
+    }
+    if (!prev || slot > prev.slot) this.slotTiming = { slot, atMs: now };
+  }
+  /** Seconds per slot: measured when the stream has run long enough, else the fact. */
+  slotSeconds(): number {
+    return this.slotSecondsEma ?? SLOT_SECONDS;
+  }
+
+  /** Latched: alert once when claiming (+staking) starts to beat holding; re-arm when holding wins again. */
+  private holdVerdictAlerted = false;
+  private checkHoldVerdict(): void {
+    try {
+      const r = this.positionReport();
+      if (r.totalUnclaimedUsd < 1) return;
+      if (!r.verdict.holdWins && !this.holdVerdictAlerted) {
+        this.holdVerdictAlerted = true;
+        this.alert(`⚖️ hold no longer wins over ${r.verdict.days} d: BTC edge $${r.verdict.btc.holdEdgeUsd.toFixed(2)}, RUSH edge $${r.verdict.rush.holdEdgeUsd.toFixed(2)} (carry ${(r.carry.sats * 100).toFixed(3)}%/d, ${(r.carry.token * 100).toFixed(3)}%/d, ${r.carrySource}). /pnl for the legs — the bot does not claim on its own.`);
+      } else if (r.verdict.holdWins && this.holdVerdictAlerted) {
+        this.holdVerdictAlerted = false;
+        this.alert("⚖️ holding wins again over the projection horizon");
+      }
+    } catch {
+      /* position unavailable this tick */
+    }
+  }
+
+  /** The fleet's unclaimed position and a 30-day hold projection at the current run rate (Telegram /pnl, /position). */
+  positionReport(): PositionReport {
+    const programId = new PublicKey(this.cfg.PROGRAM_ID);
+    const miners = this.wallets.all().map((w) => this.state.minerAt(minerPda(w.keypair.publicKey, programId))).filter((m): m is Miner => m !== null);
+    const btcUsd = this.prices.btcUsd();
+    const feed = this.tokenFeed?.status();
+    const rushUsd = feed?.live ? feed.tokenUsd : this.cfg.RUSH_USD_ESTIMATE;
+    const rawPerTicket = VAULT_HASHRATE_PER_TICKET.value;
+    const pos = fleetPosition({ miners, satsVault: this.state.satsVault, tokenVault: this.state.tokenVault, btcUsd, rushUsd, rawPerTicket });
+    // Run rate: the last 24 h of settlements (or whatever shorter span exists), per day.
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+    const acc = this.db.accrualSince(since);
+    const spanH = acc.firstAt && acc.lastAt ? Math.max(1, (Date.parse(acc.lastAt + "Z") - Date.parse(acc.firstAt + "Z")) / 3_600_000) : 24;
+    const perDay = 24 / spanH;
+    const rate = {
+      sampleHours: spanH,
+      settlements: acc.settlements,
+      btcPerDay: Number(acc.wonShares) * pos.btcPerShare * perDay,
+      rushPerDay: Number(acc.wonTokenShares) * pos.rushPerShare * perDay,
+      hashratePerDay: acc.hashrateEarned * perDay,
+      usdNetPerDay: (Number(acc.wonUsdBase - acc.grossBase) / 1e6) * perDay,
+      grossPerDay: (Number(acc.grossBase) / 1e6) * perDay,
+    };
+    // Carry: the API's live vault APRs when the feed has them (what the app
+    // shows holders), else the measured facts.
+    const liveSats = feed?.live && feed.satsVaultApr !== null && feed.satsVaultApr > 0 ? feed.satsVaultApr / 365 : null;
+    const liveToken = feed?.live && feed.tokenVaultApr !== null && feed.tokenVaultApr > 0 ? feed.tokenVaultApr / 365 : null;
+    const carry = liveSats !== null && liveToken !== null ? { sats: liveSats, token: liveToken } : { sats: SATS_VAULT_CARRY_DAILY.value, token: TOKEN_VAULT_CARRY_DAILY.value };
+    const carrySource: "live" | "measured" = liveSats !== null && liveToken !== null ? "live" : "measured";
+    // "If I stopped the bot today": the carry alone on what is held — no accrual. The run rate is reported beside it.
+    const stopped = { ...rate, btcPerDay: 0, rushPerDay: 0, hashratePerDay: 0, usdNetPerDay: 0, grossPerDay: 0 };
+    const projection = projectHolding({ position: pos, rate: stopped, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
+    const verdict = holdVsClaim({ btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, carry, stakingYieldDaily: STAKING_YIELD_DAILY.value, exitFeeBps: this.state.satrushConfig?.vault_exit_fee_bps ?? 1000, days: 30 });
+    const vp = this.vaultPoolCache;
+    const vaults = vp
+      ? {
+          epoch: vp.epoch ? { iterationId: vp.epoch.iterationId, myTickets: vp.epoch.myTickets, totalTickets: vp.epoch.totalTickets, shareBps: vp.epoch.totalTickets > 0 ? (vp.epoch.myTickets / vp.epoch.totalTickets) * 10_000 : 0, poolUsd: vp.epoch.poolUsd, slotsToClose: vp.epoch.slotsToClose } : null,
+          oneBtc: vp.oneBtc ? { iterationId: vp.oneBtc.iterationId, totalTickets: vp.oneBtc.totalTickets, prizeUsd: vp.oneBtc.prizeUsd, fillBps: vp.oneBtc.fillBps } : null,
+        }
+      : null;
+    const totals = this.wallets.totals();
+    return {
+      wallets: this.wallets.size,
+      fleetUsdc: Number(totals.usdcBase) / 1e6,
+      fleetSol: totals.lamports / 1e9,
+      usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6,
+      satsShares: pos.satsShares.toString(),
+      btc: pos.btc, btcUsd: pos.btcUsd,
+      tokenShares: pos.tokenShares.toString(),
+      rush: pos.rush, rushUsd: pos.rushUsd,
+      hashrateLiquid: pos.hashrateLiquid, hashrateDeferred: pos.hashrateDeferred, tickets: pos.tickets,
+      totalUnclaimedUsd: pos.totalUnclaimedUsd,
+      btcPrice: btcUsd, rushPrice: rushUsd,
+      rate, carry, carrySource, vaults,
+      breakeven: (() => {
+        const life = this.db.lifetimeCash();
+        const unsettled = this.db.unsettledLegs(Number.MAX_SAFE_INTEGER, 100_000).reduce((a, l) => a + l.amount, 0n);
+        // Cost basis: cash out all time, net of what unsettled legs will refund (89%).
+        const cost = Number(life.deployedBase - life.returnedBase) / 1e6 - (Number(unsettled) / 1e6) * (V2_LOSING_TILE_REFUND_BPS.value / 10_000);
+        return { ...breakevenOnCarry({ costBasisUsd: cost, btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6, carry }), lifetimeDeployedUsd: Number(life.deployedBase) / 1e6, lifetimeReturnedUsd: Number(life.returnedBase) / 1e6 };
+      })(),
+      apr: { sats: carry.sats * 365, token: carry.token * 365, satsCompounded: Math.pow(1 + carry.sats, 365) - 1, tokenCompounded: Math.pow(1 + carry.token, 365) - 1 },
+      verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value },
+      projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },
+    };
+  }
+
   /** Snapshot throttle: last slot a row was written, per round. */
   private lastSnapshot: { roundId: number; slot: number } | null = null;
   private shouldSnapshot(roundId: number, slot: number): boolean {
@@ -3512,6 +3752,13 @@ export class Orchestrator {
       }),
     });
 
+    // A round we fired in is settled on its reveal whatever the state machine
+    // is doing: the next Board write can arrive before this event and move
+    // roundId on, and a leg left unsettled is money parked in a deployment
+    // account until the owner's crank (often offline) gets to it.
+    if (reveal.round_id !== this.roundId && this.db.landedWallets(reveal.round_id).length > 0) {
+      void this.selfSettle(reveal.round_id);
+    }
     if (reveal.round_id === this.roundId) {
       if (this.botState === "SETTLING" || this.botState === "CONFIRMING") {
         void this.selfSettle(reveal.round_id).then(() => {
@@ -3535,6 +3782,7 @@ export class Orchestrator {
 
     this.source.on("slot", (u) => {
       this.state.applySlot(u.slot);
+      this.noteSlotTiming(u.slot);
       this.onSlotTick();
     });
 
@@ -3641,6 +3889,10 @@ export class Orchestrator {
     });
 
     this.configSnapshot = this.configFields();
+    if (this.cfg.ALERT_DIGEST_HOURS > 0) {
+      this.digestTimer = setInterval(() => void this.sendDigest(), this.cfg.ALERT_DIGEST_HOURS * 3_600_000);
+      this.digestTimer.unref?.();
+    }
     this.loop.start();
     this.health.start(10_000);
     // Coarse wallet-drift tripwire, every 30s (skips itself in dry mode); the
@@ -3653,6 +3905,7 @@ export class Orchestrator {
       // limits from that read rather than reading all 21 wallets twice.
       void this.jobs.timed("wallet_drift", () => this.checkWalletDrift(), 5_000).then(() => this.refreshLimits());
       this.jobs.timedSync("tick30s_queries", () => {
+        this.checkHoldVerdict();
         this.validateHashrateFormula();
         this.refreshFireOffset();
         this.refreshRivalProfiles();
@@ -3717,6 +3970,7 @@ export class Orchestrator {
     this.candidates.clear();
     this.health.stop();
     this.loop.stop();
+    if (this.digestTimer) clearInterval(this.digestTimer);
     if (this.walletDriftTimer) clearInterval(this.walletDriftTimer);
     if (this.fleetTimer) clearInterval(this.fleetTimer);
     this.vaultManager?.stop();

@@ -118,7 +118,7 @@ function offlineOps(overrides: Partial<TelegramDeps> = {}) {
   const ops = createTelegramOps({ token: "test:token", chatId: CHAT_ID, deps, botInfo: BOT_INFO });
   // Offline transformer: capture outgoing API calls, never hit the network.
   ops.api.config.use(async (_prev, method, payload) => {
-    if (method === "sendMessage") {
+    if (method === "sendMessage" || method === "editMessageText") {
       const p = payload as { chat_id: unknown; text: string };
       sent.push({ chat_id: p.chat_id, text: p.text });
     }
@@ -165,8 +165,19 @@ describe("telegram ops (offline)", () => {
   it("/pnl summarizes the day", async () => {
     const { ops, sent } = offlineOps();
     await ops.bot.handleUpdate(commandUpdate("/pnl", Number(CHAT_ID), 5));
-    expect(sent[0]!.text).toContain("deployed: $35.00");
-    expect(sent[0]!.text).toContain("net: $-26.90");
+    expect(sent[0]!.text).toContain("<b>📊 Today</b>");
+    expect(sent[0]!.text).toMatch(/deployed\s+\$35\.00/);
+    expect(sent[0]!.text).toMatch(/net cash\s+-\$26\.90/);
+    // Tab switch: the button's callback edits the card in place.
+    await ops.bot.handleUpdate({
+      update_id: 6,
+      callback_query: {
+        id: "cq1", chat_instance: "ci", data: "pnl:position",
+        from: { id: Number(CHAT_ID), is_bot: false, first_name: "op" },
+        message: { message_id: 5, date: 1_700_000_000, chat: { id: Number(CHAT_ID), type: "private", first_name: "op" }, text: "x" },
+      },
+    } as never);
+    expect(sent[1]!.text).toContain("<b>💰 Position</b>");
   });
 
   it("/board shows the tiles and my positions", async () => {
