@@ -36,6 +36,15 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.PRICE_MAX_STALE_SLOTS < 400) {
     warn("price_stale_gate", `PRICE_MAX_STALE_SLOTS=${cfg.PRICE_MAX_STALE_SLOTS}: the sponsored oracle feeds heartbeat every ~150 slots, so quotes are rejected at the heartbeat edge; 400 is the intended value`);
   }
+  if (cfg.VAULT_STRATEGY_ENABLED && cfg.VAULT_MAX_TICKETS > 0) {
+    warn("vault_cap", `VAULT_MAX_TICKETS=${cfg.VAULT_MAX_TICKETS}: a hard ticket cap per wallet per draw leaves hashrate idle that the deploy model prices as spent — 0 (uncapped; the marginal-EV rule bounds the buy) is the intended value`);
+  }
+  if (cfg.VAULT_STRATEGY_ENABLED && cfg.VAULT_HASHRATE_FRACTION < 1) {
+    warn("vault_fraction", `VAULT_HASHRATE_FRACTION=${cfg.VAULT_HASHRATE_FRACTION}: spends only part of the hashrate held; the 1-BTC draw now gets an explicit reservation — 1 is the intended value`);
+  }
+  if (!cfg.VAULT_STRATEGY_ENABLED) {
+    warn("vault_off", "VAULT_STRATEGY_ENABLED=false: hashrate is never spent on tickets, and the deploy model then values it at nothing");
+  }
   if (cfg.DEPLOY_CU_LIMIT > 250_000) {
     warn("cu_limit", `DEPLOY_CU_LIMIT=${cfg.DEPLOY_CU_LIMIT}: deploys use ~55–67k CU and a settle ~71k (measured); the priority fee is paid on the limit, so this multiplies the fee on every leg — 150000 is the intended value`);
   }

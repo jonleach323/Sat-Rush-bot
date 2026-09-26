@@ -34,7 +34,8 @@ export interface VaultEngineOpts {
   enabled: boolean;
   dry: boolean;
   /** Opportunity value of one hashrate POINT, in USD (pickiness floor). */
-  hashrateValueUsd: number;
+  /** USD value of one hashrate POINT held back — the opportunity cost of spending it now. A function when it moves with the market. */
+  hashrateValueUsd: number | (() => number);
   /** Epoch dedup uplift (see EPOCH_DEDUP_UPLIFT); 1 = off. */
   epochDedupUplift?: number | undefined;
   /** Epoch reward curve (bps by rank). V1's rank curve by default; EPOCH_EQUAL_CURVE_BPS under V2. */
@@ -82,7 +83,41 @@ export class VaultEngine {
     return this.played.has(this.key(kind, iterationId));
   }
 
-  async evaluate(snap: VaultSnapshot): Promise<VaultEvalResult> {
+  private pointValue(): number {
+    const v = typeof this.opts.hashrateValueUsd === "function" ? this.opts.hashrateValueUsd() : this.opts.hashrateValueUsd;
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+
+  /** Per-iteration ticket cap for the selector: 0 means uncapped (the marginal-EV rule is the bound). */
+  private cap(): number {
+    return this.opts.maxTickets > 0 ? this.opts.maxTickets : 1e12;
+  }
+
+  /**
+   * Hashrate POINTS this wallet would spend on `snap` right now at the EV
+   * optimum — the reservation the manager holds back from an earlier,
+   * worse vault. 0 when the vault offers nothing.
+   */
+  plannedPoints(snap: VaultSnapshot): number {
+    if (!snap.open) return 0;
+    const d = selectVaultTickets(
+      buildVaultContext({
+        kind: snap.kind,
+        poolValueUsd: snap.poolValueUsd,
+        totalTickets: snap.totalTickets,
+        myTickets: this.opts.myTickets(snap.kind, snap.iterationId),
+        hashratePointsAvailable: this.opts.hashrateAvailable(),
+        ticketPriceHashrate: this.opts.ticketPriceHashrate,
+        hashrateValueUsdPerPoint: this.pointValue(),
+        maxTickets: this.cap(),
+        dedupUplift: this.opts.epochDedupUplift,
+        curve: this.opts.epochCurve,
+      }),
+    );
+    return d.tickets * this.opts.ticketPriceHashrate;
+  }
+
+  async evaluate(snap: VaultSnapshot, reservedPoints = 0): Promise<VaultEvalResult> {
     const none = (skipped: string): VaultEvalResult => ({
       decision: null,
       acted: false,
@@ -94,7 +129,8 @@ export class VaultEngine {
     if (!snap.open) return none("iteration_not_open");
     if (this.hasPlayed(snap.kind, snap.iterationId)) return none("already_played");
 
-    const spendablePoints = this.opts.hashrateAvailable() * this.opts.hashrateFraction;
+    // Everything held is spendable except what a better vault has reserved.
+    const spendablePoints = Math.max(0, this.opts.hashrateAvailable() * this.opts.hashrateFraction - reservedPoints);
     const decision = selectVaultTickets(
       buildVaultContext({
         kind: snap.kind,
@@ -103,8 +139,8 @@ export class VaultEngine {
         myTickets: this.opts.myTickets(snap.kind, snap.iterationId),
         hashratePointsAvailable: spendablePoints,
         ticketPriceHashrate: this.opts.ticketPriceHashrate,
-        hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
-        maxTickets: this.opts.maxTickets,
+        hashrateValueUsdPerPoint: this.pointValue(),
+        maxTickets: this.cap(),
         dedupUplift: this.opts.epochDedupUplift,
         curve: this.opts.epochCurve,
       }),

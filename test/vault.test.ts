@@ -317,3 +317,43 @@ describe("epoch dedup uplift", () => {
     expect(withUplift).toBeGreaterThan(11); // ~$11.4, matching the simulation
   });
 });
+
+describe("vault engine: uncapped by default, reserves for a better filling 1-BTC draw", () => {
+  it("spends the whole balance when uncapped, and holds back what a reserved vault would take", async () => {
+    const { VaultEngine } = await import("../src/exec/vault-engine.js");
+    const bought: number[] = [];
+    const engine = new VaultEngine({
+      enabled: true, dry: false, hashrateValueUsd: 0, epochDedupUplift: 1, epochCurve: undefined,
+      ticketPriceHashrate: 100, maxTickets: 0, hashrateFraction: 1,
+      hashrateAvailable: () => 50_000, // 500 tickets' worth
+      myTickets: () => 0,
+      buy: async (_k: string, _i: number, t: number) => { bought.push(t); return "sig"; },
+      log: () => undefined,
+    } as never);
+    const epoch = { kind: "epoch" as const, iterationId: 1, open: true, totalTickets: 900_000, poolValueUsd: 10_000 };
+    const oneBtc = { kind: "one_btc" as const, iterationId: 3, open: true, totalTickets: 230_000, poolValueUsd: 85_000 };
+    const planned = engine.plannedPoints(oneBtc);
+    expect(planned).toBe(50_000); // at zero opportunity cost the 1-BTC optimum is the whole balance
+    await engine.evaluate(epoch, 20_000);
+    expect(bought[0]).toBe(300); // 50k − 20k reserved = 30k points = 300 tickets, not the old cap of 250
+  });
+});
+
+describe("epochCarryValuePerTicket — the opportunity cost that spreads a backlog over draws", () => {
+  it("falls as the fleet's own steady spend grows the field, and a big backlog stops before swamping one draw", async () => {
+    const { epochCarryValuePerTicket, expectedWinningsUsd, EPOCH_EQUAL_CURVE_BPS } = await import("../src/strategy/vault.js");
+    const base = { poolUsd: 40_000, othersField: 900_000, wallets: 21, uplift: 1.37 };
+    const light = epochCarryValuePerTicket({ ...base, perWalletSteadyTickets: 100 });
+    const heavy = epochCarryValuePerTicket({ ...base, perWalletSteadyTickets: 10_000 });
+    expect(light).toBeGreaterThan(heavy);
+    expect(light).toBeCloseTo((0.9 * 40_000 / (900_000 + 2_100)) * Math.pow(1 - 100 / 902_100, 20) * 1.37, 9);
+    // A wallet holding 10,000 tickets' worth (the 2026-09-26 backlog per wallet) against a
+    // 347k field: the marginal ticket in THIS draw sinks below the carried value before the
+    // backlog is spent, so the greedy leaves hashrate for next week.
+    const carry = epochCarryValuePerTicket({ poolUsd: 40_000, othersField: 900_000, wallets: 21, perWalletSteadyTickets: 3_000, uplift: 1.37 });
+    const marginalAt = (mine: number) =>
+      expectedWinningsUsd(mine + 1, 347_000, 15_475, "epoch", 1.37, EPOCH_EQUAL_CURVE_BPS) - expectedWinningsUsd(mine, 347_000, 15_475, "epoch", 1.37, EPOCH_EQUAL_CURVE_BPS);
+    expect(marginalAt(0)).toBeGreaterThan(carry);
+    expect(marginalAt(10_000)).toBeLessThan(marginalAt(0));
+  });
+});

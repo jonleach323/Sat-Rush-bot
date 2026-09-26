@@ -16,6 +16,12 @@ const num = (n: number, d = 0) => n.toLocaleString("en-US", { minimumFractionDig
 const signed = (n: number, d = 2) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d })}`;
 const pctd = (x: number) => `${(x * 100).toFixed(2)}%/d`;
 const base = (v: bigint) => Number(v) / 1e6;
+/** Share counts run to 14 digits; show them compactly so the table keeps its width. */
+const compact = (n: number) => {
+  const a = Math.abs(n);
+  for (const [d, s] of [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]] as const) if (a >= d) return `${(n / d).toFixed(2)}${s}`;
+  return num(n);
+};
 
 /** Two-column table: labels left, values right, padded to one width. */
 function table(rows: (readonly [string, string])[], width = 30): string {
@@ -44,25 +50,32 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
       if (pnl.unsettled && pnl.unsettled.legs > 0) rows.push(["unsettled legs", `${pnl.unsettled.legs} · ${money(pnl.unsettled.grossUsd)}`]);
       if (pnl.sharesMarkedUsd !== undefined) rows.push(["shares won", signed(pnl.sharesMarkedUsd)]);
       if (pnl.markedNet !== undefined) rows.push(["marked net", money(base(pnl.markedNet))]);
-      return `<b>📊 Today</b> · ${esc(pnl.date)} UTC\n${table(rows)}` +
+      return `<b>📊 Today</b> · ${esc(pnl.date)} UTC\n${table(rows)}\n` +
         (pnl.unsettled && pnl.unsettled.legs > 0 ? `<i>unsettled legs sit in their deployment accounts until settled; 89% comes back</i>` : "");
     }
     case "position": {
       if (!pos) return "<b>💰 Position</b>\n<i>not available yet</i>";
       const rows: (readonly [string, string])[] = [
+        ...(pos.totalUsd !== undefined
+          ? [
+              ["TOTAL", money(pos.totalUsd)] as const,
+              ...(pos.hashrateUsd !== undefined && pos.hashrateUsd > 0 ? [["  + hashrate ≈", money(pos.hashrateUsd)] as const, ["  = with hashrate", money(pos.totalUsd + pos.hashrateUsd)] as const] : []),
+              ["", ""] as const,
+            ]
+          : []),
         ["USDC in wallets", money(pos.fleetUsdc)],
         ["USDC unclaimed", money(pos.usdcUnclaimed)],
-        ["SOL", num(pos.fleetSol, 3)],
+        ["SOL", pos.fleetSolUsd !== undefined ? `${num(pos.fleetSol, 3)} · ${money(pos.fleetSolUsd)}` : num(pos.fleetSol, 3)],
         ["", ""],
-        ["BTC shares", num(Number(pos.satsShares))],
+        ["BTC shares", compact(Number(pos.satsShares))],
         ["  = BTC", num(pos.btc, 6)],
         ["  ≈ USD", money(pos.btcUsd)],
-        ["RUSH shares", num(Number(pos.tokenShares))],
+        ["RUSH shares", compact(Number(pos.tokenShares))],
         ["  = RUSH", num(pos.rush, 3)],
         ["  ≈ USD", money(pos.rushUsd)],
         ["", ""],
-        ["hashrate", num(pos.hashrateLiquid)],
-        ["  deferred", num(pos.hashrateDeferred)],
+        ["hashrate", compact(pos.hashrateLiquid)],
+        ["  deferred", compact(pos.hashrateDeferred)],
         ["  ≈ tickets", num(pos.tickets, 1)],
       ];
       if (pos.vaults?.epoch) {
@@ -75,8 +88,8 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         rows.push([`1-BTC #${o.iterationId}`, `${num(o.totalTickets)} tix · ${(o.fillBps / 100).toFixed(1)}% full`]);
       }
       rows.push(["", ""], ["unclaimed ≈", money(pos.totalUnclaimedUsd)]);
-      return `<b>💰 Position</b> · ${pos.wallets} wallets · BTC ${money(pos.btcPrice, 0)} · RUSH ${money(pos.rushPrice)}\n${table(rows)}` +
-        `<i>deferred hashrate (35%) is released by a sats claim; held, not claimed</i>`;
+      return `<b>💰 Position</b> · ${pos.wallets} wallets · BTC ${money(pos.btcPrice, 0)} · RUSH ${money(pos.rushPrice)}\n${table(rows)}\n` +
+        `<i>TOTAL is wallets + SOL + everything unclaimed. Hashrate is marked at a ticket carried to next week's draw; the deferred part is released by a BTC claim.</i>`;
     }
     case "hold": {
       if (!pos) return "<b>📈 Unclaimed, bot stopped</b>\n<i>not available yet</i>";
@@ -102,7 +115,7 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         ["holdings now", money(pos.breakeven.holdingsUsd)],
         ["break-even", breakevenText(pos.breakeven)],
       ];
-      return `<b>📈 Unclaimed, bot stopped</b> · what the holdings earn on their own\n${t}${table(rows)}` +
+      return `<b>📈 Unclaimed, bot stopped</b> · what the holdings earn on their own\n${t}${table(rows)}\n` +
         `<i>vault carry ${pctd(pos.carry.sats)} BTC · ${pctd(pos.carry.token)} RUSH (${pos.carrySource}): the exit fees of those who claim, paid to those who stay; prices held. While the bot runs it adds +${num(r.btcPerDay, 6)} BTC · +${num(r.rushPerDay, 3)} RUSH a day at the last ${r.sampleHours.toFixed(0)} h rate.</i>`;
     }
     case "verdict": {
@@ -116,12 +129,15 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         ["BTC", `${v.btc.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM"} ${signed(Math.abs(v.btc.holdEdgeUsd)).replace("+", "")}`],
         ["RUSH", `${v.rush.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM+STAKE"} ${signed(Math.abs(v.rush.holdEdgeUsd)).replace("+", "")}`],
         ["", ""],
+        ...(v.deferredHashrate && v.deferredHashrate > 0
+          ? [["BTC claim releases", `${num(v.deferredHashrate)} hashrate ≈ ${money(v.deferredReleaseUsd ?? 0)}`] as const]
+          : []),
         ["carry now", `${pctd(pos.carry.sats)} · ${pctd(pos.carry.token)}`],
         [`claim wins if <  (${v.days}d)`, `${pctd(v.btc.breakevenCarryDaily)} · ${pctd(v.rush.breakevenCarryDaily)}`],
         ["claim wins if <  (1y)", `${pctd(v.breakevenCarryDailyYear.btc)} · ${pctd(v.breakevenCarryDailyYear.rush)}`],
       ];
-      return `<b>⚖️ Hold vs claim</b> · ${v.days} days · ${v.holdWins ? "HOLD wins" : "CLAIMING wins"}\n${t}${table(rows)}` +
-        `<i>claim pays the 10% exit fee once; RUSH then stakes at ${pctd(v.stakingYieldDaily)}; the bot never claims by itself</i>`;
+      return `<b>⚖️ Hold vs claim</b> · ${v.days} days · ${v.holdWins ? "HOLD wins" : "CLAIMING wins"}\n${t}${table(rows)}\n` +
+        `<i>claim pays the 10% exit fee once and a BTC claim releases the deferred hashrate (counted in "claim"); RUSH then stakes at ${pctd(v.stakingYieldDaily)}; the bot never claims by itself</i>`;
     }
     default:
       return "";

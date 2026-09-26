@@ -351,3 +351,34 @@ export function selectVaultTickets(ctx: VaultTicketContext): VaultDecision {
   const reason = buy === budget ? "cap_reached" : "ok";
   return { tickets: buy, evUsd, winShareAfter: winShare(ctx.myTickets + buy), reason };
 }
+
+/**
+ * What one epoch ticket is worth if the hashrate is carried to the NEXT
+ * draw instead of spent now: the per-wallet marginal ticket value there,
+ * with every fleet wallet also spending its steady weekly accrual.
+ *
+ *   value = payout · pool / F · (1 − t/F)^(winners−1) · uplift,
+ *   F = othersField + wallets · t,  t = steady tickets per wallet per draw.
+ *
+ * This is the opportunity cost of a point today. Spending only while this
+ * draw's marginal ticket beats it equalises the margin across draws, which
+ * spreads a backlog (259k tickets' worth against a 347k field on
+ * 2026-09-26) over several epochs instead of buying 40% of one field and
+ * mostly competing with our own wallets.
+ */
+export function epochCarryValuePerTicket(input: {
+  poolUsd: number;
+  othersField: number;
+  wallets: number;
+  perWalletSteadyTickets: number;
+  uplift: number;
+  payoutFraction?: number;
+  winners?: number;
+}): number {
+  const k = Math.max(1, input.winners ?? 21);
+  const t = Math.max(0, input.perWalletSteadyTickets);
+  const F = Math.max(1, input.othersField + Math.max(1, input.wallets) * t);
+  if (!(input.poolUsd > 0)) return 0;
+  const share = Math.min(1, t / F);
+  return ((input.payoutFraction ?? 0.9) * input.poolUsd / F) * Math.pow(1 - share, k - 1) * Math.max(1, input.uplift);
+}

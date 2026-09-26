@@ -167,24 +167,33 @@ export function holdVsClaim(input: {
   stakingYieldDaily: number;
   exitFeeBps: number;
   days: number;
+  /**
+   * USD value of the deferred hashrate a full BTC claim releases (claim_sats
+   * converts Miner.unclaimed_hashrate into spendable hashrate pro rata to
+   * the shares claimed). A one-off benefit on the claim side.
+   */
+  btcClaimReleasesUsd?: number | undefined;
 }): HoldVerdict {
   const d = input.days;
   const keep = 1 - input.exitFeeBps / 10_000;
-  const leg = (usd: number, carry: number, afterClaimDaily: number): HoldVerdictLeg => {
+  const leg = (usd: number, carry: number, afterClaimDaily: number, bonusUsd: number): HoldVerdictLeg => {
     const heldUsd = usd * Math.pow(1 + carry, d);
-    const claimedUsd = usd * keep * Math.pow(1 + afterClaimDaily, d);
-    // (1+c)^d = keep·(1+y)^d  ⇒  c = keep^(1/d)·(1+y) − 1
-    const breakevenCarryDaily = Math.pow(keep, 1 / d) * (1 + afterClaimDaily) - 1;
+    const claimedUsd = usd * keep * Math.pow(1 + afterClaimDaily, d) + bonusUsd;
+    // (1+c)^d = keep·(1+y)^d + bonus/usd  ⇒  c = (keep·(1+y)^d + r)^(1/d) − 1
+    const r = usd > 0 ? bonusUsd / usd : 0;
+    const breakevenCarryDaily = Math.pow(keep * Math.pow(1 + afterClaimDaily, d) + r, 1 / d) - 1;
     return { heldUsd, claimedUsd, holdEdgeUsd: heldUsd - claimedUsd, breakevenCarryDaily };
   };
-  const btc = leg(input.btcUsd, input.carry.sats, 0);
-  const rush = leg(input.rushUsd, input.carry.token, input.stakingYieldDaily);
+  const release = Math.max(0, input.btcClaimReleasesUsd ?? 0);
+  const btc = leg(input.btcUsd, input.carry.sats, 0, release);
+  const rush = leg(input.rushUsd, input.carry.token, input.stakingYieldDaily, 0);
+  const rYear = input.btcUsd > 0 ? release / input.btcUsd : 0;
   return {
     days: d,
     btc,
     rush,
     breakevenCarryDailyYear: {
-      btc: Math.pow(keep, 1 / 365) - 1,
+      btc: Math.pow(keep + rYear, 1 / 365) - 1,
       rush: Math.pow(keep, 1 / 365) * (1 + input.stakingYieldDaily) - 1,
     },
     holdWins: btc.holdEdgeUsd + rush.holdEdgeUsd >= 0,

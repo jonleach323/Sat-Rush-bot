@@ -616,7 +616,11 @@ const schema = z
      * separately limited by VAULT_HASHRATE_FRACTION and the balance itself. */
     VAULT_MAX_TICKETS: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(250),
+      // 0 = uncapped (default): the marginal-EV rule and the balance bound the
+      // buy. 250 per wallet per draw left most of a streak-capped fleet's
+      // hashrate — thousands of tickets a week — idle while the deploy model
+      // priced it as spent.
+      z.coerce.number().int().min(0).default(0),
     ),
     /** Fraction of the wallet's claimable hashrate the vault strategy may spend. */
     /** Credit a deploy with the option value of keeping the streak alive.
@@ -874,8 +878,13 @@ const schema = z
     ),
     VAULT_HASHRATE_FRACTION: z.preprocess(
       emptyToUndef,
-      z.coerce.number().min(0).max(1).default(0.5),
+      // 1 (default): spend what is held. The old 0.5 stood in for saving
+      // hashrate for the 1-BTC draw; that is now an explicit reservation
+      // (VAULT_ONE_BTC_RESERVE_FILL_BPS) sized to the 1-BTC optimum.
+      z.coerce.number().min(0).max(1).default(1),
     ),
+    /** From this 1-BTC fill (bps) hashrate is reserved for the 1-BTC draw when its ticket beats the epoch's. */
+    VAULT_ONE_BTC_RESERVE_FILL_BPS: z.preprocess(emptyToUndef, z.coerce.number().int().min(0).max(10_000).default(5_000)),
     /** Absolute FLOOR for the epoch entry window, in slots. Mainnet iterations
      * run for hours, so the fraction below is what actually sets the window;
      * this floor only matters on short (devnet) iterations. The old default of

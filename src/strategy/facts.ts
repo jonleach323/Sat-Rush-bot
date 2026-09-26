@@ -154,13 +154,9 @@ export const STRIKE_PAYOUT_FRACTION = fact(0.9333, "fraction", {
  * sample size AND is the conservative direction for anything that makes
  * farming look good.
  */
-export const UNCLAIMED_HASHRATE_UPLIFT = fact(1.179, "multiple", {
-  kind: "measured",
-  source: "unclaimed_hashrate_earned / hashrate_earned over PublicDeploySettled",
-  at: "2026-08-14",
-  n: 1875,
-  halfLifeDays: null,
-  recheck: "pnpm accrual-ev",
+export const UNCLAIMED_HASHRATE_UPLIFT = fact(1.35, "multiple", {
+  kind: "derived",
+  from: "SatrushConfig.unclaimed_hashrate_bps via @satrush/client 0.1.15: PublicDeploySettled.unclaimedHashrateEarned = hashrate_earned · bps / 10_000 (3500 → 1.35), a bonus on top released pro rata by claim_sats. The 1.179 measured on V1 settles (n=1875, 2026-08-14) was the V1 program.",
 });
 
 /**
