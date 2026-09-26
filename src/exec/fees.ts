@@ -48,7 +48,10 @@ export class FeeEstimator {
         this.rpcEstimate = 0;
         return;
       }
-      this.rpcEstimate = values[Math.floor(values.length * 0.75)] ?? values.at(-1)!;
+      // p90 of the per-slot minimum landing fee for these locked accounts:
+      // a deploy competes for the Round write lock in the cutoff slot, the
+      // busiest slot of the round, so the median slot understates it.
+      this.rpcEstimate = values[Math.floor(values.length * 0.9)] ?? values.at(-1)!;
     } catch {
       /* endpoint without the API or transient failure — keep last estimate */
     }

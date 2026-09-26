@@ -57,7 +57,9 @@ import {
   minerPda,
   oneBtcVaultIterationPda,
   oneBtcVaultPda,
+  boardPda,
   publicDeploymentPda,
+  roundPda,
   satrushConfigPda,
   satsVaultPda,
   tokenVaultPda,
@@ -604,6 +606,7 @@ export class Orchestrator {
       jitoUrl: cfg.JITO_BLOCK_ENGINE_URL,
       logger,
       mainnetConfirmed: cfg.MAINNET_CONFIRM === "yes",
+      statusBatchWindowMs: 20,
     });
 
     const watch = [
@@ -906,6 +909,15 @@ export class Orchestrator {
    */
   private async preArm(cutoff: number): Promise<void> {
     this.log.debug({ roundId: this.roundId, cutoff }, "pre-arm: final re-pricing");
+    // Price the round's write locks: every deploy locks the Board and this
+    // Round, and at cutoff the fee decides who lands in the slot. Without
+    // the locked accounts the estimate read the global market and sat at
+    // the 1,000 µL/CU floor, losing legs to the next slot.
+    if (this.roundId !== null) {
+      const programId = new PublicKey(this.cfg.PROGRAM_ID);
+      await this.jobs.timed("fee_refresh", () => this.feeEstimator.refreshFromRpc(this.connection, [boardPda(programId), roundPda(this.roundId!, programId)]), 1_500);
+      this.log.info({ roundId: this.roundId, feeMicroLamports: this.feeEstimator.currentMicroLamportsPerCu() }, "priority fee priced on the round's write locks");
+    }
     if (this.cfg.GAME_VERSION === "v2") this.jobs.timedSync("ev_diagnostics", () => this.evDiagnostics(), 250);
     await this.refreshNow("pre_arm", true);
   }

@@ -36,6 +36,12 @@ export function lintConfig(cfg: Config, ctx: ConfigLintContext = {}): ConfigFind
   if (cfg.PRICE_MAX_STALE_SLOTS < 400) {
     warn("price_stale_gate", `PRICE_MAX_STALE_SLOTS=${cfg.PRICE_MAX_STALE_SLOTS}: the sponsored oracle feeds heartbeat every ~150 slots, so quotes are rejected at the heartbeat edge; 400 is the intended value`);
   }
+  if (cfg.DEPLOY_CU_LIMIT > 250_000) {
+    warn("cu_limit", `DEPLOY_CU_LIMIT=${cfg.DEPLOY_CU_LIMIT}: deploys use ~55–67k CU and a settle ~71k (measured); the priority fee is paid on the limit, so this multiplies the fee on every leg — 150000 is the intended value`);
+  }
+  if (cfg.FIRE_OFFSET_TARGET_LAND_PROB < 0.98 && cfg.FLEET_SIZE > 1) {
+    warn("land_target", `FIRE_OFFSET_TARGET_LAND_PROB=${cfg.FIRE_OFFSET_TARGET_LAND_PROB} is per leg: a ${Math.min(cfg.FLEET_SIZE, 21)}-leg round then expects ${((1 - cfg.FIRE_OFFSET_TARGET_LAND_PROB) * Math.min(cfg.FLEET_SIZE, 21)).toFixed(1)} missed legs every round — 0.99 is the intended value`);
+  }
   if (cfg.FIRE_OFFSET_CEILING < 10) {
     warn("fire_offset_ceiling", `FIRE_OFFSET_CEILING=${cfg.FIRE_OFFSET_CEILING}: at mainnet's ~267 ms slots the adaptive offset cannot open past ${(cfg.FIRE_OFFSET_CEILING * 0.267).toFixed(1)} s before cutoff; a 21-leg send needs room to widen after a miss — 12 is the intended value`);
   }

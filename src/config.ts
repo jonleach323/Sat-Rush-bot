@@ -254,7 +254,8 @@ const schema = z
      * quantile of land latency at this probability (higher = more cushion). */
     FIRE_OFFSET_TARGET_LAND_PROB: z.preprocess(
       emptyToUndef,
-      z.coerce.number().gt(0).max(1).default(0.95),
+      // Per LEG: a 21-leg fleet round at 0.95 expects one miss a round by design.
+      z.coerce.number().gt(0).max(1).default(0.99),
     ),
     /** Extra slots added to the latency quantile (program-cutoff safety). */
     FIRE_OFFSET_CUSHION_SLOTS: z.preprocess(
@@ -404,9 +405,13 @@ const schema = z
       emptyToUndef,
       z.coerce.number().int().positive().default(1_000_000),
     ),
+    /** Compute-unit limit on deploy/settle/claim transactions. The priority fee
+     * is paid on the LIMIT, not on usage. Measured on mainnet 2026-09-26:
+     * deploys 54,772–66,766 CU, settle 71,188 CU (getTransaction on the
+     * fleet's own signatures). 150,000 is 2.2× the heaviest. */
     DEPLOY_CU_LIMIT: z.preprocess(
       emptyToUndef,
-      z.coerce.number().int().positive().default(400_000),
+      z.coerce.number().int().positive().default(150_000),
     ),
     JITO_TIP_ACCOUNT: optionalPubkey,
     /** Jito tip accounts (comma list). One is picked at random per fire to avoid
