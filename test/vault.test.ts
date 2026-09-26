@@ -338,3 +338,22 @@ describe("vault engine: uncapped by default, reserves for a better filling 1-BTC
     expect(bought[0]).toBe(300); // 50k − 20k reserved = 30k points = 300 tickets, not the old cap of 250
   });
 });
+
+describe("epochCarryValuePerTicket — the opportunity cost that spreads a backlog over draws", () => {
+  it("falls as the fleet's own steady spend grows the field, and a big backlog stops before swamping one draw", async () => {
+    const { epochCarryValuePerTicket, expectedWinningsUsd, EPOCH_EQUAL_CURVE_BPS } = await import("../src/strategy/vault.js");
+    const base = { poolUsd: 40_000, othersField: 900_000, wallets: 21, uplift: 1.37 };
+    const light = epochCarryValuePerTicket({ ...base, perWalletSteadyTickets: 100 });
+    const heavy = epochCarryValuePerTicket({ ...base, perWalletSteadyTickets: 10_000 });
+    expect(light).toBeGreaterThan(heavy);
+    expect(light).toBeCloseTo((0.9 * 40_000 / (900_000 + 2_100)) * Math.pow(1 - 100 / 902_100, 20) * 1.37, 9);
+    // A wallet holding 10,000 tickets' worth (the 2026-09-26 backlog per wallet) against a
+    // 347k field: the marginal ticket in THIS draw sinks below the carried value before the
+    // backlog is spent, so the greedy leaves hashrate for next week.
+    const carry = epochCarryValuePerTicket({ poolUsd: 40_000, othersField: 900_000, wallets: 21, perWalletSteadyTickets: 3_000, uplift: 1.37 });
+    const marginalAt = (mine: number) =>
+      expectedWinningsUsd(mine + 1, 347_000, 15_475, "epoch", 1.37, EPOCH_EQUAL_CURVE_BPS) - expectedWinningsUsd(mine, 347_000, 15_475, "epoch", 1.37, EPOCH_EQUAL_CURVE_BPS);
+    expect(marginalAt(0)).toBeGreaterThan(carry);
+    expect(marginalAt(10_000)).toBeLessThan(marginalAt(0));
+  });
+});

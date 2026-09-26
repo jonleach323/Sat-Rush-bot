@@ -8,7 +8,7 @@ const pnl: PnlSummary = {
   unsettled: { legs: 21, grossUsd: 21, rounds: 1 }, sharesMarkedUsd: 12.3, markedNet: usdToBase(-123.6),
 };
 const pos: PositionReport = {
-  wallets: 21, fleetUsdc: 35_120, fleetSol: 1.049, usdcUnclaimed: 12.3,
+  wallets: 21, fleetUsdc: 35_120, fleetSol: 1.049, usdcUnclaimed: 12.3, fleetSolUsd: 122.7, hashrateUsd: 4_210, totalUsd: 37_384,
   satsShares: "1234567", btc: 0.01234, btcUsd: 1_055, tokenShares: "98765", rush: 24.5, rushUsd: 1_062,
   hashrateLiquid: 12_345, hashrateDeferred: 3_210, tickets: 155.55, totalUnclaimedUsd: 2_129.3, btcPrice: 85_500, rushPrice: 43.34,
   rate: { sampleHours: 22.3, settlements: 480, btcPerDay: 0.00041, rushPerDay: 0.82, hashratePerDay: 410, usdNetPerDay: -0.9, grossPerDay: 640 },
@@ -38,12 +38,15 @@ describe("/pnl cards", () => {
   });
   it("position shows shares, their conversions, hashrate as tickets and the live draws", () => {
     const p = renderPnlCard("position", pnl, pos);
-    expect(p).toMatch(/BTC shares\s+1,234,567/);
+    expect(p).toMatch(/BTC shares\s+1\.23M/); // compact: 14-digit share counts no longer break the table
     expect(p).toMatch(/= BTC\s+0\.012340/);
     expect(p).toMatch(/≈ tickets\s+155\.6/);
     expect(p).toMatch(/epoch #16\s+1,234 \/ 900,000 \(0\.14%\)/);
     expect(p).toMatch(/1-BTC #3\s+231,393 tix · 12\.7% full/);
     expect(p).toMatch(/unclaimed ≈\s+\$2,129\.30/);
+    expect(p).toMatch(/TOTAL\s+\$37,384\.00/);
+    expect(p).toMatch(/= with hashrate\s+\$41,594\.00/);
+    expect(p).toMatch(/<\/pre>\n<i>/); // footnote on its own line, not glued to the last row
   });
   it("hold and verdict tabs carry the projection and the break-even carry", () => {
     const h = renderPnlCard("hold", pnl, pos);

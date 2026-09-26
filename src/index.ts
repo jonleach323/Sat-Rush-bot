@@ -76,7 +76,7 @@ import {
   readableCommitments,
   type AutomationCommitment,
 } from "./ingest/automations.js";
-import { btcBaseToUsd, expectedWinningsUsd, type VaultKind, EPOCH_REWARD_CURVE_BPS } from "./strategy/vault.js";
+import { btcBaseToUsd, expectedWinningsUsd, type VaultKind, EPOCH_REWARD_CURVE_BPS, epochCarryValuePerTicket } from "./strategy/vault.js";
 import {
   epochAction,
   epochWinIndex,
@@ -2432,7 +2432,9 @@ export class Orchestrator {
       return new VaultEngine({
         enabled: true, // gate is the manager itself (only started when enabled)
         dry: this.cfg.EXECUTION_MODE === "dry",
-        hashrateValueUsd: this.cfg.HASHRATE_VALUE_USD,
+        // Opportunity cost of a point: its value carried to next week's draw
+        // (marginal equalisation across draws), unless configured explicitly.
+        hashrateValueUsd: () => (this.cfg.HASHRATE_VALUE_USD > 0 ? this.cfg.HASHRATE_VALUE_USD : this.hashrateCarryValuePerPoint()),
         epochDedupUplift: this.cfg.EPOCH_DEDUP_UPLIFT,
         epochCurve: this.epochCurve(),
         ticketPriceHashrate: this.cfg.VAULT_HASHRATE_PER_TICKET,
@@ -3596,6 +3598,33 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * USD value of one hashrate POINT carried to the next epoch draw: the
+   * per-wallet marginal ticket there, with every wallet also spending its
+   * steady accrual (vault.ts epochCarryValuePerTicket), ÷ points per ticket.
+   * The next draw is priced like this one's projected close. 0 when the
+   * epoch cannot be priced (then the engine spends on any positive value).
+   */
+  hashrateCarryValuePerPoint(): number {
+    const econ = this.epochTicketEconomics();
+    if (!econ) return 0;
+    const iterationSlots = Number(this.state.satrushConfig?.epoch_vault_iteration_duration?.toString() ?? 0);
+    const iterationDays = (iterationSlots * this.slotSeconds()) / 86_400;
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+    const acc = this.db.accrualSince(since);
+    const spanH = acc.firstAt && acc.lastAt ? Math.max(1, (Date.parse(acc.lastAt + "Z") - Date.parse(acc.firstAt + "Z")) / 3_600_000) : 24;
+    const wallets = Math.max(1, Math.min(this.wallets.size, TILES_COUNT));
+    const perWalletTickets = ((acc.hashrateEarned * (24 / spanH) * iterationDays) / wallets) / VAULT_HASHRATE_PER_TICKET.value;
+    const perTicket = epochCarryValuePerTicket({
+      poolUsd: econ.projectedPool,
+      othersField: econ.projectedField,
+      wallets,
+      perWalletSteadyTickets: perWalletTickets,
+      uplift: this.cfg.EPOCH_DEDUP_UPLIFT,
+    });
+    return perTicket / VAULT_HASHRATE_PER_TICKET.value;
+  }
+
   /** The fleet's unclaimed position and a 30-day hold projection at the current run rate (Telegram /pnl, /position). */
   positionReport(): PositionReport {
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
@@ -3639,10 +3668,15 @@ export class Orchestrator {
         }
       : null;
     const totals = this.wallets.totals();
+    const fleetSolUsd = (totals.lamports / 1e9) * this.prices.solUsd();
+    const hashrateUsd = pos.hashrateLiquid * this.hashrateCarryValuePerPoint();
     return {
       wallets: this.wallets.size,
       fleetUsdc: Number(totals.usdcBase) / 1e6,
       fleetSol: totals.lamports / 1e9,
+      fleetSolUsd,
+      hashrateUsd,
+      totalUsd: Number(totals.usdcBase) / 1e6 + fleetSolUsd + pos.totalUnclaimedUsd,
       usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6,
       satsShares: pos.satsShares.toString(),
       btc: pos.btc, btcUsd: pos.btcUsd,

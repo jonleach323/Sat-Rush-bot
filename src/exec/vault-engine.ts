@@ -34,7 +34,8 @@ export interface VaultEngineOpts {
   enabled: boolean;
   dry: boolean;
   /** Opportunity value of one hashrate POINT, in USD (pickiness floor). */
-  hashrateValueUsd: number;
+  /** USD value of one hashrate POINT held back — the opportunity cost of spending it now. A function when it moves with the market. */
+  hashrateValueUsd: number | (() => number);
   /** Epoch dedup uplift (see EPOCH_DEDUP_UPLIFT); 1 = off. */
   epochDedupUplift?: number | undefined;
   /** Epoch reward curve (bps by rank). V1's rank curve by default; EPOCH_EQUAL_CURVE_BPS under V2. */
@@ -82,6 +83,11 @@ export class VaultEngine {
     return this.played.has(this.key(kind, iterationId));
   }
 
+  private pointValue(): number {
+    const v = typeof this.opts.hashrateValueUsd === "function" ? this.opts.hashrateValueUsd() : this.opts.hashrateValueUsd;
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+
   /** Per-iteration ticket cap for the selector: 0 means uncapped (the marginal-EV rule is the bound). */
   private cap(): number {
     return this.opts.maxTickets > 0 ? this.opts.maxTickets : 1e12;
@@ -102,7 +108,7 @@ export class VaultEngine {
         myTickets: this.opts.myTickets(snap.kind, snap.iterationId),
         hashratePointsAvailable: this.opts.hashrateAvailable(),
         ticketPriceHashrate: this.opts.ticketPriceHashrate,
-        hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
+        hashrateValueUsdPerPoint: this.pointValue(),
         maxTickets: this.cap(),
         dedupUplift: this.opts.epochDedupUplift,
         curve: this.opts.epochCurve,
@@ -133,7 +139,7 @@ export class VaultEngine {
         myTickets: this.opts.myTickets(snap.kind, snap.iterationId),
         hashratePointsAvailable: spendablePoints,
         ticketPriceHashrate: this.opts.ticketPriceHashrate,
-        hashrateValueUsdPerPoint: this.opts.hashrateValueUsd,
+        hashrateValueUsdPerPoint: this.pointValue(),
         maxTickets: this.cap(),
         dedupUplift: this.opts.epochDedupUplift,
         curve: this.opts.epochCurve,
