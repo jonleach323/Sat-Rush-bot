@@ -317,3 +317,24 @@ describe("epoch dedup uplift", () => {
     expect(withUplift).toBeGreaterThan(11); // ~$11.4, matching the simulation
   });
 });
+
+describe("vault engine: uncapped by default, reserves for a better filling 1-BTC draw", () => {
+  it("spends the whole balance when uncapped, and holds back what a reserved vault would take", async () => {
+    const { VaultEngine } = await import("../src/exec/vault-engine.js");
+    const bought: number[] = [];
+    const engine = new VaultEngine({
+      enabled: true, dry: false, hashrateValueUsd: 0, epochDedupUplift: 1, epochCurve: undefined,
+      ticketPriceHashrate: 100, maxTickets: 0, hashrateFraction: 1,
+      hashrateAvailable: () => 50_000, // 500 tickets' worth
+      myTickets: () => 0,
+      buy: async (_k: string, _i: number, t: number) => { bought.push(t); return "sig"; },
+      log: () => undefined,
+    } as never);
+    const epoch = { kind: "epoch" as const, iterationId: 1, open: true, totalTickets: 900_000, poolValueUsd: 10_000 };
+    const oneBtc = { kind: "one_btc" as const, iterationId: 3, open: true, totalTickets: 230_000, poolValueUsd: 85_000 };
+    const planned = engine.plannedPoints(oneBtc);
+    expect(planned).toBe(50_000); // at zero opportunity cost the 1-BTC optimum is the whole balance
+    await engine.evaluate(epoch, 20_000);
+    expect(bought[0]).toBe(300); // 50k − 20k reserved = 30k points = 300 tickets, not the old cap of 250
+  });
+});

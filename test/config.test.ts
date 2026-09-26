@@ -17,7 +17,8 @@ describe("config defaults", () => {
     // (bounded, and EXECUTION_MODE-gated so dry mode still sends nothing).
     expect(cfg.VAULT_STRATEGY_ENABLED).toBe(true);
     expect(cfg.VAULT_HASHRATE_PER_TICKET).toBe(100); // measured on devnet
-    expect(cfg.VAULT_MAX_TICKETS).toBeGreaterThan(0);
+    expect(cfg.VAULT_MAX_TICKETS).toBe(0); // uncapped: the marginal-EV rule and the balance bound the buy
+    expect(cfg.VAULT_HASHRATE_FRACTION).toBe(1); // spend what is held; 1-BTC gets an explicit reservation
     expect(cfg.VAULT_HASHRATE_FRACTION).toBeGreaterThanOrEqual(0);
     expect(cfg.VAULT_HASHRATE_FRACTION).toBeLessThanOrEqual(1);
     expect(cfg.VAULT_EPOCH_LATE_SLOTS).toBeGreaterThan(0);

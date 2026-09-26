@@ -94,3 +94,19 @@ describe("breakevenOnCarry — days until the carry grows the holdings back to t
     expect(breakevenOnCarry({ costBasisUsd: 500, btcUsd: 0, rushUsd: 0, usdcUnclaimed: 10, carry: { sats: 0.003, token: 0.0024 } }).days).toBeNull();
   });
 });
+
+describe("holdVsClaim — a BTC claim releases the deferred hashrate", () => {
+  it("counts the released hashrate on the claim side and moves the break-even carry up", () => {
+    const base = { btcUsd: 1_000, rushUsd: 0, carry: { sats: 0.003, token: 0.0024 }, stakingYieldDaily: 0.00224, exitFeeBps: 1000, days: 30 };
+    const without = holdVsClaim(base);
+    const withRelease = holdVsClaim({ ...base, btcClaimReleasesUsd: 150 });
+    expect(withRelease.btc.claimedUsd).toBeCloseTo(without.btc.claimedUsd + 150, 9);
+    expect(withRelease.btc.breakevenCarryDaily).toBeGreaterThan(without.btc.breakevenCarryDaily);
+    // At the break-even carry the legs tie, release included.
+    const tie = holdVsClaim({ ...base, carry: { sats: withRelease.btc.breakevenCarryDaily, token: 0 }, btcClaimReleasesUsd: 150 });
+    expect(tie.btc.holdEdgeUsd).toBeCloseTo(0, 6);
+    // A release worth more than the fee plus 30 days of carry flips the BTC leg to CLAIM.
+    const big = holdVsClaim({ ...base, btcClaimReleasesUsd: 250 });
+    expect(big.btc.holdEdgeUsd).toBeLessThan(0);
+  });
+});

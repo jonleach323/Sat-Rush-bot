@@ -1373,7 +1373,10 @@ export class Orchestrator {
     if (!this.cfg.STREAK_OPTION_VALUE_ENABLED) return out;
     const floor = this.rampFloorPerTileBase();
     const programId = new PublicKey(this.cfg.PROGRAM_ID);
-    const liquidFraction = 1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000;
+    // The deferred hashrate is a BONUS on top of hashrate_earned (SDK:
+    // unclaimed = earned · bps / 10_000, released pro rata by claim_sats), so
+    // everything a play earns is liquid; the old 1 − bps read it as withheld.
+    const liquidFraction = 1;
     const valueUsdPerRawUnit = this.hashrateValueUsdPerRawUnit();
     const cycle = this.cycleMemo;
     const perWalletDeployUsd = cycle
@@ -1414,8 +1417,7 @@ export class Orchestrator {
       streak: miner?.current_streak_count ?? 1,
       deployPerRoundUsd,
       valueUsdPerRawUnit: this.hashrateValueUsdPerRawUnit(),
-      liquidFraction:
-        1 - (this.state.satrushConfig?.unclaimed_hashrate_bps ?? 0) / 10_000,
+      liquidFraction: 1, // deferred hashrate is a bonus on top (SDK), not withheld
       discount: this.cfg.STREAK_OPTION_DISCOUNT,
       // V2: a skip inside the 2-round grace costs nothing, so the option is
       // worth nothing until the round that would actually break the streak.
@@ -2576,6 +2578,7 @@ export class Orchestrator {
       epochLateSlots: this.cfg.VAULT_EPOCH_LATE_SLOTS,
       epochLateFraction: this.cfg.VAULT_EPOCH_LATE_FRACTION,
       oneBtcMinFillBps: this.cfg.VAULT_ONE_BTC_MIN_FILL_BPS,
+      oneBtcReserveFillBps: this.cfg.VAULT_ONE_BTC_RESERVE_FILL_BPS,
       pollMs: 5_000,
       killSwitchEngaged: () => this.bankroll.killSwitchEngaged(),
       postTick: () => this.vaultClaimCrankTick(programId, iterationDurationSlots),
@@ -3625,7 +3628,9 @@ export class Orchestrator {
     // "If I stopped the bot today": the carry alone on what is held — no accrual. The run rate is reported beside it.
     const stopped = { ...rate, btcPerDay: 0, rushPerDay: 0, hashratePerDay: 0, usdNetPerDay: 0, grossPerDay: 0 };
     const projection = projectHolding({ position: pos, rate: stopped, days: 30, carry, btcUsd, rushUsd, rawPerTicket });
-    const verdict = holdVsClaim({ btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, carry, stakingYieldDaily: STAKING_YIELD_DAILY.value, exitFeeBps: this.state.satrushConfig?.vault_exit_fee_bps ?? 1000, days: 30 });
+    // A BTC claim releases the deferred hashrate pro rata; valued at what a raw unit buys in the vaults now.
+    const deferredReleaseUsd = pos.hashrateDeferred * this.hashrateValueUsdPerRawUnit();
+    const verdict = holdVsClaim({ btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, carry, stakingYieldDaily: STAKING_YIELD_DAILY.value, exitFeeBps: this.state.satrushConfig?.vault_exit_fee_bps ?? 1000, days: 30, btcClaimReleasesUsd: deferredReleaseUsd });
     const vp = this.vaultPoolCache;
     const vaults = vp
       ? {
@@ -3655,7 +3660,7 @@ export class Orchestrator {
         return { ...breakevenOnCarry({ costBasisUsd: cost, btcUsd: pos.btcUsd, rushUsd: pos.rushUsd, usdcUnclaimed: Number(pos.usdcUnclaimedBase) / 1e6, carry }), lifetimeDeployedUsd: Number(life.deployedBase) / 1e6, lifetimeReturnedUsd: Number(life.returnedBase) / 1e6 };
       })(),
       apr: { sats: carry.sats * 365, token: carry.token * 365, satsCompounded: Math.pow(1 + carry.sats, 365) - 1, tokenCompounded: Math.pow(1 + carry.token, 365) - 1 },
-      verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value },
+      verdict: { ...verdict, stakingYieldDaily: STAKING_YIELD_DAILY.value, deferredReleaseUsd, deferredHashrate: pos.hashrateDeferred },
       projection: { days: projection.days, btc: projection.btc, rush: projection.rush, tickets: projection.tickets, btcUsd: projection.btcUsd, rushUsd: projection.rushUsd, usdNet: projection.usdNet, gainUsd: projection.gainUsd, carryUsd: projection.carryUsd },
     };
   }

@@ -119,6 +119,13 @@ export interface VaultManagerOpts {
   /** Fraction of the iteration to treat as "late" — the real driver on mainnet. */
   epochLateFraction: number;
   oneBtcMinFillBps: number;
+  /**
+   * From this fill (bps of the trigger) the 1-BTC draw is close enough that
+   * hashrate is held back for it — only when its ticket is worth more than
+   * the epoch's. Below it, the draw is weeks away and hashrate earned by
+   * then covers it, so the epoch gets everything.
+   */
+  oneBtcReserveFillBps?: number | undefined;
   /** Epoch reward curve for ranking vaults by marginal ticket value (V2: equal prizes). */
   epochCurve?: readonly number[] | undefined;
   pollMs: number;
@@ -185,7 +192,10 @@ export class VaultManager {
       eligible.push({ kind: "one_btc", state: state.oneBtc });
     }
     eligible.sort((a, b) => marginalTicketUsd(b, this.opts.epochCurve) - marginalTicketUsd(a, this.opts.epochCurve));
-    for (const v of eligible) await this.evaluate(v.kind, v.state);
+    // Reservation: an epoch buy may not spend what a better, nearly-full 1-BTC
+    // draw would take at its optimum. Replaces a flat "spend half" rule.
+    const reserveFor = this.oneBtcReservation(state);
+    for (const v of eligible) await this.evaluate(v.kind, v.state, v.kind === "epoch" ? reserveFor : null);
 
     // Claim/crank pass — collect resolved winnings (and crank draws if enabled).
     if (this.opts.postTick) {
@@ -197,22 +207,32 @@ export class VaultManager {
     }
   }
 
+  /** The 1-BTC snapshot to reserve for, or null when the epoch should get everything. */
+  private oneBtcReservation(state: VaultReadState): VaultSnapshot | null {
+    const o = state.oneBtc, e = state.epoch;
+    if (!o || !o.open) return null;
+    if (oneBtcFillBps(o.prizeBtc, o.targetBtc) < (this.opts.oneBtcReserveFillBps ?? 5_000)) return null;
+    const oneBtcTicket = marginalTicketUsd({ kind: "one_btc", state: o }, this.opts.epochCurve);
+    const epochTicket = e ? marginalTicketUsd({ kind: "epoch", state: e }, this.opts.epochCurve) : 0;
+    if (!(oneBtcTicket > epochTicket)) return null;
+    return { kind: "one_btc", iterationId: o.iterationId, open: o.open, totalTickets: o.totalTickets, poolValueUsd: o.poolValueUsd };
+  }
+
   private async evaluate(
     kind: VaultSnapshot["kind"],
     s: EpochReadState | OneBtcReadState,
+    reserveFor: VaultSnapshot | null = null,
   ): Promise<void> {
     // Each wallet's engine spends that wallet's own hashrate; they evaluate
     // in turn against the same snapshot (a fleet buy moves the pool by a few
     // tickets, which is below the engine's own noise).
     for (const engine of this.engines) {
       try {
-        await engine.evaluate({
-          kind,
-          iterationId: s.iterationId,
-          open: s.open,
-          totalTickets: s.totalTickets,
-          poolValueUsd: s.poolValueUsd,
-        });
+        const reserved = reserveFor ? engine.plannedPoints(reserveFor) : 0;
+        await engine.evaluate(
+          { kind, iterationId: s.iterationId, open: s.open, totalTickets: s.totalTickets, poolValueUsd: s.poolValueUsd },
+          reserved,
+        );
       } catch (err) {
         this.opts.log({ vault: kind, err: String(err).slice(0, 120), msg: "vault evaluate failed" });
       }

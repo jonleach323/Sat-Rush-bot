@@ -116,12 +116,15 @@ export function renderPnlCard(tab: PnlTab, pnl: PnlSummary, pos: PositionReport 
         ["BTC", `${v.btc.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM"} ${signed(Math.abs(v.btc.holdEdgeUsd)).replace("+", "")}`],
         ["RUSH", `${v.rush.holdEdgeUsd >= 0 ? "HOLD" : "CLAIM+STAKE"} ${signed(Math.abs(v.rush.holdEdgeUsd)).replace("+", "")}`],
         ["", ""],
+        ...(v.deferredHashrate && v.deferredHashrate > 0
+          ? [["BTC claim releases", `${num(v.deferredHashrate)} hashrate ≈ ${money(v.deferredReleaseUsd ?? 0)}`] as const]
+          : []),
         ["carry now", `${pctd(pos.carry.sats)} · ${pctd(pos.carry.token)}`],
         [`claim wins if <  (${v.days}d)`, `${pctd(v.btc.breakevenCarryDaily)} · ${pctd(v.rush.breakevenCarryDaily)}`],
         ["claim wins if <  (1y)", `${pctd(v.breakevenCarryDailyYear.btc)} · ${pctd(v.breakevenCarryDailyYear.rush)}`],
       ];
       return `<b>⚖️ Hold vs claim</b> · ${v.days} days · ${v.holdWins ? "HOLD wins" : "CLAIMING wins"}\n${t}${table(rows)}` +
-        `<i>claim pays the 10% exit fee once; RUSH then stakes at ${pctd(v.stakingYieldDaily)}; the bot never claims by itself</i>`;
+        `<i>claim pays the 10% exit fee once and a BTC claim releases the deferred hashrate (counted in "claim"); RUSH then stakes at ${pctd(v.stakingYieldDaily)}; the bot never claims by itself</i>`;
     }
     default:
       return "";

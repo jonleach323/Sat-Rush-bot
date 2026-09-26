@@ -153,6 +153,9 @@ export interface PositionReport {
     breakevenCarryDailyYear: { btc: number; rush: number };
     holdWins: boolean;
     stakingYieldDaily: number;
+    /** Deferred hashrate a full BTC claim releases, and its USD value (counted on the claim side). */
+    deferredReleaseUsd?: number | undefined;
+    deferredHashrate?: number | undefined;
   };
   projection: { days: number; btc: number; rush: number; tickets: number; btcUsd: number; rushUsd: number; usdNet: number; gainUsd: number; carryUsd: number };
 }

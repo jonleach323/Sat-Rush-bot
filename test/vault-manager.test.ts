@@ -101,7 +101,8 @@ function makeManager(state: VaultReadState, over: Partial<VaultManagerOpts> = {}
     signature: null as string | null,
     skipped: "x" as string | null,
   }));
-  const engine = { evaluate } as unknown as VaultEngine;
+  const plannedPoints = vi.fn((_snap: VaultSnapshot) => 700);
+  const engine = { evaluate, plannedPoints } as unknown as VaultEngine;
   const opts: VaultManagerOpts = {
     engine,
     readState: async () => state,
@@ -113,7 +114,7 @@ function makeManager(state: VaultReadState, over: Partial<VaultManagerOpts> = {}
     log: vi.fn(),
     ...over,
   };
-  return { mgr: new VaultManager(opts), evaluate };
+  return { mgr: new VaultManager(opts), evaluate, plannedPoints };
 }
 
 describe("VaultManager.tick", () => {
@@ -206,6 +207,17 @@ describe("vault ordering by ticket value", () => {
     expect(evaluate).toHaveBeenCalledTimes(2);
     expect(evaluate.mock.calls[0]![0]).toMatchObject({ kind: "one_btc" });
     expect(evaluate.mock.calls[1]![0]).toMatchObject({ kind: "epoch" });
+  });
+
+  it("an epoch buy reserves what a better, nearly-full 1-BTC draw would take; none when the epoch is better", async () => {
+    const { mgr, evaluate } = makeManager(bothReady());
+    await mgr.tick();
+    const epochCall = evaluate.mock.calls.find((c) => (c[0] as VaultSnapshot).kind === "epoch")!;
+    expect((epochCall as unknown[])[1]).toBe(700); // the 1-BTC ticket is worth more: hold back its optimum
+    const richEpoch = makeManager(bothReady({ epoch: epoch({ totalTickets: 1000, poolValueUsd: 40_672 }) }));
+    await richEpoch.mgr.tick();
+    const e2 = richEpoch.evaluate.mock.calls.find((c) => (c[0] as VaultSnapshot).kind === "epoch")!;
+    expect((e2 as unknown[])[1]).toBe(0);
   });
 
   it("flips the order when the epoch pool is the richer one", async () => {
